@@ -1,0 +1,26 @@
+# Rust
+/target
+**/*.rs.bk
+Cargo.lock
+
+# C/C++
+*.o
+*.a
+*.so
+*.dylib
+*.dll
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+dist/
+build/
+.pytest_cache/
+
+# 编辑器 / 工具
+.vscode/
+.idea/
+compile_commands.json
+.cache/

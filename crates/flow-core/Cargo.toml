@@ -1,0 +1,20 @@
+[package]
+name = "flow-core"
+version = "0.1.0"
+description = "数据流图计算框架:Rust 引擎 + C ABI 门面 + C++ 算子"
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "flow_core"
+# lib   : 仓库内 Rust host / 测试直接依赖(不过 FFI)
+# staticlib / cdylib : 供外部 C/C++ host 链接
+crate-type = ["lib", "staticlib", "cdylib"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.9"
+serde_json = "1"
+
+[build-dependencies]
+cc = "1"

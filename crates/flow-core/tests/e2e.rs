@@ -1,0 +1,681 @@
+//! 端到端集成测试:真实建图、真实调用 C++ 算子、真实取输出。
+//!
+//! 这些测试是 MVP 的验收标准,也是回归防线 —— 例如 `pump_step` 曾因
+//! `if let` 临时值把 MutexGuard 拖到块结束而自锁死,`passthrough_pipeline`
+//! 会立刻挂住(测试超时)而不是静默错误。
+
+use flow_core::{Graph, Packet, State, Timestamp};
+
+fn init() {
+    flow_core::register_builtin_kernels();
+}
+
+/// 两级直通:MVP 的核心用例。
+#[test]
+fn passthrough_pipeline() {
+    init();
+    let graph = Graph::from_yaml(
+        r#"
+nodes:
+  - name: "n1"
+    kernel: "PassThroughKernel"
+    input_ports: ["in"]
+    output_ports: ["mid"]
+  - name: "n2"
+    kernel: "PassThroughKernel"
+    input_ports: ["mid"]
+    output_ports: ["out"]
+input_ports: ["in"]
+output_ports: ["out"]
+"#,
+    )
+    .unwrap();
+
+    let poller = graph.add_poller("out").unwrap();
+    graph.start().unwrap();
+    assert_eq!(graph.state(), State::Running);
+
+    let input = graph.input("in").unwrap();
+    let mut got = Vec::new();
+    for i in 0..10i32 {
+        input.send(Packet::new(i).at(Timestamp(i as i64))).unwrap();
+        let p = poller.next().expect("应有输出");
+        got.push((*p.get::<i32>().unwrap(), p.timestamp().0));
+    }
+    assert_eq!(
+        got,
+        (0..10).map(|i| (i, i as i64)).collect::<Vec<_>>(),
+        "值与时间戳都应原样穿过两级直通"
+    );
+
+    graph.close_all_inputs();
+    graph.wait_done().unwrap();
+    assert_eq!(graph.state(), State::Terminated);
+    assert!(poller.next().is_none(), "图结束后 poller 应返回 None");
+}
+
+/// C++ 算子读 options 并产出新包 —— 跨语言按类型传值的完整链路。
+#[test]
+fn cpp_kernel_reads_options_and_types() {
+    init();
+    let graph = Graph::from_yaml(
+        r#"
+nodes:
+  - name: "s"
+    kernel: "ScaleKernel"
+    input_ports: ["in"]
+    output_ports: ["out"]
+    options: { factor: 7 }
+input_ports: ["in"]
+output_ports: ["out"]
+"#,
+    )
+    .unwrap();
+    let poller = graph.add_poller("out").unwrap();
+    graph.start().unwrap();
+
+    // ScaleKernel 的契约声明了 InputSet<int>,所以必须送一个「C++ 认得的 int」:
+    // 用 fnv1a_type_id 算出与 flow.hpp 一致的 type_id。
+    let int_id = flow_core::packet::fnv1a_type_id("i");
+    graph
+        .input("in")
+        .unwrap()
+        .send(Packet::new_interop(6i32, int_id).at(Timestamp(0)))
+        .unwrap();
+    graph.close_all_inputs();
+    graph.wait_done().unwrap();
+
+    let out = poller.try_next().expect("应有输出");
+    assert_eq!(out.type_id(), int_id, "产出应带同样的 int 标识");
+    let ptr = out.foreign_ptr().expect("C++ 产出的包应可取指针");
+    assert_eq!(unsafe { *(ptr as *const i32) }, 42, "6 * factor(7) = 42");
+}
+
+/// 契约声明了具体类型时,类型不符必须报错 —— 而不是让算子按错误类型解读内存。
+#[test]
+fn typed_contract_rejects_mismatch() {
+    init();
+    let graph = Graph::from_yaml(
+        r#"
+nodes:
+  - { name: "s", kernel: "ScaleKernel", input_ports: ["in"], output_ports: ["out"], options: { factor: 2 } }
+input_ports: ["in"]
+output_ports: ["out"]
+"#,
+    )
+    .unwrap();
+    graph.start().unwrap();
+    // Rust 原生包的 type_id 是 NONE,与契约声明的 int 不符
+    graph
+        .input("in")
+        .unwrap()
+        .send(Packet::new(1i32).at(Timestamp(0)))
+        .unwrap();
+    graph.close_all_inputs();
+    let err = graph.wait_done().unwrap_err();
+    let msg = err.to_string();
+    assert!(msg.contains("类型不符"), "{msg}");
+    assert!(msg.contains("输入口"), "报错应指出是哪个口: {msg}");
+}
+
+/// 有状态算子:Sum 在 Close 时吐出总和。
+#[test]
+fn stateful_sum_emits_on_close() {
+    init();
+    let graph = Graph::from_yaml(
+        r#"
+nodes:
+  - name: "pass"
+    kernel: "PassThroughKernel"
+    input_ports: ["in"]
+    output_ports: ["mid"]
+  - name: "sink"
+    kernel: "SinkKernel"
+    input_ports: ["mid"]
+    output_ports: []
+input_ports: ["in"]
+output_ports: ["mid"]
+"#,
+    )
+    .unwrap();
+    let poller = graph.add_poller("mid").unwrap();
+    graph.start().unwrap();
+    let input = graph.input("in").unwrap();
+    for i in 0..3i32 {
+        input.send(Packet::new(i).at(Timestamp(i as i64))).unwrap();
+    }
+    graph.close_all_inputs();
+    graph.wait_done().unwrap();
+
+    let mut n = 0;
+    while poller.try_next().is_some() {
+        n += 1;
+    }
+    assert_eq!(n, 3, "三个包都应到达图输出");
+}
+
+/// 扇出:Split 一进多出,两条分支各自收到每个包(共享 payload,不拷贝)。
+#[test]
+fn fanout_delivers_to_every_consumer() {
+    init();
+    let graph = Graph::from_yaml(
+        r#"
+nodes:
+  - name: "sp"
+    kernel: "SplitKernel"
+    input_ports: ["in"]
+    output_ports: ["a", "b"]
+  - name: "pa"
+    kernel: "PassThroughKernel"
+    input_ports: ["a"]
+    output_ports: ["oa"]
+  - name: "pb"
+    kernel: "PassThroughKernel"
+    input_ports: ["b"]
+    output_ports: ["ob"]
+input_ports: ["in"]
+output_ports: ["oa", "ob"]
+"#,
+    )
+    .unwrap();
+    let pa = graph.add_poller("oa").unwrap();
+    let pb = graph.add_poller("ob").unwrap();
+    graph.start().unwrap();
+    let input = graph.input("in").unwrap();
+    input.send(Packet::new(42i32).at(Timestamp(0))).unwrap();
+    graph.close_all_inputs();
+    graph.wait_done().unwrap();
+
+    let a = pa.try_next().expect("分支 a 应收到");
+    let b = pb.try_next().expect("分支 b 应收到");
+    assert_eq!(a.get::<i32>(), Some(&42));
+    assert_eq!(b.get::<i32>(), Some(&42));
+}
+
+/// 同一端口挂多个 poller:各自独立收一份。
+#[test]
+fn multiple_pollers_on_same_port() {
+    init();
+    let graph = Graph::from_yaml(
+        r#"
+nodes:
+  - { name: "p", kernel: "PassThroughKernel", input_ports: ["in"], output_ports: ["out"] }
+input_ports: ["in"]
+output_ports: ["out"]
+"#,
+    )
+    .unwrap();
+    let p1 = graph.add_poller("out").unwrap();
+    let p2 = graph.add_poller("out").unwrap();
+    graph.start().unwrap();
+    graph
+        .input("in")
+        .unwrap()
+        .send(Packet::new(1i32).at(Timestamp(0)))
+        .unwrap();
+    graph.close_all_inputs();
+    graph.wait_done().unwrap();
+    assert!(p1.try_next().is_some(), "poller 1 应收到");
+    assert!(p2.try_next().is_some(), "poller 2 也应独立收到一份");
+}
+
+// ---------------------------------------------------------------- 校验与错误路径
+
+#[test]
+fn rejects_cycle() {
+    init();
+    let err = Graph::from_yaml(
+        r#"
+nodes:
+  - { name: "a", kernel: "PassThroughKernel", input_ports: ["y"], output_ports: ["x"] }
+  - { name: "b", kernel: "PassThroughKernel", input_ports: ["x"], output_ports: ["y"] }
+"#,
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("成环"), "{err}");
+}
+
+#[test]
+fn rejects_duplicate_producer() {
+    init();
+    let err = Graph::from_yaml(
+        r#"
+nodes:
+  - { name: "a", kernel: "PassThroughKernel", input_ports: ["in"], output_ports: ["dup"] }
+  - { name: "b", kernel: "PassThroughKernel", input_ports: ["in"], output_ports: ["dup"] }
+input_ports: ["in"]
+"#,
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("多个生产者"), "{err}");
+}
+
+#[test]
+fn rejects_unconnected_input() {
+    init();
+    let err = Graph::from_yaml(
+        r#"
+nodes:
+  - { name: "a", kernel: "PassThroughKernel", input_ports: ["nowhere"], output_ports: ["out"] }
+"#,
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("找不到生产者"), "{err}");
+}
+
+#[test]
+fn rejects_name_clash_between_graph_input_and_node_output() {
+    init();
+    let err = Graph::from_yaml(
+        r#"
+nodes:
+  - { name: "a", kernel: "PassThroughKernel", input_ports: ["in"], output_ports: ["in"] }
+input_ports: ["in"]
+"#,
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("名字冲突"), "{err}");
+}
+
+#[test]
+fn rejects_source_node() {
+    init();
+    let err = Graph::from_yaml(
+        r#"
+nodes:
+  - { name: "src", kernel: "PassThroughKernel", input_ports: [], output_ports: ["out"] }
+"#,
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("没有输入口"), "{err}");
+}
+
+#[test]
+fn rejects_unknown_executor() {
+    init();
+    let err = Graph::from_yaml(
+        r#"
+nodes:
+  - { name: "a", kernel: "PassThroughKernel", input_ports: ["in"], output_ports: ["out"], executor: "ghost" }
+input_ports: ["in"]
+"#,
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("未定义的 executor"), "{err}");
+}
+
+#[test]
+fn rejects_unregistered_kernel_and_lists_available() {
+    init();
+    let err = Graph::from_yaml(
+        r#"
+nodes:
+  - { name: "a", kernel: "NoSuchKernel", input_ports: ["in"], output_ports: ["out"] }
+input_ports: ["in"]
+"#,
+    )
+    .unwrap_err();
+    let msg = err.to_string();
+    assert!(msg.contains("未注册"), "{msg}");
+    assert!(
+        msg.contains("PassThroughKernel"),
+        "报错应列出可用算子以指导用户: {msg}"
+    );
+}
+
+// ---------------------------------------------------------------- 状态机
+
+#[test]
+fn send_before_start_is_state_error() {
+    init();
+    let graph = simple_graph();
+    let err = graph
+        .input("in")
+        .unwrap()
+        .send(Packet::new(1i32).at(Timestamp(0)))
+        .unwrap_err();
+    assert_eq!(err.code(), flow_core::status::code::STATE, "{err}");
+}
+
+#[test]
+fn double_start_is_state_error() {
+    init();
+    let graph = simple_graph();
+    graph.start().unwrap();
+    let err = graph.start().unwrap_err();
+    assert_eq!(err.code(), flow_core::status::code::STATE, "{err}");
+}
+
+#[test]
+fn add_poller_after_start_is_rejected() {
+    init();
+    let graph = simple_graph();
+    graph.start().unwrap();
+    // start 之后再挂 poller 会漏掉已产出的包,故直接拒绝
+    assert!(graph.add_poller("out").is_err());
+}
+
+#[test]
+fn send_after_close_is_closed_error() {
+    init();
+    let graph = simple_graph();
+    graph.start().unwrap();
+    let input = graph.input("in").unwrap();
+    graph.close_all_inputs();
+    let err = input.send(Packet::new(1i32).at(Timestamp(0))).unwrap_err();
+    assert_eq!(err.code(), flow_core::status::code::CLOSED, "{err}");
+}
+
+#[test]
+fn unset_timestamp_on_graph_input_is_rejected() {
+    init();
+    let graph = simple_graph();
+    graph.start().unwrap();
+    let err = graph
+        .input("in")
+        .unwrap()
+        .send(Packet::new(1i32)) // 未调 .at()
+        .unwrap_err();
+    assert!(err.to_string().contains("时间戳"), "{err}");
+}
+
+#[test]
+fn timestamps_must_be_strictly_increasing() {
+    init();
+    let graph = simple_graph();
+    graph.start().unwrap();
+    let input = graph.input("in").unwrap();
+    input.send(Packet::new(1i32).at(Timestamp(5))).unwrap();
+    // 同一时间戳或回退都应被拒 —— 乱序会让下游行为诡异
+    let err = input.send(Packet::new(2i32).at(Timestamp(5))).unwrap_err();
+    assert!(err.to_string().contains("递增"), "{err}");
+    let err = input.send(Packet::new(3i32).at(Timestamp(4))).unwrap_err();
+    assert!(err.to_string().contains("递增"), "{err}");
+}
+
+#[test]
+fn unknown_port_names_are_not_found() {
+    init();
+    let graph = simple_graph();
+    assert_eq!(
+        graph.input("ghost").unwrap_err().code(),
+        flow_core::status::code::NOT_FOUND
+    );
+    assert_eq!(
+        graph.add_poller("ghost").unwrap_err().code(),
+        flow_core::status::code::NOT_FOUND
+    );
+}
+
+#[test]
+fn cancel_makes_wait_done_report_cancelled() {
+    init();
+    let graph = simple_graph();
+    graph.start().unwrap();
+    graph.cancel();
+    let err = graph.wait_done().unwrap_err();
+    assert_eq!(err.code(), flow_core::status::code::CANCELLED, "{err}");
+}
+
+// ---------------------------------------------------------------- 内省
+
+#[test]
+fn introspection_reports_topology() {
+    init();
+    let graph = simple_graph();
+    assert_eq!(graph.node_count(), 1);
+    assert_eq!(graph.node_name(0), Some("p"));
+    assert_eq!(graph.input_port_names(), vec!["in"]);
+    assert_eq!(graph.output_port_names(), vec!["out"]);
+    assert_eq!(graph.queue_depth("in"), Some(0));
+    assert!(graph.dump().contains("node"), "dump 应含节点表");
+}
+
+#[test]
+fn node_stats_track_processing() {
+    init();
+    let graph = simple_graph();
+    let poller = graph.add_poller("out").unwrap();
+    graph.start().unwrap();
+    let input = graph.input("in").unwrap();
+    for i in 0..3i32 {
+        input.send(Packet::new(i).at(Timestamp(i as i64))).unwrap();
+        poller.next().unwrap();
+    }
+    let st = graph.node_stats(0).unwrap();
+    assert_eq!(st.node_name, "p");
+    assert_eq!(st.kernel_name, "PassThroughKernel");
+    assert_eq!(st.processed, 3);
+    assert_eq!(st.errors, 0);
+    assert!(!st.running, "回调已结束,不应显示 running");
+}
+
+#[test]
+fn global_watermark_blocks_input_when_exceeded() {
+    init();
+    // 上限 2 个在途包,且下游不消费(sink 无输出口但会消费;这里用未连接的中间边制造积压)
+    let graph = Graph::from_yaml(
+        r#"
+nodes:
+  - { name: "p", kernel: "PassThroughKernel", input_ports: ["in"], output_ports: ["out"] }
+input_ports: ["in"]
+output_ports: ["out"]
+max_queued_packets: 2
+"#,
+    )
+    .unwrap();
+    graph.start().unwrap(); // 不挂 poller,输出包不会被取走
+    let input = graph.input("in").unwrap();
+    // 前两个能进;之后水位到顶,try_send 应拒绝而不是无限增长
+    let mut sent = 0;
+    for i in 0..10i32 {
+        if input
+            .try_send(Packet::new(i).at(Timestamp(i as i64)))
+            .is_err()
+        {
+            break;
+        }
+        sent += 1;
+    }
+    assert!(sent < 10, "全局水位必须能拦住无限增长,实际送进 {sent} 个");
+}
+
+// ---------------------------------------------------------------- 辅助
+
+fn simple_graph() -> Graph {
+    Graph::from_yaml(
+        r#"
+nodes:
+  - { name: "p", kernel: "PassThroughKernel", input_ports: ["in"], output_ports: ["out"] }
+input_ports: ["in"]
+output_ports: ["out"]
+"#,
+    )
+    .unwrap()
+}
+
+// ---------------------------------------------------------------- 兜底关流与 side packet
+
+/// 图被直接丢弃(未走 wait_done)时,已 open 的算子仍必须收到 Close ——
+/// 否则算子里申请的资源(文件、连接、GPU 上下文)不会被释放。
+#[test]
+fn dropping_graph_still_closes_opened_kernels() {
+    use std::ffi::{c_char, c_void, CStr};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static CLOSED: AtomicUsize = AtomicUsize::new(0);
+    unsafe extern "C" fn sink(_u: *mut c_void, _lv: i32, msg: *const c_char) {
+        let s = unsafe { CStr::from_ptr(msg) }.to_string_lossy();
+        // SinkKernel::Close 会打这条
+        if s.contains("共处理") {
+            CLOSED.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    init();
+    flow_core::ffi::flow_set_log_callback(Some(sink), std::ptr::null_mut());
+    {
+        let graph = Graph::from_yaml(
+            r#"
+nodes:
+  - { name: "s", kernel: "SinkKernel", input_ports: ["in"], output_ports: [] }
+input_ports: ["in"]
+"#,
+        )
+        .unwrap();
+        graph.start().unwrap();
+        graph
+            .input("in")
+            .unwrap()
+            .send(Packet::new(1i32).at(Timestamp(0)))
+            .unwrap();
+        // 故意不 close/wait,直接丢弃
+    }
+    assert_eq!(
+        CLOSED.load(Ordering::SeqCst),
+        1,
+        "图销毁时必须补调算子的 Close"
+    );
+    flow_core::ffi::flow_set_log_callback(None, std::ptr::null_mut());
+}
+
+/// 算子声明的必需 side packet 未注入时,start 阶段就该报错并指出是哪个节点要它。
+#[test]
+fn missing_required_side_packet_is_rejected_at_start() {
+    init();
+    let graph = Graph::from_yaml(
+        r#"
+nodes:
+  - name: "norm"
+    kernel: "NormalizeKernel"
+    input_ports: ["in"]
+    output_ports: ["out"]
+    options: { scale: 0.5 }
+input_ports: ["in"]
+output_ports: ["out"]
+"#,
+    )
+    .unwrap();
+    let err = graph.start().unwrap_err();
+    let msg = err.to_string();
+    assert!(msg.contains("calibration"), "应指出缺哪个: {msg}");
+    assert!(msg.contains("norm"), "应指出是哪个节点要它: {msg}");
+}
+
+/// 注入之后即可正常启动,且算子能读到。
+#[test]
+fn side_packet_is_visible_to_kernel() {
+    init();
+    let graph = Graph::from_yaml(
+        r#"
+nodes:
+  - name: "norm"
+    kernel: "NormalizeKernel"
+    input_ports: ["in"]
+    output_ports: ["out"]
+    options: { scale: 0.5, mean: [1.0, 2.0] }
+input_ports: ["in"]
+output_ports: ["out"]
+"#,
+    )
+    .unwrap();
+    graph
+        .set_side_packet("calibration", Packet::new(vec![1.0f64, 2.0]))
+        .unwrap();
+    graph.start().unwrap();
+    // start 之后再注入应被拒
+    assert!(graph.set_side_packet("late", Packet::new(0u8)).is_err());
+    graph.close_all_inputs();
+    graph.wait_done().unwrap();
+}
+
+/// 必需参数缺失时,算子在 Open 里失败并带上可读原因。
+#[test]
+fn missing_required_option_fails_with_reason() {
+    init();
+    let graph = Graph::from_yaml(
+        r#"
+nodes:
+  - name: "norm"
+    kernel: "NormalizeKernel"
+    input_ports: ["in"]
+    output_ports: ["out"]
+input_ports: ["in"]
+output_ports: ["out"]
+"#,
+    )
+    .unwrap();
+    graph
+        .set_side_packet("calibration", Packet::new(0u8))
+        .unwrap();
+    // options.scale 未配 —— NormalizeKernel 用 RequireOption 读它
+    let err = graph.start().unwrap_err();
+    let msg = err.to_string();
+    assert!(msg.contains("scale"), "应指出是哪个参数: {msg}");
+    assert!(msg.contains("norm"), "应带节点名: {msg}");
+}
+
+/// 时间戳单调性必须**独立记录参照值**:队列排空后回退的时间戳同样要被拒。
+/// (曾经的实现只跟队列里剩下的包比较,一排空校验就失效了。)
+#[test]
+fn timestamp_monotonicity_survives_queue_drain() {
+    init();
+    let graph = simple_graph();
+    let poller = graph.add_poller("out").unwrap();
+    graph.start().unwrap();
+    let input = graph.input("in").unwrap();
+
+    input.send(Packet::new(1i32).at(Timestamp(100))).unwrap();
+    // 把队列彻底排空 —— 此后若参照值来自队列,就没有参照可比了
+    assert!(poller.next().is_some());
+    assert_eq!(graph.queue_depth("in"), Some(0), "队列应已排空");
+
+    let err = input.send(Packet::new(2i32).at(Timestamp(50))).unwrap_err();
+    assert!(
+        err.to_string().contains("递增"),
+        "排空后仍须拒绝回退: {err}"
+    );
+    let err = input
+        .send(Packet::new(3i32).at(Timestamp(100)))
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("递增"),
+        "排空后仍须拒绝重复: {err}"
+    );
+    // 更大的时间戳仍可继续
+    input.send(Packet::new(4i32).at(Timestamp(101))).unwrap();
+}
+
+/// 无人消费的端口会静默丢包 —— 引擎必须出声告警。
+#[test]
+fn warns_about_unconsumed_ports() {
+    use std::ffi::{c_char, c_void, CStr};
+    use std::sync::Mutex;
+
+    static WARNINGS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    unsafe extern "C" fn sink(_u: *mut c_void, level: i32, msg: *const c_char) {
+        if level == 1 {
+            let s = unsafe { CStr::from_ptr(msg) }
+                .to_string_lossy()
+                .into_owned();
+            WARNINGS.lock().expect("锁中毒").push(s);
+        }
+    }
+
+    init();
+    WARNINGS.lock().expect("锁中毒").clear();
+    flow_core::ffi::flow_set_log_callback(Some(sink), std::ptr::null_mut());
+    let _graph = Graph::from_yaml(
+        r#"
+nodes:
+  - { name: "p", kernel: "PassThroughKernel", input_ports: ["in"], output_ports: ["nowhere"] }
+input_ports: ["in", "unused"]
+"#,
+    )
+    .unwrap();
+    flow_core::ffi::flow_set_log_callback(None, std::ptr::null_mut());
+
+    let w = WARNINGS.lock().expect("锁中毒").join("\n");
+    assert!(w.contains("unused"), "未被消费的图输入口应告警: {w}");
+    assert!(w.contains("nowhere"), "产出无人接收的输出口应告警: {w}");
+}

@@ -1,0 +1,953 @@
+# lmflow 设计方案
+
+> 状态:**MVP 已跑通**。Rust 引擎(阶段 B)、C ABI、C++ 糖层、10 个算子、113 个测试全部就位;
+> Rust / C++ 两种宿主的 hello_world 都能输出正确结果。Python 绑定(pybind11)待做。
+> 定位:一个数据流图计算框架 —— 把计算描述成**有向图**,节点是**算子(Kernel)**,
+> 边上流动**带时间戳的数据包(Packet)**。
+> 组成:**Rust 引擎 + C ABI 门面 + C++/Python 算子**。
+> 核心概念:`Graph`(图)、`Node`(节点)、`Kernel`(算子)、`Edge/Port`(边/端口)、
+> `Packet`(数据包)、`Contract`(端口类型契约)、`Poller/Observer`(输出的拉/推)。
+
+---
+
+## 0. 目标与范围
+
+### 0.1 做什么
+
+- 引擎(调度、线程、边队列、拓扑、YAML 解析)用 **Rust** 实现。
+- 对外**只暴露一层 C ABI**(`include/flow.h`)。这是唯一的稳定接口。
+- 算子可用 **C++**(经 `flow.hpp` 糖层)或 **Python**(经 pybind11)编写,YAML 中平等引用。
+- 图的拓扑与参数由 **YAML** 描述,含每节点的 `options`。
+
+### 0.2 阶段划分
+
+| 阶段 | 内容 |
+|---|---|
+| **B(当前)** | 简化调度:每条边一个 FIFO;节点就绪 = 每个输入口至少有一个包。时间戳只透传。 |
+| **A(后续)** | 多输入口的时间戳同步对齐、bound 传播、`process_timestamps` 模式、back-edge、`max_in_flight > 1` 的并行 context 池。 |
+
+**B 阶段明确不做**(且 `init` 时会因 `FLOW_ERR_UNSUPPORTED` 报错,**不静默忽略**):
+`max_in_flight > 1`、back-edge、零输入口节点(source)。
+
+### 0.3 非目标
+
+- 不做分布式 / 跨进程;单进程内多线程。
+- 不做 GPU 内存空间(`FlowBuffer.device` 已预留字段,但本版本只有 CPU)。
+- 不支持图跑完后重跑(`Terminated` 之后只能 `free`)。
+
+---
+
+## 1. 决策记录(ADR)
+
+已锁定的决策及其**理由** —— 避免重复讨论。
+
+| # | 决策 | 理由 |
+|---|---|---|
+| 1 | **只暴露 C ABI**,不提供 C++ 类接口 | 模板/`std::any` 无法过 FFI;C ABI 稳定、可被任意语言绑定 |
+| 2 | **算子用 C++/Python,引擎用 Rust** | 保留既有 C++ 算子资产;引擎侧拿到 Rust 的并发安全收益 |
+| 3 | **走阶段 B 先行** | 时间戳同步是最难的一块,先打通垂直切片再补 |
+| 4 | **cargo 主导构建**;Python 部分破例用 CMake | 单一工具链最省事;但 pybind11 的 wheel 必须有 C++ 构建步骤 |
+| 5 | **Python 绑定用 pybind11**(非 PyO3) | 场景要 OpenCV:`cv::Mat` ↔ numpy 零拷贝是 pybind11 最成熟的路径 |
+| 6 | **引擎不解释 payload**,只搬引用 | 任意数据类型都能流动;张量、图像只是「又一个类型」,不该做成引擎的一等概念 |
+| 7 | **内建类型只为跨语言存在**,对引擎无特权 | 跨语言时对方无法解读不透明 C++ 对象,故需一套双方都认识的内存约定 |
+| 8 | **`FlowBuffer` 一个 N 维描述符统管**图像/张量/音频 | 避免 IMAGE/TENSOR/AUDIO 各设一种类型;语义对齐 numpy buffer protocol |
+| 9 | **Python 算子只收发内建类型** | 保持 payload 语言中立。否则 Python 算子的输出接到 C++ 算子上会得到无法解读的指针,且只在运行时暴露;另有 GIL-in-drop 死锁风险 |
+| 10 | **省拷贝用 CoW**(`take_input` + `make_mutable`) | 线性管线全程零拷贝;被扇出共享时才复制,从而不污染其它分支 |
+| 11 | **只有图输入口限流,内部边不对生产者背压** | 内部边设硬上界会让「扇出后汇合」的合法 DAG 死锁(详见 §7.5) |
+| 12 | **手写 `flow.h` 为权威 + 布局一致性测试**(不用 cbindgen) | header 是给用户看的文档,可读性优先;用 `static_assert` + Rust 测试钉死布局,拿到等价安全性 |
+| 13 | **`flow.hpp` 糖层保留**,但不属于 ABI | 让 C++ 算子写法自然;模板便利全部在用户 TU 内 monomorphize,不过界 |
+| 14 | **OpenCV 不进 core**,隔离到可选头 `flow_cv.hpp` | 引擎与 `flow.h`/`flow.hpp` 零图像库依赖,没装 OpenCV 也能编译全部 core |
+| 15 | **`FlowBuffer` 预留 `flags`/`device`/`reserved`** | 一次性预留,未来加字段(最可能是 GPU 内存空间)不破 ABI |
+| 16 | **节点默认跑在宿主主线程**,并发是显式 opt-in | 默认零并发、执行顺序确定、断点调试直观;副产品:Python 算子默认无 GIL 争抢 |
+| 17 | **端口扁平序号 = YAML 声明顺序** | 常见做法是按 tag 字典序分组,混用「有标签/无标签」端口时 `Index(0)` 拿到的不是写的第一个 —— 真实陷阱,故分道 |
+| 18 | **引入 side packet(常量输入)** | `options` 只能给标量/JSON,无法交付「一个已初始化好的模型」这类对象 |
+| 19 | **输入策略做成节点级可插拔**(`sync`/`immediate`/`fixed_size`) | 实时丢帧与(A 阶段的)时间戳对齐共用同一扩展点;`fixed_size` 同时是「内部边无界」的配套内存约束 |
+| 20 | **全局水位兜底**,超限时转化为图输入口背压 | 内部边无界的直接后果:100 帧 × 6 条边 × 6MB ≈ 3.6GB。只在图输入口刹车不会重新引入 diamond 死锁 |
+| 21 | **节点级统计 + watchdog**,但**不做抢占中断** | 卡死必须能定位到具体节点;而中断一个正在跑的算子无法安全实现(同 `cancel` 语义),故只做可观测 |
+| 22 | **`type_id` = FNV-1a(修饰名)**,而非 `typeid().hash_code()` | 后者实现定义、不保证跨动态库一致;而本项目 C++ 算子在 core、Python 绑定在另一 `.so`,天然跨产物。事后再改需全量重编,故一开始就用稳定方案 + `FLOW_DECLARE_TYPE_NAME` 逃生口 |
+| 23 | **时间戳单调性:图输入口强制校验,内部边仅 debug 构建校验** | 外部数据进入的唯一门校验一次即可挡住绝大多数乱序;内部边逐包校验是热路径开销,且算子产出乱序属算子 bug,用 `debug_assertions` 捕获即可 |
+| 24 | **不做 stream header**,用 side packet 覆盖 | header 会引入「流上的第二种数据」及其生命周期问题;side packet 已能表达「整条流不变的属性」。少一个概念优于多一个 |
+| 25 | **不做程序化构图 API**,动态图由宿主生成 YAML | 保持单一真相源;builder API 是一大片表面积,应由真实需求驱动而非预先设计 |
+| 26 | **不启用 `FLOW_TYPE_HOST_OBJECT`** | 见 ADR #9;若将来启用,须配套「原生对象端口不得接异语言算子」的拓扑校验 |
+| 27 | **子图(subgraph)推迟,但预留扩展点** | node 的 `type:` 字段语义预留给子图名,遇未知值报 `FLOW_ERR_UNSUPPORTED`;将来加子图不必改 ABI |
+
+---
+
+## 2. 分层架构
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│  宿主(驱动图):Rust / C++ / Python                                │
+│    new → init_from_yaml → add_poller → start                      │
+│    loop { input.send(pkt); poller.next() } → close → wait_done    │
+├─────────────────────── C ABI (include/flow.h) ────────────────────┤ ← unsafe 边界①
+│  Rust 引擎 (crates/flow-core, lib + staticlib + cdylib)           │
+│    graph(索引 arena) · scheduler/executor · edge(FIFO)            │
+│    packet · timestamp · config(YAML) · registry · poller          │
+├─────────────────────── C ABI (回调) ──────────────────────────────┤ ← unsafe 边界②
+│  算子:C++(flow.hpp 糖层)   |   Python(pybind11 蹦床)            │
+│        process 内调 flow_ctx_* 读输入 / 发输出                     │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+- 边界①:宿主 → 引擎(Rust 提供 `extern "C"` 函数)。
+- 边界②:引擎 → 算子(算子侧提供 vtable),算子回读 → 引擎(`flow_ctx_*`)。
+- **两个方向都在 C ABI 上,没有 C++ 模板过界。**
+
+---
+
+## 3. 数据模型
+
+### 3.1 Packet 与所有权
+
+```rust
+pub enum Payload {
+    Native(Box<dyn Any + Send + Sync>),  // Rust 侧构造
+    Builtin(BuiltinPayload),              // 引擎分配:BYTES / BUFFER / 标量 / STR
+    Foreign(ForeignPayload),              // 外部构造:裸指针 + drop_fn
+}
+
+pub struct ForeignPayload {
+    ptr: *mut c_void,
+    drop_fn: Option<unsafe extern "C" fn(*mut c_void)>,
+    type_id: u64,
+}
+impl Drop for ForeignPayload {
+    fn drop(&mut self) { /* 调一次 drop_fn */ }
+}
+// 断言:同一 payload 任一时刻只被单线程访问;drop 可能发生在别的线程。
+// 前提由「节点独占令牌」保证(§7.0 规则 R3)。这是本设计唯一的 Send/Sync unsafe 断言。
+unsafe impl Send for ForeignPayload {}
+unsafe impl Sync for ForeignPayload {}
+
+#[derive(Clone)]
+pub struct Packet {
+    data: Option<Arc<Payload>>,   // None = 空包(仅时间戳,用于 bound / 关流)
+    ts:   Timestamp,
+}
+```
+
+跨界表示 `FlowPacket{payload, type_id, timestamp, owner, drop_fn}`(40 字节),
+**三种所有权语义由 `owner` 区分**:
+
+| 场景 | `owner` | 语义 |
+|---|---|---|
+| 宿主/算子新建 | NULL | 提交(`send`/`emit`)后引擎接管;不提交须 `flow_packet_drop` |
+| 引擎借出(`flow_ctx_input`、observer 回调) | 非空 | **借用**,不得 drop、不得跨回调留存 |
+| 引擎移交(`poller_next`、内建构造、`clone`) | 非空 | **调用方持有一份引用**,须 `emit`/`send` 或 `flow_packet_drop` |
+
+多路分发(`Forward`/扇出)= `Arc::clone`,**不拷贝数据**。
+
+### 3.2 数据类型模型:两条路
+
+**引擎对 payload 完全不作解释**,只搬引用、只按 `type_id` 做相等性校验。因此任意类型都能流动。
+
+1. **任意自定义类型**(推荐给纯 C++ / 纯 Rust 管线)
+   调用方自备指针与 `drop_fn`,`type_id` 自取(C++ 糖层默认 `typeid` 哈希)。
+   `cv::Mat`、自定义结构体、模型张量对象一视同仁,引擎零参与。
+2. **内建类型**(为**跨语言**而设)
+   `BYTES` / `I64` / `F64` / `BOOL` / `STR` / `BUFFER`。由引擎分配、复制、释放,
+   免去在别的语言里构造 `drop_fn`;`type_id` 为约定常量,跨语言稳定。
+   **对引擎没有特权**,只是一套双方都认识的内存约定。
+
+> `type_id` 的现实限制:`typeid(T).hash_code()` 跨编译器/跨动态库/`-fno-rtti` 不保证一致。
+> 算子与宿主分属不同编译产物时应改用稳定方案(对类型名做 FNV-1a)。糖层已把生成逻辑
+> 收敛到单一函数 `flow::TypeId<T>()`,改一处即可。
+
+### 3.3 FlowBuffer:一个描述符统管所有大块数值数据
+
+```c
+typedef struct {
+  void*   data;                    /* 首字节 */
+  int64_t shape[8];                /* 各维元素数 */
+  int64_t strides[8];              /* 各维**字节**步长 */
+  int32_t ndim, dtype;
+  uint32_t flags; int32_t device;  /* READONLY 标记 / 内存空间 */
+  int64_t reserved[2];             /* ABI 预留,置零 */
+} FlowBuffer;                      /* 168 字节,布局由 static_assert 钉死 */
+```
+
+| 用途 | 表示 |
+|---|---|
+| 灰度图 | `ndim=2, [H,W]` |
+| 彩色图 | `ndim=3, [H,W,C]`(`cv::Mat` / numpy HWC) |
+| 推理张量 | `ndim=4, [N,C,H,W]` |
+| 音频 | `ndim=2, [帧数, 声道]` |
+
+语义与 numpy buffer protocol 一致(strides 以字节计,不要求连续),所以
+numpy 与 `cv::Mat` 都能**零拷贝**包住同一块内存。
+
+### 3.4 引用与写时复制(省拷贝)
+
+payload 默认**不可变共享**。需要就地改写时用 CoW —— 语义等同 `Arc::make_mut`。
+
+**关键点(极易写错)**:算子拿到的输入包是**借用**,引擎的 `Context` 自己还持一份引用。
+若直接 `clone` + `make_mutable`,引用数 ≥ 2,**CoW 必然复制**,省拷贝的意图落空。
+必须先把包从输入槽**取走**:
+
+```cpp
+flow::Packet p = cc.TakeInput(0);          // ← 关键:移出输入槽
+FlowBuffer buf{};
+if (FlowStatus st = p.MakeMutableBuffer(&buf)) return st;   // 独占 → 零拷贝
+// ...原地写 buf.data...
+cc.Emit(0, std::move(p));
+```
+
+- 线性管线(本节点是唯一消费者)→ 全程零拷贝。
+- 上游是 `Split` 扇出、数据被别的分支共享 → 才复制一份,**因此不会污染对方**。
+  这同时消除了「共享 payload 被就地改写」的数据竞争。
+
+**CoW 生效的不变量(必须写进代码注释)**:
+> **引擎在投递数据包之后,不得再保留任何额外引用。**
+> 否则引用数恒 ≥ 2,CoW 永远退化成全量拷贝 —— 而且不报错,只是变慢。
+> (例如「为推进时间戳边界而缓存最后一个包」这类实现会静默破坏它。)
+
+限制:CoW 只支持**引擎持有的内建 payload**(`BUFFER`/`BYTES`/标量)。自定义 payload
+引擎只有 `drop_fn`、无从复制,返回 `FLOW_ERR_INVALID_ARG`(该情形自行拷贝)。
+要通用化需给 `FlowPacket` 增加 `clone_fn` 字段 —— 会改 ABI 布局,本版本不做。
+
+### 3.5 Timestamp
+
+```
+UNSET < UNSTARTED < PRE_STREAM < MIN … MAX < POST_STREAM < ONE_OVER_POST_STREAM < DONE
+                                 └ 普通数据区间 ┘
+```
+`PRE_STREAM`/`POST_STREAM` 是流首/流尾的单包位置;`DONE` 表示端口已关且不再有数据;
+`UNSET` 为默认值。算术用**饱和运算**,哨兵附近不会溢出回绕。
+已实现于 `crates/flow-core/src/timestamp.rs`(含 9 个单测)。
+
+> 提交时 `timestamp == UNSET` 的包,引擎自动继承当前 `input_timestamp`(与 `Forward` 一致);
+> 在图输入口上提交 `UNSET` 视为非法。
+
+### 3.6 Side packet:常量输入
+
+整个 run 期间**不变的任意对象**,由宿主在启动前注入,算子按名字读取。
+
+| | `options` | side packet |
+|---|---|---|
+| 来源 | YAML | 宿主运行前注入 |
+| 内容 | 标量 / JSON | **任意 payload**(含自定义类型) |
+| 典型 | 阈值、尺寸、开关 | 已加载的模型句柄、标定矩阵、查找表、词表、外部资源上下文 |
+
+**没有 side packet 就无法把「一个已经初始化好的模型」交给算子** —— `options` 做不到,
+这是引入它的直接原因。
+
+```c
+FlowStatus flow_graph_set_side_packet(FlowGraph*, const char* name, FlowPacket pkt);  /* start 之前 */
+FlowPacket flow_ctx_side_packet(const FlowContext*, const char* name);                /* 借用,勿 drop */
+bool       flow_ctx_has_side_packet(const FlowContext*, const char* name);
+```
+
+- 必须在 `start` 之前设置,之后返回 `FLOW_ERR_STATE`;传入即移交所有权,引擎持有到 graph 释放。
+- 算子侧读到的是**借用**,不得 `drop`。
+
+---
+
+## 4. 对外 C 接口
+
+> **权威定义见 `include/flow.h`**(手写,已通过 `gcc -std=c11 -Wall -Wextra` 与
+> `g++ -std=c++17` 双向验证)。本节只列分组,避免文档与 header 双份漂移。
+
+| 分组 | 主要函数 |
+|---|---|
+| ABI / 诊断 | `flow_abi_version` `flow_last_error` `flow_set_log_callback` |
+| Packet 通用 | `flow_packet_drop` `flow_packet_clone` |
+| 内建类型 | `flow_packet_from_bytes/i64/f64/bool/str` + 对应 `as_*` |
+| 缓冲 | `flow_packet_new_buffer` `flow_packet_from_buffer` `flow_packet_as_buffer` `flow_dtype_size` |
+| 写时复制 | `flow_packet_make_mutable_buffer` `flow_packet_make_mutable_bytes` |
+| 算子注册 | `flow_register_kernel` + `FlowKernelVTable`(48 字节) |
+| Contract | `flow_contract_num_inputs/outputs` `…_input_id(tag)` `…_set_any` `…_set_type` |
+| Context 数据 | `flow_ctx_input` `…_input_payload` `…_take_input` `…_emit` `…_forward` `…_set_next_ts_bound` |
+| Context 端口 | `flow_ctx_input_id(tag,idx)` `…_input_index(name)` `…_input_name` `…_num_inputs/outputs` |
+| Context 参数 | `flow_ctx_option_i64/f64/bool/str` + `flow_ctx_options_json` |
+| 图 | `flow_graph_new` `…_init_from_yaml` `…_start` `…_free` |
+| 输入 | `flow_graph_input` → `flow_input_send/try_send/close`;便捷 `flow_graph_add_packet` |
+| 输出 | `flow_graph_add_poller(_ex)` → `flow_poller_next/try_next/next_timeout`;`flow_graph_observe(_ex)` |
+| 终止 | `flow_graph_cancel` `…_close_input` `…_close_all_inputs` `…_wait_done` `…_wait_done_timeout` |
+| Side packet | `flow_graph_set_side_packet` `flow_ctx_side_packet` `flow_ctx_has_side_packet` |
+| 类型名(诊断) | `flow_register_type_name` `flow_type_name` |
+| 空闲 / 暂停 | `flow_graph_wait_until_idle` `…_timeout` `flow_graph_pause` `flow_graph_resume` |
+| 算子自我信息 | `flow_ctx_node_name` `…_kernel_name` `flow_ctx_log` `flow_ctx_set_error` `flow_ctx_close_reason` `flow_ctx_counter_add` |
+| 参数(增强) | 点号路径嵌套、`flow_ctx_require_option_*`(必需参数)、`flow_ctx_option_*_array`(数组) |
+| 全局水位 | `flow_graph_total_queued` `…_total_queued_bytes`;YAML `max_queued_packets/bytes` |
+| 统计 | `flow_graph_node_stats`(`FlowNodeStats`)、`flow_graph_counter_value`;YAML `watchdog_ms` |
+| 状态 / 拓扑 | `flow_graph_state` `…_num_input_ports/output_ports/num_nodes` `flow_registered_kernel_*` |
+| 内省 | `flow_graph_dump` `flow_graph_queue_depth` `flow_graph_dropped_count` `flow_graph_last_error` `flow_packet_debug_string` |
+
+**接口设计要点**
+
+- `flow_ctx_forward` 专为直通存在:算子不碰引用计数,引擎内部共享同一 `Arc`。
+- 输入口**句柄化**(`FlowInput*`),热路径免去按名字 hash+strcmp。
+- 阻塞接口一律有非阻塞/超时兄弟:`try_send` / `try_next` / `next_timeout` / `wait_done_timeout`。
+  生产代码建议一律用带超时版本 —— 算子逻辑有误会让图静止而非结束,无超时等待就是永久挂起。
+- `flow_last_error()` 是**线程局部**的:算子在工作线程失败时,其文本不会出现在宿主线程。
+  要拿那条信息用 `flow_graph_last_error(graph)`。
+- `flow_graph_dump` 返回**线程局部**缓冲,多线程同时调用不会互相踩踏。
+- 日志回调:引擎保证调用时**不持有任何内部锁**,故回调里可安全抢 GIL / 加锁。
+
+---
+
+## 5. 算子
+
+### 5.1 C++ 算子(`flow.hpp` 糖层)
+
+糖层 header-only、**不属于 ABI**、零运行开销,100% 建立在 `flow.h` 上。
+核心是 `KernelAdapter<T>` 把虚函数桥成 C ABI vtable,并在蹦床里 `try/catch`
+**挡住 C++ 异常穿越 FFI**(异常穿 `extern "C"` 是 UB)。
+
+```cpp
+class PassThroughKernel : public flow::Kernel {
+ public:
+  static void GetContract(flow::Contract& c) { c.InputSetAny(0); c.OutputSetAny(0); }
+  flow::Status Process(flow::Context& cc) override {
+    cc.Forward(0, 0);                     // 零拷贝直通
+    return flow::Status::Ok();
+  }
+};
+FLOW_REGISTER_KERNEL(PassThroughKernel)    // 或 FLOW_REGISTER_KERNEL_AS(T, "别名")
+```
+
+- 静态 `GetContract` 可选,有则经 SFINAE 自动接线。
+- `Packet::Get<T>()` 带 `type_id` 校验;`TryGet<T>()` 类型不符返回 `nullptr`(绝不 UB)。
+- `Context` 禁拷贝/移动,防止算子把只在回调期有效的句柄留存。
+- 注册:**内置算子用显式聚合注册**(`flow_register_builtin_kernels`),因为静态初始化
+  对象在静态库中可能被链接器裁剪;用户算子可直接用宏。
+
+### 5.2 Python 算子(pybind11)
+
+见 §8 专章。约束:只收发内建类型;`process` 期间持 GIL;异常转错误码。
+
+### 5.3 内置算子清单(`cpp/kernels.cc`)
+
+既是可用算子,也是 API 覆盖用例。
+
+| 算子 | 用途 | 覆盖接口 |
+|---|---|---|
+| `PassThrough` | 零拷贝直通 | `Forward` |
+| `Scale` | 参数化数值变换 | `OptionI64`、类型声明 |
+| `Sum` | 有状态累加,`Close` 输出总和 | 跨包状态、`PostStream` |
+| `Split` | 1 进 2 出(扇出) | 多输出 |
+| `Zip` | 2 进 1 出 | `InputId(tag)` 按标签定位端口 |
+| `Filter` | 条件过滤 | 不 `Emit` + `SetNextTimestampBound` |
+| `Stringify` | `int → std::string` | 异类型输入输出 |
+| `Sink` | 只消费不产出 | 零输出口 |
+| `Invert` | 原地改写 | `TakeInput` + CoW `MakeMutableBuffer` |
+| `Normalize` | 参数用法示范 | 必需参数 / 数组参数 / 点号路径 / side packet 声明 / 日志 / 关闭原因 |
+
+---
+
+## 6. 图与拓扑
+
+### 6.1 Rust 侧结构:索引 arena
+
+核心决定:**不还原自引用裸指针对象图**,所有实体存在 `Graph` 的 `Vec` 里,
+相互引用用 `usize` id。这既契合数据流本身的整数 id 语义,也避开借用检查器的自引用难题。
+
+```rust
+pub type NodeId = usize;
+pub type EdgeId = usize;
+
+pub struct Edge {
+    name: String,
+    producer: Option<NodeId>,           // None = 图输入口喂入
+    consumers: Vec<(NodeId, usize)>,    // (下游节点, 它的第几个输入口)
+    queue: Mutex<VecDeque<Packet>>,
+    bounded: bool,                      // 仅图输入口为 true(§7.5)
+    closed: AtomicBool,
+}
+
+pub struct Node {
+    name: String,
+    kernel: KernelInstance,             // C++/Python 算子黑盒
+    inputs:  Vec<EdgeId>,
+    outputs: Vec<EdgeId>,
+    ctx: Mutex<Context>,
+    sched: Mutex<NodeSched>,
+}
+
+pub struct Graph {
+    nodes: Vec<Node>, edges: Vec<Edge>,
+    edge_by_name: HashMap<String, EdgeId>,
+    graph_inputs: HashMap<String, EdgeId>,
+    graph_outputs: HashMap<String, EdgeId>,
+    executors: HashMap<String, Executor>,
+    pollers: Vec<Arc<Poller>>,
+    state: Mutex<GraphState>,
+}
+```
+
+用 `HashMap<name, EdgeId>` 直接拿 id,避免「名字排序名次」与「存储下标」混用这类错误。
+
+### 6.2 `init_from_yaml` 的校验清单
+
+任一不通过即返回错误,并可由 `flow_last_error()` 取原因:
+
+1. 端口名引用不到上游生产者;
+2. 同一端口名有多个生产者;
+3. 图输入口与某节点的输出口同名;
+4. **拓扑成环** —— 本版本不支持 back-edge,成环会死锁,故直接拒绝;
+5. 节点的 `executor` 名未在 `executors:` 中定义;
+6. **零输入口节点** —— B 阶段的就绪规则对空集恒为真,会被无限调度成自旋(§7.4);
+7. 用到本版本未实现的字段(`max_in_flight > 1`、back-edge)→ `FLOW_ERR_UNSUPPORTED`。
+
+> 第 7 条尤其重要:**宁可报错也不静默忽略**,否则用户以为开了并行、实际没有。
+
+### 6.3 图的生命周期状态机
+
+```
+      new()            init_from_yaml()          start()
+ ─────────────► Created ──────────────► Initialized ──────────► Running
+                                             │                     │
+                    add_poller / observe ────┘        close_all_inputs()
+                    input()(取句柄)                  或 cancel()
+                                                                   ▼
+                                                                Draining
+                                                                   │ 全部节点关闭
+                                                                   ▼
+                                                               Terminated ──► free()
+```
+
+| 状态 | 允许的操作 |
+|---|---|
+| `Created` | `init_from_yaml`、`free` |
+| `Initialized` | `add_poller`、`observe`、`input`(取句柄)、`start`、`free` |
+| `Running` | `send`/`try_send`、`poller_next*`、`close_input`、`close_all_inputs`、`cancel`、`wait_done*`、`dump`、`queue_depth` |
+| `Draining` | 同 `Running`,但 `send` 返回 `FLOW_ERR_CLOSED` |
+| `Terminated` | `wait_done*`(立即返回)、`last_error`、`dump`、`free` |
+
+- 其它组合返回 **`FLOW_ERR_STATE`**(如 `start` 两次、未 `start` 就 `send`)。
+- **`add_poller` / `observe` 必须在 `start` 之前**,否则可能丢失已产出的包。
+- 本版本**不支持重跑**:`Terminated` 之后只能 `free`。
+
+### 6.4 端口的命名与定位
+
+有**两套标识符**,分工明确:
+
+| 标识符 | 属于 | 用途 |
+|---|---|---|
+| **端口名 (name)** | **图** | 连接用:上游 `output_ports` 与下游 `input_ports` **同名即连成一条边**。整张图中每个名字只能有一个生产者 |
+| **标签 (tag)** | **算子** | 算子表达「我哪个口是什么语义」,**不依赖 YAML 书写顺序**,改边名也不会错 |
+
+声明语法(`input_ports` / `output_ports` 的元素):
+
+```yaml
+input_ports: ["frames",                    # 无 tag(归入空 tag "")
+              "VIDEO:cam0",                # 有 tag,index 自动
+              "MASK:0:m0", "MASK:1:m1"]    # 有 tag,index 显式
+```
+
+三种定位方式:
+
+```cpp
+cc.InputId("VIDEO")       // → 1    按 tag(推荐:语义稳定)
+cc.InputId("MASK", 1)     // → 3
+cc.InputIndex("frames")   // → 0    按边名(通用/路由类算子偶尔需要)
+cc.Input(0)               //        直接序号,最省事但依赖声明顺序
+```
+
+规则:
+
+- tag 约定大写字母 / 数字 / 下划线,不含 `:`;空 tag 表示「无标签」。
+- 同一算子、同一 tag 下 index 必须从 0 连续、不得重复(否则 init 报错)。
+- **扁平序号 = YAML 声明顺序**(第 0 个声明即序号 0)。
+
+> 最后一条是**有意与常见做法分道**(ADR #17)。按 tag 字典序分组的方案下,混用
+> 有标签与无标签端口时 `Index(0)` 拿到的不一定是你写的第一个 —— 这是个只在运行时
+> 才暴露的陷阱。改成声明顺序后它就不存在了。
+
+---
+
+## 7. 执行模型(B 阶段详细规格)
+
+### 7.0 三条硬规则(整套并发设计的地基)
+
+> **R1 —— 调用算子期间不持任何引擎锁。**
+> 回调前必须放掉所有锁,否则算子内部回调 `flow_ctx_*`(或算子自身阻塞)会死锁。
+> 这条决定了 §7.3 的 staging 设计。
+>
+> **R2 —— 锁序恒为 `node.sched` → `edge.queue`,禁止反向。**
+> 推包路径必须「锁边 → push → **解锁边** → 再唤醒下游节点」。全局无环,故无死锁。
+>
+> **R3 —— `running == true` 是节点的独占令牌。**
+> 一旦某线程把节点置为 `running`,它即独占该节点的 `Context` 与「从输入边弹包」的权利,
+> 之后**无需再持 `node.sched` 锁**。这是 §3.1 中 `Send/Sync` 断言的**依据**。
+
+### 7.1 M2:同步 push(无线程,先验证 FFI 闭合)
+
+- `send` → push 到图输入边 → 驱动其消费者。
+- `drive(node)`:就绪则每个输入口弹一个包装进 `Context` → 调算子 → 把 staging 分发到下游边 → 递归驱动。
+- 为防深图/环形爆栈,用**显式工作栈**(`Vec<NodeId>`)而非真递归。
+- hello_world 全程跑在调用线程上,零并发即正确。
+- ⚠ M2 下 `executors:` 配置**不生效**(没有线程池),文档须写明,别让人以为配了就有用。
+
+### 7.2 M3:节点调度状态机(合并唤醒,防丢唤醒)
+
+```rust
+struct NodeSched {
+    opened: bool, closed: bool,
+    running: bool,   // 已有任务在跑(独占令牌,R3)
+    rescan: bool,    // 运行期间又来了包 —— 跑完必须重扫,否则丢唤醒
+}
+```
+
+```rust
+fn try_claim(node) -> bool {
+    let mut s = nodes[node].sched.lock();            // R2:先 node
+    if !s.opened || s.closed { return false; }
+    if s.running { s.rescan = true; return false; }  // 合并唤醒,不重复入队
+    if !inputs_ready(node) { return false; }         // 内部按需短暂锁 edge
+    s.running = true; true                            // 拿到独占令牌
+}
+
+fn run(node) {                        // 由 R3,以下全程不持 node 锁
+    let ctx = pop_one_from_each_input(node);
+    let st  = kernel.process(ctx);     // ★ 零锁调用算子(R1)
+    if st != OK { record_error(st); discard_staging(node); return finish(node); }
+    dispatch_staging_to_downstream(node);   // 锁边 push → 解锁 → 唤醒下游(R2)
+    finish(node);
+}
+
+fn finish(node) {
+    let again = { let mut s = lock(); s.running = false;
+                  let a = s.rescan; s.rescan = false; a };
+    if again || inputs_ready(node) { schedule_if_claimed(node); }
+    maybe_close(node);                 // §7.6
+}
+```
+
+**为什么必须有 `rescan`**:若上游在本节点 `running` 期间 push 了包,`try_claim` 会因
+`running` 返回 false;若不记下这次唤醒,包就永远躺在队列里没人处理 —— 经典丢唤醒。
+(这也是调度态需要 `Scheduling / SchedulingPending` 两态区分的原因。)
+
+### 7.3 emit 走 staging —— 让 R1 成立
+
+算子在 `process` 里调 `emit`/`forward` **不直接写下游边**(那要在回调期持边锁,违反 R1),
+而是写进本节点 `Context` 内的暂存区;`process` 返回后引擎统一分发。
+
+```rust
+struct Context {
+    inputs:  Vec<Option<Packet>>,   // None = 已被 take_input 取走
+    staging: Vec<Vec<Packet>>,      // 每个输出口一个暂存队列
+    input_ts: Timestamp,
+}
+```
+
+- `emit(i, pkt)` → `staging[i].push(接管 pkt)`。
+- `forward(in, out)` → `staging[out].push(inputs[in].clone())`(仅 `Arc::clone`)。
+- `take_input(i)` → `inputs[i].take()`,所有权移交算子(CoW 的前提,§3.4)。
+- 分发时对每条输出边按消费者数 `Arc::clone`。
+
+⚠ **裸 C ABI 用户注意**:`take_input` 后若既不 `emit` 也不 `drop` 就早退,会泄漏。
+C++/Python 侧有 RAII/GC 兜住,裸 C 没有。
+
+### 7.4 就绪判定 + 零输入节点
+
+B 规则:**每个输入口都有 ≥1 包** → 取各口队首组成一次 `Process`。
+
+⚠ 零输入节点在此规则下**恒就绪**(空集全真),会被无限调度成自旋。
+B 阶段的决定:**在 `init` 阶段直接拒绝**(§6.2 第 6 条),source 支持留到 A 阶段
+(需要「按需拉取 / 单次触发」语义)。宁可报错,不要静默自旋。
+
+### 7.5 背压策略
+
+**只有图输入口是限流点;图内部的边不对生产者施加背压。**
+
+| 边 | 上界 | 满了怎样 |
+|---|---|---|
+| 图输入口 | 有界(`max_queue_size`) | `send` 阻塞至有空位或图终止;`try_send` 返回 `FLOW_ERR_WOULD_BLOCK` |
+| 内部边(节点→节点) | **无硬上界** | 仅在超过软水位时告警/计数,可用 `queue_depth` 观测 |
+
+**为什么内部边不设硬上界** —— 否则「扇出后再汇合」的合法 DAG 会死锁:
+
+```
+        ┌─► B(慢) ─┐
+   A ──►┤           ├──► D
+        └─► C(快) ─┘
+```
+C 迅速填满 D 的输入队列而阻塞;D 却要等 B 那一路才能消费;B 又在等 A 推进;
+而 A 已阻塞在 C 上 —— **循环等待,且不需要环形拓扑就会发生**。
+
+生产者永不阻塞在内部边上,循环等待即无从形成。内存总量由「图输入口限流 ×
+DAG 有界的扇出倍数」间接约束。
+
+### 7.6 关流与终止
+
+- `close_all_inputs` → 所有图输入边标 `closed`,并唤醒其消费者(触发排空)。
+- **节点可关条件**:所有输入边 `closed` 且队列空 且 `!running`。
+  → 调算子 `close`(零锁,R1)→ 标 `closed` → 关自己所有输出边 → 递归下游。
+- 检查点:`finish(node)` 末尾 **和** 上游关流事件 —— 两处都要查,否则末尾节点可能永不关闭。
+- **终止判定**:`GraphState{ open_nodes, err }` + `Condvar`;节点关闭时 `open_nodes -= 1`,
+  归零则 `notify_all`。`wait_done` 等这个条件。
+- `poller_next`:所在边 `closed` 且队空 → 返回 false;否则阻塞在 poller 自己的 condvar 上。
+- **`cancel` 不是抢占**:停止调度新任务、丢弃在途包、唤醒所有等待者,但**已在执行中的
+  算子回调不会被中断**。故 `cancel` 返回后可能仍有一个算子在跑,须 `wait_done` 确认静止。
+
+### 7.7 错误路径
+
+- 算子返回非 0 → `record_error` → 置 `AtomicBool has_error`(快路径)+ 存首个错误(含文本)。
+- **失败时丢弃该次的 staging**,不传播半成品输出。
+- 此后 `try_claim` 一律返回 false(停止调度)、`send` 返回错误、所有 poller 被唤醒返回 false、
+  `wait_done` 返回该错误码,`flow_graph_last_error` 可取文本。
+
+### 7.8 竞态 / 死锁自查表
+
+| 隐患 | 挡法 |
+|---|---|
+| 同一节点被两线程并发 `process` | R3 独占令牌(`running` 在 node 锁下置位) |
+| 丢唤醒(包躺队列没人跑) | `rescan` 标记 + `finish` 重扫 |
+| 回调期持锁死锁 | R1 零锁调用 + staging 暂存 |
+| 锁序成环 | R2 单向 `node → edge`;push 后先解锁再唤醒 |
+| **扇出汇合背压死锁** | §7.5 内部边不背压 |
+| 末尾节点永不关闭 | 关流在 `finish` 与上游事件两处检查 |
+| `wait_done` 永久阻塞 | `open_nodes` 计数 + Condvar;错误也唤醒;并提供超时版本 |
+| 零输入节点自旋 | init 阶段拒绝 |
+| 共享 payload 被就地改写 | 只读视图 + CoW(§3.4) |
+| payload 跨线程析构 | R3 保证访问串行;`Send` 断言写明前提 |
+| 日志回调与引擎形成锁序环 | 回调时保证不持引擎锁 |
+
+### 7.9 执行器与线程归属
+
+图在 YAML 里定义**命名线程池**,节点按名字选择在哪个池上执行:
+
+```yaml
+executors:
+  - name: "cpu"
+    type: "ThreadPoolExecutor"
+    num_threads: 4
+  - name: "io"
+    type: "ThreadPoolExecutor"
+    num_threads: 1
+nodes:
+  - { name: "decode", kernel: "Decoder",  executor: "io"  }
+  - { name: "detect", kernel: "Detector", executor: "cpu" }
+  - { name: "draw",   kernel: "Overlay" }        # 未指定 → 宿主主线程
+```
+
+**默认(节点未写 `executor`)= 宿主主线程,不是线程池**(ADR #16):
+
+- 默认零并发、执行顺序确定、断点调试直观;**并发是显式 opt-in**。
+- 副产品:**Python 算子默认跑在 Python 主线程上,完全没有 GIL 争抢**
+  (只有显式把 Python 算子放进线程池时才需要考虑 GIL,见 §8.2)。
+
+⚠ **主线程任务的执行时机** —— 引擎不能凭空占用宿主线程,只能在宿主**进入引擎**时借用它。
+因此主线程节点的任务在宿主调用下列**阻塞接口**期间被抽取执行:
+
+```
+flow_graph_wait_done / _timeout
+flow_graph_wait_until_idle / _timeout
+flow_poller_next / _timeout
+flow_input_send(阻塞等待空位时)
+```
+
+- 若宿主只 `send` 而从不调用上述任一接口,**主线程上的节点不会推进**。
+- 反之,这些接口在等待期间一律抽取并执行主线程任务,故不会因此死锁。
+- 节点引用了未定义的 executor 名字 → init 阶段报错(§6.2 第 5 条)。
+
+> 与里程碑的关系:M2(同步 push)天然只有主线程执行器 —— 它不是临时方案,
+> 而正是**默认执行模式**;M3 增加线程池,供显式选择。
+
+### 7.10 输入策略(节点级可插拔)
+
+「多个输入口如何凑成一次 `Process`」+「队列满了怎么办」被抽成**可插拔策略**,
+而不是写死在引擎里 —— 实时丢帧与(A 阶段的)时间戳对齐因此共用同一扩展点。
+
+```yaml
+- name: "detect"
+  kernel: "Detector"
+  input_ports: ["frames"]
+  input_policy: { type: "fixed_size", capacity: 2 }
+```
+
+| `type` | 语义 | 阶段 |
+|---|---|---|
+| `sync`(默认) | 所有输入口齐备才触发。B = 每口至少一个包;A = 按时间戳对齐 | B / A |
+| `immediate` | 各输入口独立触发,不等其它口。适合无需对齐的旁路处理 | B |
+| `fixed_size` | 有界 + **满则丢弃最旧的包**(`capacity` 默认 1) | B |
+
+`fixed_size` 是**有意的有损**策略,且**不阻塞上游** —— 因此与「内部边不背压」(§7.5)
+并不冲突,而是其配套的内存约束手段:摄像头 30fps 而算子只跑 10fps 时,
+无界队列会让内存无限增长,**丢旧帧才是正确取舍**。
+
+**丢包绝不静默**:除 `flow_graph_dropped_count(port)` 累计计数外,首次丢弃还会打一条
+WARN 日志。任何有损行为都必须可观测,否则「跑通了」和「悄悄丢了一半」无法区分。
+
+---
+
+## 8. Python 接口
+
+### 8.1 形态
+
+pybind11 模块 `lmflow._lmflow` 链接 `libflow_core`(**动态库**,见 §8.5),
+Python 包 `lmflow` 在其上提供 `@kernel` 装饰器与 `Kernel` 基类。
+Python 既可**注册算子**,也可**驱动图**。
+
+```python
+@lmflow.kernel("PyOffsetKernel")
+class PyOffsetKernel(lmflow.Kernel):
+    @staticmethod
+    def get_contract(c): c.input_set_any(0); c.output_set_any(0)
+    def open(self, cc):    self.offset = cc.option_int("offset", 0)
+    def process(self, cc): cc.emit(0, lmflow.Packet.from_int(cc.input(0).as_int() + self.offset))
+
+with lmflow.Graph.from_yaml(CONFIG) as graph:        # with 是硬要求,见 8.3
+    poller = graph.add_poller("out"); graph.start()
+    source = graph.input("in")
+    for i in range(10):
+        source.send(lmflow.Packet.from_int(i), ts=i)
+        print(poller.next(timeout=5.0).as_int())
+    graph.close_all_inputs(); graph.wait_done(timeout=5.0)
+```
+
+同一张图里 C++ 算子与 Python 算子平等引用 —— 引擎不区分算子语言。
+
+### 8.2 GIL
+
+- **默认情况下不存在 GIL 争抢**:节点未指定 `executor` 即跑在宿主主线程,
+  Python 算子就在 Python 主线程上执行(§7.9)。
+- **只有显式把 Python 算子放进线程池时**才有下列问题:`process` 在引擎工作线程上被
+  回调、期间持 GIL ⇒ 多个 Python 算子之间无法真并行。重计算应写成 C++ 算子,
+  或让 Python 算子留在主线程、把 C++ 算子放进池里(见 `examples/python/opencv_pipeline.py`)。
+- **所有可能阻塞的接口必须释放 GIL**(`poller.next` / `wait_done` / `send`),
+  否则工作线程拿不到 GIL → 直接死锁。pybind11 用 `py::call_guard<py::gil_scoped_release>()`。
+- 引擎线程由 Rust 创建、Python 并不认识:每次 `gil_scoped_acquire` 会建立 thread state,
+  线程退出时须清理,否则泄漏。
+
+### 8.3 解释器生命周期(崩溃来源)
+
+图必须在**解释器开始销毁之前**停掉,否则工作线程可能回调进正在析构的解释器 → 崩溃。
+因此 `Graph` 实现上下文管理器,`__del__` 只作兜底、不保证时机。文档必须强调 `with`。
+
+### 8.4 数据类型限制
+
+**Python 算子只能收发内建类型**(整数/浮点/布尔/字符串/bytes/`FlowBuffer`)。
+理由见 ADR #9:保持 payload 的**语言中立性**。表达结构化数据:
+
+| 想传 | 用什么 |
+|---|---|
+| 检测框、关键点等数值集合 | N×K 的 `FlowBuffer`(零拷贝,C++ 侧可直读) |
+| 任意元数据 | JSON 字符串(`FLOW_TYPE_STR`) |
+| 配置参数 | node `options`,本不该进数据流 |
+
+`FLOW_TYPE_HOST_OBJECT`(7 号)已预留但**未启用**。若将来开放,应利用「引擎在 init
+阶段已知每个节点算子语言」这一点,直接拒绝「原生对象端口接到异语言算子」的拓扑。
+
+### 8.5 零拷贝的正确写法
+
+直觉写法 `send(cv2.imread(...))` 是错的 —— 要么整帧拷贝,要么引擎持有 PyObject 引用,
+而引用归零可能发生在工作线程上,那里 `Py_DECREF` 需抢 GIL(死锁隐患)。
+正确姿势是**让引擎分配缓冲**,拿零拷贝 numpy view 就地写入:
+
+```python
+def process(self, cc):
+    src = cc.input(0).as_numpy()                       # 零拷贝只读视图
+    packet, dst = cc.new_buffer((h, w, 3), np.uint8)   # 引擎分配,dst 指向引擎内存
+    cv2.resize(src, (w, h), dst=dst)                   # 直接写进去
+    cc.emit(0, packet)
+```
+
+就地改写走 CoW,同样要先 `take_input`:
+
+```python
+packet = cc.take_input(0)     # ← 先取走,否则上下文仍持引用 → CoW 必然复制
+img = packet.make_mutable()   # 独占 → 零拷贝可写 numpy view
+cv2.GaussianBlur(img, (5, 5), 0, dst=img)
+cc.emit(0, packet)
+```
+
+### 8.6 其它必须处理的点
+
+- **Ctrl-C**:阻塞调用释放 GIL 后停在 Rust 里,Python 信号处理不会运行 ⇒ Ctrl-C 无响应。
+  实现上须按短超时轮询,周期性回 Python 检查信号。
+- **异常**:Python 异常不得穿越 FFI;蹦床里捕获并转 `FLOW_ERR_KERNEL`,原文本走日志。
+- **fork**:引擎线程启动后 fork 会得到残缺状态;文档禁止(含 `multiprocessing` 默认 fork 启动法)。
+- **静态库双份注册表**:见 §8.5 标题下 —— Python 模块必须链**动态库**,否则算子注册表
+  会有两份互不可见的副本。同时对 `cdylib` 做符号可见性控制,只导出 `flow_*`。
+
+---
+
+## 9. FFI 边界与安全
+
+- Rust 内部用 `Result<T, Error>`;`?` 取代错误码宏。
+- **每个 `extern "C"` 导出函数**用 `catch_unwind` 包裹,panic → `FLOW_ERR_PANIC`
+  (Rust panic 穿越 FFI 是 UB)。
+- **算子回调方向**:C++ 异常 / Python 异常同样不得逃出,由糖层 / pybind11 蹃床转错误码。
+- **ABI 版本**:`FLOW_ABI_VERSION` + `flow_abi_version()`;`flow_graph_new` 内部校验,
+  不匹配返回 NULL 并置错误。动态链接时 header 与 `.so` 不一致会导致布局错乱。
+- **布局一致性**:`cpp/abi_assert.cc` 的 `static_assert` 与 `crates/flow-core/tests/abi_layout.rs`
+  钉在同一组常量上,任一侧改字段而忘同步 → **构建失败**(已实测能拦住)。
+- **ABI 演进**:`FlowBuffer` 留了 `reserved` 供未来加字段(最可能是 GPU 内存空间);
+  一旦改变既有布局,必须提升 `FLOW_ABI_VERSION`,所有既有二进制都要重编。
+
+---
+
+## 10. 构建与集成
+
+**Rust/C++ 部分:cargo 主导**
+
+- `flow-core`:`crate-type = ["lib", "staticlib", "cdylib"]`。
+  `lib` 给仓库内 Rust host/测试(不过 FFI);`staticlib`/`cdylib` 给外部宿主。
+- `build.rs` 用 `cc` crate 编译 `cpp/*.cc`(算子 + ABI 断言)并链入。
+- 示例宿主:`cargo run --example hello_world`(Rust host + C++ 算子,一条命令跑通)。
+- C ABI 的验证:Rust 集成测试直接 `unsafe` 调 `extern "C"` 函数,无需 C 语言 `main`。
+
+**Python 部分:破例引入 CMake**(ADR #4)
+
+- `pyproject.toml`(scikit-build-core)→ CMake 编 pybind11 模块 → 链 `libflow_core`。
+- 两步:`cargo build` 出库 → `pip install -e .` 编扩展。
+- 外部 C++ 宿主:自带构建系统,链 `libflow_core` + `include/`,不进本仓库构建。
+
+**依赖**:`serde`/`serde_yaml`/`serde_json`;构建期 `cc`;Python 侧 `pybind11`。
+`crossbeam-channel`、`parking_lot` 在 M3 引入。
+
+---
+
+## 11. 目录结构
+
+```text
+lmflow/
+├── include/                   公共头
+│   ├── flow.h                 C ABI —— 唯一稳定接口(权威定义)
+│   ├── flow.hpp               C++ 算子糖层(header-only,非 ABI)
+│   └── flow_cv.hpp            可选:FlowBuffer ↔ cv::Mat(仅需 OpenCV 者 include)
+├── cpp/                       C++ 算子
+│   ├── kernels.cc             内置算子集(9 个)
+│   └── abi_assert.cc          跨界结构体布局的编译期校验
+├── crates/
+│   ├── flow-core/             引擎
+│   │   ├── build.rs           cc 编译 cpp/ 并链入
+│   │   ├── src/               timestamp / packet / edge / node / graph / scheduler / ffi …
+│   │   ├── tests/             abi_layout.rs 等
+│   │   └── examples/          hello_world.rs(Rust 宿主)
+│   └── flow-py/               (若最终由 CMake 编 pybind11,此处可空缺)
+├── python/lmflow/             Python 包(@kernel 装饰器 / Kernel 基类)
+├── examples/
+│   ├── cpp/hello_world_host.cc      外部 C++ 宿主示例
+│   └── python/                      hello_world.py / opencv_pipeline.py
+└── docs/design.md             本文档
+```
+
+---
+
+## 12. 里程碑
+
+| 里程碑 | 内容 | 验收 |
+|---|---|---|
+| **M0** ✅ | C ABI(123 个函数,**接口层已收尾**)+ C++ 糖层 + 10 个算子 + ABI 断言 + 三语言宿主示例 + `timestamp.rs` | 全部编译验证通过;故意破坏布局能被拦住;参数/日志/错误/关闭原因实跑验证 |
+| **M1** ✅ | crate 骨架 + `ffi.rs` 全量实现 + `build.rs` + `abi_layout.rs` | `cargo build` / `cargo test` 通过 |
+| **M2** ✅ | 主线程执行器 + 注册表 + YAML + Context 读写 + poller/observer | `hello_world` 输出 0..9(Rust 与 C++ 宿主各一份) |
+| **M4** ✅ | 关流传播 + `wait_done` / `wait_until_idle` / `cancel` + 生命周期状态机 | 干净退出;所有权记账证明零泄漏 |
+| **M5** ✅ | 契约类型校验 + 图校验 7 项 + 错误路径 + `catch_unwind` + 全局水位 | 坏配置/坏算子被拒并给出可读原因 |
+| **M3** | 线程池 executor(非默认执行器)+ 并发调度状态机 | 多线程下仍正确;TSan 干净 |
+| **M6** | pybind11 绑定 + Python 算子 + 零拷贝 buffer + GIL 处理 | `examples/python/*` 跑通 |
+| **A 阶段** | 时间戳同步、bound 传播、back-edge、并行 in-flight、输入策略 | 单列 |
+
+> M3 之所以排在 M4/M5 之后:默认执行器是**宿主主线程**(ADR #16),所以 M2 的
+> 同步执行本就是产品的默认行为,而不是临时脚手架 —— 线程池是「显式 opt-in」的增量。
+
+---
+
+## 13. 测试策略(已落地 113 个)
+
+| 测试文件 | 数量 | 覆盖 |
+|---|---|---|
+| 各模块 `#[cfg(test)]` | 56 | timestamp 哨兵/边界、Packet 三态与 CoW、YAML 校验、端口表(tag/序号/连续性)、错误优先级、全局水位、字符串驻留 |
+| `tests/abi_layout.rs` | 10 | 跨界结构体 size/align/offset、状态码、type_id、dtype、时间戳哨兵 —— 与 `cpp/abi_assert.cc` 钉在同一组常量上 |
+| `tests/c_abi.rs` | 12 | **完全以 C 调用方的方式**驱动引擎:全流程、内建类型往返、缓冲分配与 CoW、空指针不崩、错误可读、observer、日志回调 |
+| `tests/e2e.rs` | 28 | 真实建图 + 真实调 C++ 算子:直通/扇出/多 poller、7 项图校验、状态机、时间戳单调性、跨语言按类型传值、兜底关流、side packet |
+| `tests/memory.rs` | 7 | 所有权守恒记账(正常/积压/失败/取消路径)、**CoW 零拷贝不变量**(三级管线)、扇出复制不污染兄弟分支 |
+
+### 13.1 原始策略与补充
+
+- **Rust 单测**:timestamp 边界(已有 9 个)、edge FIFO、就绪判定、YAML 解析、注册表。
+- **ABI 布局**:`abi_layout.rs` + `abi_assert.cc` 双向钉死(已实测能拦住破坏)。
+- **C ABI 冒烟**:Rust 集成测试直接调 `extern "C"`,覆盖边界①。
+- **端到端**:`hello_world` 输出序列断言(0..9,时间戳对应)。
+- **并发**(本设计的核心风险,不做等于没验证):
+  **TSan**(Rust + C++ 混合)、**Miri**(专查 FFI unsafe)、ASan/UBSan、以及压力测试。
+- **死锁回归**:专门构造扇出汇合(diamond)拓扑 + 慢分支,验证 §7.5 策略生效。
+- **CI**(`.github/workflows/ci.yml`):headers(纯 C/C++ `-Werror`)、rust(fmt/clippy `-D warnings`/test/示例输出比对)、
+  **external-host**(header 声明与 `.a` 导出符号对齐 + 编译运行外部 C++ 宿主)、sanitizers、python 语法。
+- 跨平台矩阵(见 §14)尚未加入。
+
+### 13.2 实现阶段真实抓到的缺陷
+
+这些不是假想 —— 都是 MVP 过程中被测试或工具抓出来并修掉的,已各自留下回归测试:
+
+| 缺陷 | 抓到它的手段 | 教训 |
+|---|---|---|
+| `pump_step` 自锁死 —— edition 2021 里 `if let` 的临时 `MutexGuard` 活到块结束,`run_node` 内再锁同一队列 | 跑 hello_world 直接挂住 | 正是 R2 锁序规则要防的情形,却被语言的临时值规则绕过;`.lock()` 结果必须先落地到局部变量 |
+| **输入槽残留引用** —— 只在下次调用开头才清,导致上游一直持着已处理完的包 | `tests/memory.rs` 的所有权记账(恰好漏 1 个) | 后果不止延迟释放:下游 CoW 永远看到引用数 ≥ 2 而**静默退化成全量拷贝** —— 正是 §3.4 警告的那条不变量失效 |
+| CoW 测试用单节点管线,覆盖不到上一条 | 修复后回看测试设计 | 不变量测试必须覆盖「最短能触发的拓扑」而非最简拓扑 |
+| `KernelInstance::open/process/close` 是 `pub` 且解引用裸指针却未标 `unsafe` | clippy `not_unsafe_ptr_arg_deref` | |
+| `Context` 用 `Mutex` 时,持 guard 的 `&mut` 与回调内从裸指针再造的 `&mut` 构成别名 UB | 手工审查 | 改用 `UnsafeCell` + 令牌不变量 |
+| `flow_register_builtin_kernels` 在库里但漏出 header;C++ 示例忘了调它(一跑就「算子未注册」) | `nm` 对比 header 声明与库导出符号 | 已固化为 CI 的 external-host 门禁 |
+| 「算子未注册」的报错分两处,其中一处没列出可用算子 | e2e 测试断言报错内容 | 报错要能指导用户,不只是标明失败 |
+| `SinkKernel` 用 `printf` 抢 stdout,违反自己文档里的规定 | 测试输出里看到 | 内置算子也要遵守对用户提的要求 |
+| 必需 side packet 借用计数器承载,会把内部键暴露到用户可见的 counter 列表 | 自我审查 | |
+
+### 13.3 原策略清单
+
+---
+
+## 14. 风险登记
+
+| 风险 | 说明 | 缓解 |
+|---|---|---|
+| payload 跨线程析构 | 在 A 线程建、B 线程析构 | R3 保证访问串行;`Send` 断言写明前提 |
+| panic / 异常穿越 FFI | 双向 UB | 双向 `catch_unwind` / `try-catch` 转错误码 |
+| 静态注册被链接器裁剪 | 注册对象无引用被 strip | 内置算子用显式聚合注册;必要时 `--whole-archive` |
+| 静态库链两份 → 双注册表 | 算子在一份里注册、另一份看不见 | Python 侧强制用动态库;符号可见性只导出 `flow_*` |
+| ABI 布局不一致 | 内存错乱 | `#[repr(C)]` + 双向 `static_assert`;`FLOW_ABI_VERSION` 运行期校验 |
+| CoW 静默失效 | 引擎多留一份引用 → 恒复制、不报错只变慢 | 写成显式不变量(§3.4)+ 加断言/测试 |
+| GIL 拖累吞吐 | Python 算子无法真并行 | 文档明示;重活写 C++;考虑 executor 隔离 |
+| 跨平台未验证 | Windows(MSVC)/macOS/交叉编译(ARM) | 列入 CI 矩阵 |
+| B 的简化偏离完整语义 | 丢了时间戳对齐 | 明确划入 A 阶段;B 只跑单口/透传场景 |
+
+---
+
+## 15. 待决项的处置
+
+上一版列出的 7 项未决事项已全部拍板,理由并入 ADR(§1):
+
+| 原未决项 | 结论 |
+|---|---|
+| 时间戳单调性校验放在哪层 | 图输入口强制校验;内部边仅 `debug_assertions` 下校验(ADR #23) |
+| 内部边软水位的默认值与告警形式 | 软水位默认取顶层 `max_queue_size`(默认 100);每条边**首次**超限打 WARN,之后按 1/2/4/8… 指数退避,避免日志洪水;深度与丢弃数经 `queue_depth` / `dropped_count` 可查 |
+| `type_id` 是否改稳定方案 | **现在就改**为 FNV-1a(修饰名)+ `FLOW_DECLARE_TYPE_NAME` 逃生口(ADR #22) |
+| 生产可观测性 | 已落地:`FlowNodeStats`(含 running / running_for_us / 耗时统计)、`watchdog_ms`、算子自报计数器 |
+| 是否启用 `FLOW_TYPE_HOST_OBJECT` | **不启用**(ADR #26) |
+| stream header | **不做**,用 side packet 覆盖(ADR #24) |
+| subgraph 组合 | **推迟**,但预留 node `type:` 扩展点(ADR #27) |
+
+另外明确**不做**的:程序化构图 API(ADR #25)、observer 注册后的移除(登记于 header)。
+
+### 15.1 结构体前向兼容的两种做法(有意的不一致)
+
+| 结构体 | 做法 | 为什么 |
+|---|---|---|
+| `FlowBuffer` | 固定 `reserved` 字段 | 在**热路径**上、形状稳定(对齐 numpy buffer protocol),固定布局便于零开销传递 |
+| `FlowNodeStats` | 入参 `struct_size` | **诊断用**、字段天然会持续增加;调用方填 `sizeof`,引擎只写认得且装得下的部分 |
+
+### 15.2 实现阶段的验证结果
+
+| 当初留给实现去验证的 | 结果 |
+|---|---|
+| CoW 不变量是否被意外破坏 —— 需专门的「不应发生拷贝」测试 | **确实被破坏了**,已修并留下三级管线的零拷贝测试(见 §13.2) |
+| 调度状态机的 `rescan` 逻辑 | 单线程下正确;**并发正确性未验证**(M3 才有线程池,届时须过 TSan) |
+| 全局水位的实际效果 | 已有测试证明能拦住无限增长;真实内存曲线待 M3 压测 |
+| 跨平台 | **仍未验证**:Windows(MSVC)/ macOS / 交叉编译(ARM) |
+
+### 15.3 当前实现的已知边界
+
+诚实记录,避免误以为已完成:
+
+- **只有主线程执行器**。YAML 里的 `executors:` 能被解析和校验,但线程池尚未实现,
+  所有节点都跑在宿主主线程(这正是默认行为,见 ADR #16 与 §7.9)。
+- **输入策略只有 `sync`**;`immediate` / `fixed_size` 会在 init 阶段报 `FLOW_ERR_UNSUPPORTED`。
+- **无时间戳同步**(阶段 A):多输入口节点的就绪条件是「每口至少一个包」,不做跨口对齐。
+- `flow_graph_pause/resume`、`observe_timestamp_bounds`、`flow_register_type_name` 尚未实现,
+  调用会得到明确的「尚未实现」而不是静默无效。
+- 带超时的 `wait_done_timeout` / `poller_next_timeout` 在主线程执行器下等价于不带超时版本
+  (没有「等别的线程」的情形);真正的超时语义随线程池一起落地。
+- `Packet::new`(Rust 原生值)的 `type_id` 是 `NONE`,**不参与跨语言类型校验**;
+  要让 C++/Python 算子按类型读取,须用 `Packet::new_interop` + `fnv1a_type_id`,或内建类型。
