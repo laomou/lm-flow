@@ -9,12 +9,13 @@
 use std::cell::UnsafeCell;
 use std::collections::{BTreeMap, VecDeque};
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Instant;
 
 use crate::config::GraphConfig;
 use crate::context::{Context, Options};
+use crate::executor::ThreadPool;
 use crate::kernel::{Contract, KernelInstance, PortTable};
 use crate::packet::Packet;
 use crate::runtime::{self, GraphShared};
@@ -23,6 +24,31 @@ use crate::timestamp::Timestamp;
 
 pub type NodeId = usize;
 pub type EdgeId = usize;
+
+/// 输入策略(节点级可插拔,见 docs/design.md §7.10)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InputPolicy {
+    /// 所有输入口齐备才触发。默认。
+    Sync,
+    /// 任一输入口有数据即触发,不等其它口。适合无需对齐的旁路处理。
+    Immediate,
+    /// 队列有界:**满则丢弃最旧的包**。实时场景必备 ——
+    /// 摄像头 30fps 而算子只跑 10fps 时,无界队列会让内存无限增长,丢旧帧才是正确取舍。
+    /// 就绪条件同 `Sync`。
+    FixedSize { capacity: usize },
+}
+
+impl InputPolicy {
+    fn from_config(c: &crate::config::InputPolicyConfig) -> Self {
+        match c.r#type.as_str() {
+            "immediate" => InputPolicy::Immediate,
+            "fixed_size" => InputPolicy::FixedSize {
+                capacity: c.capacity.max(1),
+            },
+            _ => InputPolicy::Sync,
+        }
+    }
+}
 
 // ---------------------------------------------------------------- 状态机
 
@@ -77,9 +103,13 @@ impl Edge {
     }
 }
 
-struct Observer {
-    cb: unsafe extern "C" fn(*mut c_void, crate::ffi::FlowPacket),
-    user: *mut c_void,
+/// 推模式订阅者。C 宿主给函数指针,Rust 宿主给闭包 —— 后者才是 Rust 侧的自然写法。
+enum Observer {
+    C {
+        cb: unsafe extern "C" fn(*mut c_void, crate::ffi::FlowPacket),
+        user: *mut c_void,
+    },
+    Rust(Arc<dyn Fn(&Packet) + Send + Sync>),
 }
 // 安全性:user 是宿主的不透明指针,引擎只原样回传。
 unsafe impl Send for Observer {}
@@ -114,16 +144,37 @@ impl Poller {
     /// 取下一个包。本版本执行器是宿主主线程,故等待期间会**抽取并执行主线程任务**
     /// (见 docs/design.md §7.9)。图已结束且队空时返回 `None`。
     pub fn next(&self) -> Option<Packet> {
+        self.next_deadline(None).ok().flatten()
+    }
+
+    /// 带超时:`Ok(Some)` 取到,`Ok(None)` 图已结束,`Err(Timeout)` 超时。
+    pub fn next_timeout(&self, timeout: std::time::Duration) -> Result<Option<Packet>> {
+        self.next_deadline(Some(std::time::Instant::now() + timeout))
+    }
+
+    fn next_deadline(&self, deadline: Option<std::time::Instant>) -> Result<Option<Packet>> {
         loop {
             if let Some(p) = self.inner.pop() {
-                return Some(p);
+                return Ok(Some(p));
             }
             if self.inner.closed.load(Ordering::SeqCst) || self.graph.shared.has_error() {
-                return None;
+                // 先把队列排干再宣告结束
+                return Ok(self.inner.pop());
             }
-            // 没有现成数据:推进一步引擎;推不动说明确实没有更多输出
-            if !self.graph.pump_step() {
-                return self.inner.pop();
+            // 有主线程任务就顺手跑掉(默认执行器就是宿主线程)
+            if self.graph.pump_step() {
+                continue;
+            }
+            if self.graph.is_idle_pub() {
+                // 主线程与线程池都空了 —— 不会再有新输出
+                return Ok(self.inner.pop());
+            }
+            // 线程池还在跑,等它有进展
+            match self.graph.remaining_for_poller(deadline) {
+                Some(d) => {
+                    self.graph.wait_for_activity_pub(d);
+                }
+                None => return Err(Error::Timeout),
             }
         }
     }
@@ -143,6 +194,9 @@ impl Poller {
 #[derive(Debug, Default)]
 struct NodeSched {
     opened: bool,
+    /// 已「认领关流」—— 在锁下置位,保证并发时只有一个线程会调算子的 Close。
+    /// 必须与 `closed` 分开:`closed` 表示 Close 已跑完,终止判定看它。
+    close_started: bool,
     closed: bool,
     /// 正在执行算子回调 —— 独占令牌(docs/design.md §7.0 R3)
     running: bool,
@@ -165,6 +219,9 @@ pub struct Node {
     pub outputs: Vec<EdgeId>,
     pub in_ports: Arc<PortTable>,
     pub out_ports: Arc<PortTable>,
+    /// `None` = 宿主主线程(默认执行器,ADR #16);`Some(i)` = executors[i] 线程池
+    executor: Option<usize>,
+    policy: InputPolicy,
     input_types: Vec<u64>,
     kernel: KernelInstance,
     /// 用 UnsafeCell 而非 Mutex:算子回调期间引擎必须交出一个 `*mut Context` 给 C 侧,
@@ -176,6 +233,10 @@ pub struct Node {
     /// 每个输入口一条独立队列(见模块头注释)
     input_queues: Vec<Mutex<VecDeque<Packet>>>,
     input_closed: Vec<AtomicBool>,
+    /// 每个输入口的**时间戳边界**:保证「不会再有时间戳 < bound 的包到来」。
+    /// 这是多输入口对齐的依据 —— 只有确知某口不会再来更早的包,
+    /// 才能安全地在当前最小时间戳上组一次 Process。
+    input_bounds: Vec<Mutex<Timestamp>>,
     /// 正在执行算子回调的起始时刻 —— 让「卡死」可定位
     running_since: Mutex<Option<Instant>>,
 }
@@ -196,9 +257,79 @@ impl Node {
     fn queue_len(&self, port: usize) -> usize {
         self.input_queues[port].lock().expect("队列锁中毒").len()
     }
-    fn all_inputs_have_data(&self) -> bool {
-        (0..self.input_queues.len()).all(|i| self.queue_len(i) > 0)
+    fn bound(&self, port: usize) -> Timestamp {
+        *self.input_bounds[port].lock().expect("边界锁中毒")
     }
+
+    /// 把某口的时间戳边界向前推进(只增不减)。
+    fn advance_bound(&self, port: usize, to: Timestamp) {
+        let mut b = self.input_bounds[port].lock().expect("边界锁中毒");
+        if to > *b {
+            *b = to;
+        }
+    }
+
+    fn front_ts(&self, port: usize) -> Option<Timestamp> {
+        self.input_queues[port]
+            .lock()
+            .expect("队列锁中毒")
+            .front()
+            .map(|p| p.timestamp())
+    }
+
+    /// 就绪判定。返回本次可处理的**输入时间戳**;`None` 表示还不能跑。
+    ///
+    /// `Sync` 采用时间戳对齐:
+    ///   * `min_packet` = 各非空口队首时间戳的最小值;
+    ///   * `min_bound`  = 各空口边界的最小值(空口若还会来包,最早也不早于其边界);
+    ///   * 仅当 `min_bound > min_packet`,才确知「没有任何口还会送来更早的包」,
+    ///     于是可以在 `min_packet` 上安全地组一次 Process。
+    ///
+    /// 这条判据是多输入口正确性的核心:没有它,Zip 之类算子会把不同时刻的数据配到一起。
+    fn readiness(&self) -> Option<Timestamp> {
+        let n = self.input_queues.len();
+        match self.policy {
+            InputPolicy::Immediate => {
+                // 不做对齐:任一口有数据就跑
+                let mut min = Timestamp::done();
+                let mut any = false;
+                for i in 0..n {
+                    if let Some(ts) = self.front_ts(i) {
+                        any = true;
+                        min = min.min(ts);
+                    }
+                }
+                if any {
+                    Some(min)
+                } else {
+                    None
+                }
+            }
+            InputPolicy::Sync | InputPolicy::FixedSize { .. } => {
+                let mut min_packet = Timestamp::done();
+                let mut min_bound = Timestamp::done();
+                for i in 0..n {
+                    match self.front_ts(i) {
+                        Some(ts) => min_packet = min_packet.min(ts),
+                        None => min_bound = min_bound.min(self.bound(i)),
+                    }
+                }
+                if min_packet == Timestamp::done() {
+                    return None; // 没有任何数据
+                }
+                if min_bound > min_packet {
+                    Some(min_packet)
+                } else {
+                    None // 某空口还可能送来 <= min_packet 的包,必须再等
+                }
+            }
+        }
+    }
+
+    fn is_ready(&self) -> bool {
+        self.readiness().is_some()
+    }
+
     fn all_inputs_closed_and_drained(&self) -> bool {
         (0..self.input_queues.len())
             .all(|i| self.input_closed[i].load(Ordering::SeqCst) && self.queue_len(i) == 0)
@@ -219,6 +350,14 @@ pub struct GraphInner {
     state: Mutex<State>,
     /// 主线程执行器的任务队列(默认执行器,见 ADR #16)
     main_queue: Mutex<VecDeque<NodeId>>,
+    /// 命名线程池,按 YAML 的 executors 顺序
+    executors: Vec<ThreadPool>,
+    /// 已投递到线程池、尚未跑完的任务数。用于「是否空闲」与终止判定。
+    in_flight: AtomicUsize,
+    /// 有任何进展时唤醒阻塞中的宿主线程(取到输出、节点关闭、出错、主线程任务入队)
+    activity: (Mutex<u64>, Condvar),
+    /// 暂停调度(调试/限速)。已在执行的算子不受影响。
+    paused: AtomicBool,
     side_packets: Mutex<BTreeMap<String, Packet>>,
     /// 各算子在 GetContract 里声明的必需 side packet:(名字, 声明它的节点)
     required_side_packets: Vec<(String, String)>,
@@ -336,15 +475,74 @@ impl Graph {
     }
 
     pub fn wait_done(&self) -> Result<()> {
-        self.inner.wait_done()
+        self.inner.wait_done(None)
+    }
+
+    pub fn wait_done_timeout(&self, timeout: std::time::Duration) -> Result<()> {
+        self.inner
+            .wait_done(Some(std::time::Instant::now() + timeout))
     }
 
     pub fn wait_until_idle(&self) -> Result<()> {
-        while self.inner.pump_step() {}
-        match self.inner.shared.first_error() {
-            Some(e) => Err(e),
-            None => Ok(()),
+        self.inner.wait_until_idle(None)
+    }
+
+    pub fn wait_until_idle_timeout(&self, timeout: std::time::Duration) -> Result<()> {
+        self.inner
+            .wait_until_idle(Some(std::time::Instant::now() + timeout))
+    }
+
+    pub fn pause(&self) {
+        self.inner.pause();
+    }
+
+    pub fn resume(&self) {
+        self.inner.resume();
+    }
+
+    pub fn is_paused(&self) -> bool {
+        self.inner.is_paused()
+    }
+
+    /// 已定义的线程池名字(按 YAML 顺序)。
+    pub fn executor_names(&self) -> Vec<&str> {
+        self.inner.executor_names()
+    }
+
+    /// 是否空闲:主线程队列为空且线程池无在飞任务。
+    pub fn is_idle(&self) -> bool {
+        self.inner.is_idle_pub()
+    }
+
+    /// 推模式订阅输出口。回调在派发该包的线程上执行(可能是线程池线程)。
+    ///
+    /// 必须在 `start` 之前注册,否则会漏掉已产出的包。
+    pub fn observe<F>(&self, port: &str, f: F) -> Result<()>
+    where
+        F: Fn(&Packet) + Send + Sync + 'static,
+    {
+        if self.state() != State::Initialized {
+            return Err(Error::State(
+                "observe 必须在 start 之前调用,否则会漏掉已产出的包".into(),
+            ));
         }
+        self.inner.add_observer_fn(port, Arc::new(f))
+    }
+
+    /// 算子自报计数器的当前值(按图隔离)。
+    pub fn counter_value(&self, name: &str) -> i64 {
+        self.inner.shared.counter_value(name)
+    }
+
+    /// 已登记的计数器名。
+    pub fn counter_names(&self) -> Vec<String> {
+        self.inner.shared.counter_names()
+    }
+
+    /// 取出图级共享状态的句柄 —— 它比 `Graph` 句柄活得久,
+    /// 因此可以在图销毁**之后**仍然读取错误与计数器(测试与排障用)。
+    pub fn shared_for_inspection(&self) -> Arc<crate::runtime::GraphShared> {
+        self.inner.shared.clone()
     }
 
     pub fn node_count(&self) -> usize {
@@ -385,6 +583,18 @@ impl Graph {
 
     pub fn node_stats(&self, i: usize) -> Option<NodeStatsSnapshot> {
         self.inner.node_stats(i)
+    }
+}
+
+impl Drop for Graph {
+    /// 在宿主放开句柄时**就地关停线程池并 join**。
+    ///
+    /// 必须在这里做,不能只依赖 `GraphInner::drop`:工作线程为了执行节点会
+    /// `Weak::upgrade` 出一个临时强引用,若宿主的 Arc 已先释放,最后一个引用就落在
+    /// 工作线程手上 —— 于是 `GraphInner::drop` 在工作线程上运行,`shutdown` 变成
+    /// **join 自己**,得到 `EDEADLK`。先在宿主线程 join 完,worker 就不存在了。
+    fn drop(&mut self) {
+        self.inner.shutdown_executors_pub();
     }
 }
 
@@ -575,8 +785,20 @@ impl GraphInner {
         // ---- 校验 4:成环 ----
         check_acyclic(&cfg, &edges)?;
 
-        // ---- 校验 5:executor 名 ----
-        let known: Vec<&str> = cfg.executors.iter().map(|e| e.name.as_str()).collect();
+        // ---- 校验 5 + 建执行器 ----
+        let mut executors: Vec<ThreadPool> = Vec::new();
+        for e in &cfg.executors {
+            if e.name.is_empty() {
+                return Err(Error::InvalidArg(
+                    "executors 条目必须有 name,节点通过它来选择线程池".into(),
+                ));
+            }
+            if executors.iter().any(|p| p.name() == e.name) {
+                return Err(Error::InvalidArg(format!("executor `{}` 重复定义", e.name)));
+            }
+            executors.push(ThreadPool::new(&e.name, e.num_threads));
+        }
+        let known: Vec<&str> = executors.iter().map(|p| p.name()).collect();
         for (idx, n) in cfg.nodes.iter().enumerate() {
             if !n.executor.is_empty() && !known.contains(&n.executor.as_str()) {
                 return Err(Error::InvalidArg(format!(
@@ -585,6 +807,16 @@ impl GraphInner {
                     n.executor,
                     known.join(", ")
                 )));
+            }
+        }
+        // 定义了却没人用的池只会白占线程,出声提醒
+        for p in &executors {
+            if !cfg.nodes.iter().any(|n| n.executor == p.name()) {
+                runtime::log_warn(&format!(
+                    "executor `{}` 已定义但没有任何节点使用它({} 个线程会空转待命)",
+                    p.name(),
+                    p.num_threads()
+                ));
             }
         }
 
@@ -620,6 +852,12 @@ impl GraphInner {
                 shared.clone(),
             );
 
+            let executor = if n.executor.is_empty() {
+                None
+            } else {
+                executors.iter().position(|p| p.name() == n.executor)
+            };
+
             nodes.push(Node {
                 name,
                 kernel_name: n.kernel.clone(),
@@ -627,6 +865,8 @@ impl GraphInner {
                 outputs: output_edges,
                 in_ports: ins.clone(),
                 out_ports: outs,
+                executor,
+                policy: InputPolicy::from_config(&n.input_policy),
                 input_types: contract.input_types.clone(),
                 kernel,
                 ctx: Box::new(UnsafeCell::new(ctx)),
@@ -636,6 +876,9 @@ impl GraphInner {
                     .map(|_| Mutex::new(VecDeque::new()))
                     .collect(),
                 input_closed: (0..ins.len()).map(|_| AtomicBool::new(false)).collect(),
+                input_bounds: (0..ins.len())
+                    .map(|_| Mutex::new(Timestamp::pre_stream()))
+                    .collect(),
                 running_since: Mutex::new(None),
             });
             // 记录该算子声明的必需 side packet,start 时校验
@@ -655,6 +898,10 @@ impl GraphInner {
             edge_by_name,
             state: Mutex::new(State::Initialized),
             main_queue: Mutex::new(VecDeque::new()),
+            executors,
+            in_flight: AtomicUsize::new(0),
+            activity: (Mutex::new(0), Condvar::new()),
+            paused: AtomicBool::new(false),
             side_packets: Mutex::new(BTreeMap::new()),
             required_side_packets: required,
         })
@@ -734,7 +981,7 @@ impl GraphInner {
         *self.state.lock().expect("状态锁中毒") = s;
     }
 
-    fn start(&self) -> Result<()> {
+    fn start(self: &Arc<Self>) -> Result<()> {
         let st = self.state();
         if st != State::Initialized {
             return Err(Error::State(format!(
@@ -773,6 +1020,12 @@ impl GraphInner {
         }
 
         self.set_state(State::Running);
+
+        // 拉起线程池。必须在 Arc 存在之后:工作线程持 Weak,避免 Arc 环。
+        let weak = Arc::downgrade(self);
+        for pool in &self.executors {
+            pool.start(weak.clone());
+        }
         Ok(())
     }
 
@@ -848,34 +1101,81 @@ impl GraphInner {
         // 订阅者(poller / observer)各自独立一份
         {
             let pollers = edge.pollers.lock().expect("poller 列表锁中毒");
+            let mut any = false;
             for p in pollers.iter() {
                 for pkt in &packets {
                     p.push(pkt.clone());
+                    any = true;
                 }
+            }
+            if any {
+                self.notify_activity();
             }
         }
         {
             let observers = edge.observers.lock().expect("observer 列表锁中毒");
             for o in observers.iter() {
                 for pkt in &packets {
-                    let ffi = crate::ffi::borrow_packet(pkt);
-                    unsafe { (o.cb)(o.user, ffi) };
+                    match o {
+                        Observer::C { cb, user } => {
+                            let ffi = crate::ffi::borrow_packet(pkt);
+                            unsafe { cb(*user, ffi) };
+                        }
+                        Observer::Rust(f) => f(pkt),
+                    }
                 }
             }
         }
 
         // 内部消费者:每个输入口一份(仅克隆引用计数)
         for &(node, port) in &edge.consumers {
+            let cap = match self.nodes[node].policy {
+                InputPolicy::FixedSize { capacity } => Some(capacity),
+                _ => None,
+            };
+            let mut dropped = 0u64;
             let mut q = self.nodes[node].input_queues[port]
                 .lock()
                 .expect("队列锁中毒");
             for pkt in &packets {
+                // fixed_size:满则丢最旧的。这是**有意的有损**策略,且不阻塞上游,
+                // 故与「内部边不背压」不冲突,而是其配套的内存约束手段。
+                if let Some(cap) = cap {
+                    while q.len() >= cap {
+                        if let Some(old) = q.pop_front() {
+                            self.shared.on_dequeue(old.byte_size());
+                            dropped += 1;
+                        } else {
+                            break;
+                        }
+                    }
+                }
                 self.shared.on_enqueue(pkt.byte_size());
                 q.push_back(pkt.clone());
             }
             let depth = q.len();
             drop(q);
+            // 入队后,该口不会再来 <= 最后这个包时间戳的数据
+            if let Some(last) = packets.last() {
+                self.nodes[node].advance_bound(port, last.timestamp().next_allowed_in_stream());
+            }
+            if dropped > 0 {
+                self.note_dropped(edge_id, dropped);
+            }
             self.warn_if_over_soft_limit(edge_id, depth);
+        }
+    }
+
+    /// 记录丢包。**绝不静默**:首次丢弃打 WARN,之后按指数退避,避免日志洪水。
+    fn note_dropped(&self, edge_id: EdgeId, n: u64) {
+        let e = &self.edges[edge_id];
+        let before = e.dropped.fetch_add(n, Ordering::SeqCst);
+        let after = before + n;
+        if before == 0 || after.is_power_of_two() {
+            runtime::log_warn(&format!(
+                "边 `{}` 因 fixed_size 策略累计丢弃 {} 个包(消费端跟不上;可用 dropped_count 观测)",
+                e.name, after
+            ));
         }
     }
 
@@ -899,14 +1199,74 @@ impl GraphInner {
         let consumers: Vec<NodeId> = self.edges[edge].consumers.iter().map(|&(n, _)| n).collect();
         for n in consumers {
             if self.try_claim(n) {
-                self.main_queue.lock().expect("主队列锁中毒").push_back(n);
+                self.dispatch_task(n);
             }
         }
+    }
+
+    /// 把已认领的节点派给它所属的执行器。
+    ///
+    /// 未指定 executor 的节点进主线程队列(默认执行器,ADR #16);指定了的进对应线程池。
+    fn dispatch_task(&self, n: NodeId) {
+        match self.nodes[n].executor {
+            None => {
+                self.main_queue.lock().expect("主队列锁中毒").push_back(n);
+                self.notify_activity();
+            }
+            Some(i) => {
+                // 先记在飞、再投递 —— 反了会出现「已在跑但计数为 0」的空窗,
+                // 使 is_idle 误判为空闲、阻塞接口提前返回。
+                self.in_flight.fetch_add(1, Ordering::SeqCst);
+                if !self.executors[i].submit(n) {
+                    // 池已关停(正在拆图):撤销计数并释放令牌,否则 wait_done 会挂住
+                    self.in_flight.fetch_sub(1, Ordering::SeqCst);
+                    self.nodes[n].sched.lock().expect("调度锁中毒").running = false;
+                }
+                self.notify_activity();
+            }
+        }
+    }
+
+    /// 线程池工作线程的入口。
+    pub fn run_node_on_worker(&self, n: NodeId) {
+        self.run_node(n);
+        self.in_flight.fetch_sub(1, Ordering::SeqCst);
+        self.notify_activity();
+    }
+
+    /// 空闲 = 主线程队列为空 **且** 线程池里没有在飞任务。
+    fn is_idle(&self) -> bool {
+        self.in_flight.load(Ordering::SeqCst) == 0
+            && self.main_queue.lock().expect("主队列锁中毒").is_empty()
+    }
+
+    /// 任何进展都要通知:取到输出、节点关闭、出错、任务入队/完成。
+    /// 否则阻塞中的宿主线程会白等到超时。
+    fn notify_activity(&self) {
+        let (m, cv) = &self.activity;
+        let mut gen = m.lock().unwrap_or_else(|e| e.into_inner());
+        *gen = gen.wrapping_add(1);
+        drop(gen);
+        cv.notify_all();
+    }
+
+    /// 等待「有进展」或超时。
+    fn wait_for_activity(&self, timeout: std::time::Duration) {
+        let (m, cv) = &self.activity;
+        let gen = m.lock().unwrap_or_else(|e| e.into_inner());
+        let before = *gen;
+        let (guard, _res) = cv
+            .wait_timeout_while(gen, timeout, |g| *g == before)
+            .unwrap_or_else(|e| e.into_inner());
+        drop(guard);
     }
 
     /// 尝试取得节点的独占令牌。
     fn try_claim(&self, n: NodeId) -> bool {
         if self.shared.has_error() || self.shared.is_cancelled() {
+            return false;
+        }
+        if self.paused.load(Ordering::SeqCst) {
             return false;
         }
         let node = &self.nodes[n];
@@ -919,7 +1279,7 @@ impl GraphInner {
             return false;
         }
         drop(s);
-        if !node.all_inputs_have_data() {
+        if !node.is_ready() {
             return false;
         }
         let mut s = node.sched.lock().expect("调度锁中毒");
@@ -931,39 +1291,55 @@ impl GraphInner {
         true
     }
 
+    /// 跑一个主线程任务。返回是否真的跑了。
+    ///
+    /// ⚠ 必须先把 pop 的结果落到局部变量:在 edition 2021 里,`if let` 表达式中的
+    /// 临时值(此处是 MutexGuard)会存活到整个 if-let 块结束 —— 那样 `run_node`
+    /// 内部再去 `main_queue.lock()` 就自锁死。这也是 R2 锁序规则的实例。
+    fn run_one_main_task(&self) -> bool {
+        let next = self.main_queue.lock().expect("主队列锁中毒").pop_front();
+        match next {
+            Some(n) => {
+                self.run_node(n);
+                true
+            }
+            None => false,
+        }
+    }
+
     /// 执行一步:跑一个主线程任务,或推进关流。返回是否真的做了事。
     fn pump_step(&self) -> bool {
-        // ⚠ 必须先把 pop 的结果落到局部变量:在 edition 2021 里,`if let` 表达式中的
-        // 临时值(此处是 MutexGuard)会存活到整个 if-let 块结束 —— 那样 run_node
-        // 内部再去 main_queue.lock() 就自锁死。这也是设计文档 R2 锁序规则的实例。
-        let next = self.main_queue.lock().expect("主队列锁中毒").pop_front();
-        if let Some(n) = next {
-            self.run_node(n);
-            return true;
-        }
-        self.try_advance_closing()
+        self.run_one_main_task() || self.try_advance_closing()
     }
 
     fn run_node(&self, n: NodeId) {
         let node = &self.nodes[n];
 
-        // 取输入:每个口弹一个,取 min 时间戳作为本次的 input_ts
-        let mut ts = Timestamp::done();
+        // 本次要处理的时间戳。Sync 策略下已做跨口对齐(见 Node::readiness)。
+        let Some(ts) = node.readiness() else {
+            // 认领之后条件又不成立了(并发下可能发生):释放令牌即可
+            self.finish(n);
+            return;
+        };
         {
             let ctx = unsafe { node.ctx() };
             ctx.reset();
             for port in 0..node.input_queues.len() {
-                let pkt = node.input_queues[port]
-                    .lock()
-                    .expect("队列锁中毒")
-                    .pop_front();
-                if let Some(p) = pkt {
-                    self.shared.on_dequeue(p.byte_size());
-                    if p.timestamp() < ts {
-                        ts = p.timestamp();
+                // **只取时间戳恰好等于 ts 的包**。某口在该时刻没有数据是合法的
+                // (算子看到空包),这正是时间戳对齐的语义 —— 若无条件每口弹一个,
+                // 就会把不同时刻的数据配到一起(而且不报错,只是结果错)。
+                if node.front_ts(port) == Some(ts) {
+                    let pkt = node.input_queues[port]
+                        .lock()
+                        .expect("队列锁中毒")
+                        .pop_front();
+                    if let Some(p) = pkt {
+                        self.shared.on_dequeue(p.byte_size());
+                        ctx.inputs[port] = Some(p);
                     }
-                    ctx.inputs[port] = Some(p);
                 }
+                // 取走后,该口不会再来 <= ts 的数据
+                node.advance_bound(port, ts.next_allowed_in_stream());
                 ctx.inputs_done[port] =
                     node.input_closed[port].load(Ordering::SeqCst) && node.queue_len(port) == 0;
             }
@@ -1030,20 +1406,49 @@ impl GraphInner {
     /// 把暂存区的输出分发到下游(此时不持有任何算子回调栈)。
     fn flush_staging(&self, n: NodeId) {
         let node = &self.nodes[n];
-        let batches: Vec<(EdgeId, Vec<Packet>)> = {
+        let (input_ts, batches): (Timestamp, Vec<OutputBatch>) = {
             let ctx = unsafe { node.ctx() };
-            node.outputs
+            let ts = ctx.input_ts;
+            let v = node
+                .outputs
                 .iter()
                 .enumerate()
-                .map(|(i, &e)| (e, std::mem::take(&mut ctx.staging[i])))
-                .collect()
+                .map(|(i, &e)| {
+                    (
+                        e,
+                        std::mem::take(&mut ctx.staging[i]),
+                        ctx.next_bounds[i].take(),
+                    )
+                })
+                .collect();
+            (ts, v)
         };
-        for (edge, packets) in batches {
-            if packets.is_empty() {
+        for (edge, packets, explicit_bound) in batches {
+            if !packets.is_empty() {
+                self.dispatch(edge, packets);
+                self.schedule_consumers(edge);
                 continue;
             }
-            self.dispatch(edge, packets);
-            self.schedule_consumers(edge);
+            // **没有产出时也必须推进下游边界**,否则下游会永远等这一路。
+            // 这是自动的:算子不显式调 SetNextTimestampBound 也不会卡住管线
+            // (Filter 这类会丢包的算子因此不必自己操心)。
+            let bound = match explicit_bound {
+                Some(b) => b,
+                None if input_ts.is_allowed_in_stream() => input_ts.next_allowed_in_stream(),
+                None => continue,
+            };
+            self.propagate_bound(edge, bound);
+        }
+    }
+
+    /// 把时间戳边界推给某条边的所有消费者,并重扫其就绪性。
+    fn propagate_bound(&self, edge: EdgeId, bound: Timestamp) {
+        let consumers: Vec<(NodeId, usize)> = self.edges[edge].consumers.clone();
+        for (node, port) in consumers {
+            self.nodes[node].advance_bound(port, bound);
+            if self.try_claim(node) {
+                self.dispatch_task(node);
+            }
         }
     }
 
@@ -1056,8 +1461,8 @@ impl GraphInner {
             s.rescan = false;
             a
         };
-        if (again || node.all_inputs_have_data()) && self.try_claim(n) {
-            self.main_queue.lock().expect("主队列锁中毒").push_back(n);
+        if (again || node.is_ready()) && self.try_claim(n) {
+            self.dispatch_task(n);
         }
         self.maybe_close(n);
     }
@@ -1065,15 +1470,19 @@ impl GraphInner {
     /// 关流推进:所有输入已关且排空 → close 算子 → 关自己的输出边 → 递归下游。
     fn maybe_close(&self, n: NodeId) -> bool {
         let node = &self.nodes[n];
+        let force = self.shared.has_error() || self.shared.is_cancelled();
+
+        // 在锁下**认领**关流:并发时(宿主线程与工作线程可能同时到这里)
+        // 只有一个线程能置位 close_started,从而保证算子的 Close 只被调用一次。
         {
-            let s = node.sched.lock().expect("调度锁中毒");
-            if s.closed || s.running || !s.opened {
+            let mut s = node.sched.lock().expect("调度锁中毒");
+            if s.close_started || s.running || !s.opened {
                 return false;
             }
-        }
-        let force = self.shared.has_error() || self.shared.is_cancelled();
-        if !force && !node.all_inputs_closed_and_drained() {
-            return false;
+            if !force && !node.all_inputs_closed_and_drained() {
+                return false;
+            }
+            s.close_started = true;
         }
 
         {
@@ -1097,6 +1506,7 @@ impl GraphInner {
         for &e in &node.outputs {
             self.close_edge(e);
         }
+        self.notify_activity();
         true
     }
 
@@ -1107,6 +1517,12 @@ impl GraphInner {
         }
         for &(node, port) in &e.consumers {
             self.nodes[node].input_closed[port].store(true, Ordering::SeqCst);
+            // 关闭即「永远不会再有数据」,边界直接到 Done,让下游不必再等这一路
+            self.nodes[node].advance_bound(port, Timestamp::done());
+            // 关流会改变就绪判定(空口不再阻塞对齐),必须重扫
+            if self.try_claim(node) {
+                self.dispatch_task(node);
+            }
         }
         // 该边的 poller 在队列排空后即视为结束
         for p in e.pollers.lock().expect("poller 列表锁中毒").iter() {
@@ -1144,18 +1560,55 @@ impl GraphInner {
             .all(|n| n.sched.lock().expect("调度锁中毒").closed)
     }
 
-    fn wait_done(&self) -> Result<()> {
-        // 主线程执行器:在此借用宿主线程把剩余任务跑完
+    /// 等待图跑完。`deadline` 为 `None` 表示不限时。
+    ///
+    /// 期间会**借用宿主线程**执行主线程任务(默认执行器,§7.9),
+    /// 同时等待线程池里的任务完成。
+    fn wait_done(&self, deadline: Option<std::time::Instant>) -> Result<()> {
         loop {
+            // 先把能自己干的干完
+            while self.pump_step() {}
             if self.all_nodes_closed() {
                 break;
             }
-            if !self.pump_step() {
-                break;
+            if self.is_idle() {
+                // 空闲且未全关:再推一轮关流
+                if self.try_advance_closing() {
+                    continue;
+                }
+                // 推不动了。这时**不能返回 Ok** —— 图并没有跑完。
+                // 区分两种成因,给出可操作的报错而不是静默成功或永久挂住:
+                let inputs_open: Vec<&str> = self
+                    .graph_inputs
+                    .iter()
+                    .filter(|&&e| !self.edges[e].is_closed())
+                    .map(|&e| self.edges[e].name.as_str())
+                    .collect();
+                if !inputs_open.is_empty() {
+                    return Err(Error::State(format!(
+                        "wait_done:图输入口 [{}] 仍未关闭,图不会自行结束 —— \
+                         请先 close_input/close_all_inputs",
+                        inputs_open.join(", ")
+                    )));
+                }
+                let stuck: Vec<&str> = (0..self.nodes.len())
+                    .filter(|&n| !self.nodes[n].sched.lock().expect("调度锁中毒").closed)
+                    .map(|n| self.nodes[n].name.as_str())
+                    .collect();
+                return Err(Error::Kernel(format!(
+                    "wait_done:输入已全部关闭但图仍静止,未能关闭的节点: [{}]。\
+                     通常是某个算子的产出/关流条件不满足(可用 dump 查看队列积压)",
+                    stuck.join(", ")
+                )));
+            }
+            // 线程池还在跑:等它有进展
+            match self.remaining(deadline) {
+                Some(d) => {
+                    self.wait_for_activity(d);
+                }
+                None => return Err(Error::Timeout),
             }
         }
-        // 排空后再尝试一轮关流
-        while self.try_advance_closing() {}
         if self.all_nodes_closed() {
             self.set_state(State::Terminated);
         }
@@ -1165,6 +1618,43 @@ impl GraphInner {
         match self.shared.first_error() {
             Some(e) => Err(e),
             None => Ok(()),
+        }
+    }
+
+    /// 等到在途任务都处理完(但不结束图)。
+    fn wait_until_idle(&self, deadline: Option<std::time::Instant>) -> Result<()> {
+        loop {
+            while self.run_one_main_task() {}
+            if self.is_idle() {
+                break;
+            }
+            match self.remaining(deadline) {
+                Some(d) => {
+                    self.wait_for_activity(d);
+                }
+                None => return Err(Error::Timeout),
+            }
+        }
+        match self.shared.first_error() {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
+    }
+
+    /// 距 deadline 还剩多久;`None` 表示已超时。无 deadline 时返回一个固定的
+    /// 轮询上限,以免因通知丢失而永久挂住。
+    fn remaining(&self, deadline: Option<std::time::Instant>) -> Option<std::time::Duration> {
+        const POLL_CAP: std::time::Duration = std::time::Duration::from_millis(50);
+        match deadline {
+            None => Some(POLL_CAP),
+            Some(d) => {
+                let now = std::time::Instant::now();
+                if now >= d {
+                    None
+                } else {
+                    Some((d - now).min(POLL_CAP))
+                }
+            }
         }
     }
 
@@ -1293,7 +1783,22 @@ impl GraphInner {
             .observers
             .lock()
             .expect("observer 列表锁中毒")
-            .push(Observer { cb, user });
+            .push(Observer::C { cb, user });
+        Ok(())
+    }
+
+    /// Rust 宿主的推模式订阅。回调在**派发该包的线程**上执行(可能是池线程),
+    /// 因此必须 `Send + Sync`;回调内不得再调 graph 的生命周期接口。
+    pub fn add_observer_fn(&self, port: &str, f: Arc<dyn Fn(&Packet) + Send + Sync>) -> Result<()> {
+        let edge = *self
+            .output_by_name
+            .get(port)
+            .ok_or_else(|| Error::NotFound(format!("图输出口 `{port}` 不存在")))?;
+        self.edges[edge]
+            .observers
+            .lock()
+            .expect("observer 列表锁中毒")
+            .push(Observer::Rust(f));
         Ok(())
     }
 
@@ -1351,11 +1856,11 @@ impl GraphInner {
     pub fn side_packets_mut(&self) -> &Mutex<BTreeMap<String, Packet>> {
         &self.side_packets
     }
-    pub fn start_pub(&self) -> Result<()> {
+    pub fn start_pub(self: &Arc<Self>) -> Result<()> {
         self.start()
     }
     pub fn wait_done_pub(&self) -> Result<()> {
-        self.wait_done()
+        self.wait_done(None)
     }
     pub fn pump_step_pub(&self) -> bool {
         self.pump_step()
@@ -1366,16 +1871,68 @@ impl GraphInner {
     pub fn graph_inputs(&self) -> &[EdgeId] {
         &self.graph_inputs
     }
+
+    // ---- Poller 需要的内部能力 ----
+    pub(crate) fn remaining_for_poller(
+        &self,
+        deadline: Option<std::time::Instant>,
+    ) -> Option<std::time::Duration> {
+        self.remaining(deadline)
+    }
+    pub(crate) fn wait_for_activity_pub(&self, d: std::time::Duration) {
+        self.wait_for_activity(d);
+    }
+    pub(crate) fn is_idle_pub(&self) -> bool {
+        self.is_idle()
+    }
+
+    // ---- 暂停 / 恢复 ----
+    pub fn pause(&self) {
+        self.paused.store(true, Ordering::SeqCst);
+    }
+
+    /// 恢复调度,并重扫一遍就绪节点 —— 暂停期间到达的包否则会一直躺着。
+    pub fn resume(&self) {
+        self.paused.store(false, Ordering::SeqCst);
+        for n in 0..self.nodes.len() {
+            if self.nodes[n].is_ready() && self.try_claim(n) {
+                self.dispatch_task(n);
+            }
+        }
+        self.notify_activity();
+    }
+
+    pub fn is_paused(&self) -> bool {
+        self.paused.load(Ordering::SeqCst)
+    }
+
+    pub fn executor_names(&self) -> Vec<&str> {
+        self.executors.iter().map(|p| p.name()).collect()
+    }
+
+    pub(crate) fn shutdown_executors_pub(&self) {
+        self.shutdown_executors();
+    }
+
+    /// 关停所有线程池并 join。**必须在动节点之前做**。
+    fn shutdown_executors(&self) {
+        for p in &self.executors {
+            p.shutdown();
+        }
+    }
 }
 
 impl Drop for GraphInner {
     /// 兜底关流:图被直接丢弃(没走 wait_done)时,已 open 的算子仍必须收到 Close,
     /// 否则算子里申请的资源(文件、连接、GPU 上下文)不会被释放。
     fn drop(&mut self) {
+        // 先关停线程池并 join:否则工作线程可能触碰正在析构的节点。
+        self.shutdown_executors();
+
         for n in 0..self.nodes.len() {
             let need_close = {
                 let s = self.nodes[n].sched.lock().expect("调度锁中毒");
-                s.opened && !s.closed
+                s.opened && !s.close_started
             };
             if !need_close {
                 continue;
@@ -1399,6 +1956,11 @@ impl Drop for GraphInner {
         }
     }
 }
+
+/// 一个输出口在本次调用中要向下游投递的内容:边 + 包 + 可选的显式时间戳边界。
+///
+/// 即便没有包也要带上边界:否则下游会永远等这一路(见 `flush_staging`)。
+type OutputBatch = (EdgeId, Vec<Packet>, Option<Timestamp>);
 
 #[derive(Debug, Clone, Copy)]
 enum KernelPhase {

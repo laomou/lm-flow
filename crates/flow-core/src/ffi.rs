@@ -288,11 +288,14 @@ pub unsafe extern "C" fn flow_packet_debug_string(pkt: *const FlowPacket) -> *co
 }
 
 #[no_mangle]
-pub extern "C" fn flow_register_type_name(_type_id: u64, _name: *const c_char) -> i32 {
-    // 类型名注册表用于诊断输出。MVP 暂不落地,明确报未实现而不是假装成功。
-    fail(Error::Unsupported(
-        "flow_register_type_name 尚未实现".into(),
-    ))
+pub unsafe extern "C" fn flow_register_type_name(type_id: u64, name: *const c_char) -> i32 {
+    guard(|| {
+        let Some(n) = cstr(name) else {
+            return fail(Error::InvalidArg("类型名为空或非 UTF-8".into()));
+        };
+        packet::register_type_name(type_id, n);
+        code::OK
+    })
 }
 
 #[no_mangle]
@@ -1584,15 +1587,21 @@ pub unsafe extern "C" fn flow_poller_try_next(p: *mut FlowPoller, out: *mut Flow
 pub unsafe extern "C" fn flow_poller_next_timeout(
     p: *mut FlowPoller,
     out: *mut FlowPacket,
-    _timeout_ms: i64,
+    timeout_ms: i64,
 ) -> i32 {
     guard(|| {
-        // 本版本执行器是宿主主线程:任务只在阻塞调用内被抽取,不存在「等别的线程」的情形,
-        // 因此超时等价于「推不动了」。真正的超时语义随线程池执行器一起落地。
-        if flow_poller_next(p, out) {
-            code::OK
-        } else {
-            code::CLOSED
+        let Some(poller) = poller_ref(p) else {
+            return fail(Error::InvalidArg("poller 句柄为空".into()));
+        };
+        match poller.next_timeout(std::time::Duration::from_millis(timeout_ms.max(0) as u64)) {
+            Ok(Some(pkt)) => {
+                if !out.is_null() {
+                    *out = own_packet(pkt);
+                }
+                code::OK
+            }
+            Ok(None) => code::CLOSED,
+            Err(e) => fail(e),
         }
     })
 }
@@ -1653,9 +1662,12 @@ pub unsafe extern "C" fn flow_graph_wait_done(g: *mut FlowGraph) -> i32 {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn flow_graph_wait_done_timeout(g: *mut FlowGraph, _ms: i64) -> i32 {
-    // 主线程执行器下没有「别的线程还在跑」的情形,故与 wait_done 等价。
-    flow_graph_wait_done(g)
+pub unsafe extern "C" fn flow_graph_wait_done_timeout(g: *mut FlowGraph, ms: i64) -> i32 {
+    guard(|| {
+        with_graph(g, |gr| {
+            to_status(gr.wait_done_timeout(std::time::Duration::from_millis(ms.max(0) as u64)))
+        })
+    })
 }
 
 #[no_mangle]
@@ -1664,22 +1676,31 @@ pub unsafe extern "C" fn flow_graph_wait_until_idle(g: *mut FlowGraph) -> i32 {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn flow_graph_wait_until_idle_timeout(g: *mut FlowGraph, _ms: i64) -> i32 {
-    flow_graph_wait_until_idle(g)
+pub unsafe extern "C" fn flow_graph_wait_until_idle_timeout(g: *mut FlowGraph, ms: i64) -> i32 {
+    guard(|| {
+        with_graph(g, |gr| {
+            to_status(
+                gr.wait_until_idle_timeout(std::time::Duration::from_millis(ms.max(0) as u64)),
+            )
+        })
+    })
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn flow_graph_pause(g: *mut FlowGraph) {
     guard_val((), || {
-        let _ = g;
-        last_error::set("pause/resume 尚未实现(主线程执行器下无调度可暂停)");
+        if let Some(gr) = graph_of(g) {
+            gr.pause();
+        }
     });
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn flow_graph_resume(g: *mut FlowGraph) {
     guard_val((), || {
-        let _ = g;
+        if let Some(gr) = graph_of(g) {
+            gr.resume();
+        }
     });
 }
 

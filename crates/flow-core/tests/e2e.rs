@@ -4,7 +4,17 @@
 //! `if let` 临时值把 MutexGuard 拖到块结束而自锁死,`passthrough_pipeline`
 //! 会立刻挂住(测试超时)而不是静默错误。
 
+use std::sync::Mutex;
+
 use flow_core::{Graph, Packet, State, Timestamp};
+
+/// 日志回调是**进程级**的,cargo 又并行跑测试 —— 不串行化就会互相把回调覆盖掉,
+/// 导致断言看到 0 条日志。所有使用 flow_set_log_callback 的测试都必须持此锁。
+static LOG_LOCK: Mutex<()> = Mutex::new(());
+
+fn log_guard() -> std::sync::MutexGuard<'static, ()> {
+    LOG_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 fn init() {
     flow_core::register_builtin_kernels();
@@ -498,45 +508,38 @@ output_ports: ["out"]
 
 /// 图被直接丢弃(未走 wait_done)时,已 open 的算子仍必须收到 Close ——
 /// 否则算子里申请的资源(文件、连接、GPU 上下文)不会被释放。
+///
+/// 用**按图的计数器**断言:全局日志接收器会被并发跑的其它测试干扰。
+/// 计数器随图一起销毁,所以必须在 drop 之前读 —— 这里靠 Poller 延长 GraphInner 寿命,
+/// 于是 Graph 句柄销毁(触发兜底 Close)之后仍能读到计数。
 #[test]
 fn dropping_graph_still_closes_opened_kernels() {
-    use std::ffi::{c_char, c_void, CStr};
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    static CLOSED: AtomicUsize = AtomicUsize::new(0);
-    unsafe extern "C" fn sink(_u: *mut c_void, _lv: i32, msg: *const c_char) {
-        let s = unsafe { CStr::from_ptr(msg) }.to_string_lossy();
-        // SinkKernel::Close 会打这条
-        if s.contains("共处理") {
-            CLOSED.fetch_add(1, Ordering::SeqCst);
-        }
-    }
-
     init();
-    flow_core::ffi::flow_set_log_callback(Some(sink), std::ptr::null_mut());
-    {
-        let graph = Graph::from_yaml(
-            r#"
+    let graph = Graph::from_yaml(
+        r#"
 nodes:
   - { name: "s", kernel: "SinkKernel", input_ports: ["in"], output_ports: [] }
 input_ports: ["in"]
 "#,
-        )
+    )
+    .unwrap();
+    graph.start().unwrap();
+    graph
+        .input("in")
+        .unwrap()
+        .send(Packet::new(1i32).at(Timestamp(0)))
         .unwrap();
-        graph.start().unwrap();
-        graph
-            .input("in")
-            .unwrap()
-            .send(Packet::new(1i32).at(Timestamp(0)))
-            .unwrap();
-        // 故意不 close/wait,直接丢弃
-    }
+    assert_eq!(graph.counter_value("sink.closed"), 0, "此刻还未关闭");
+
+    // 故意不 close/wait,直接丢弃图句柄
+    let shared = graph.shared_for_inspection();
+    drop(graph);
+
     assert_eq!(
-        CLOSED.load(Ordering::SeqCst),
+        shared.counter_value("sink.closed"),
         1,
         "图销毁时必须补调算子的 Close"
     );
-    flow_core::ffi::flow_set_log_callback(None, std::ptr::null_mut());
 }
 
 /// 算子声明的必需 side packet 未注入时,start 阶段就该报错并指出是哪个节点要它。
@@ -663,6 +666,7 @@ fn warns_about_unconsumed_ports() {
     }
 
     init();
+    let _log = log_guard();
     WARNINGS.lock().expect("锁中毒").clear();
     flow_core::ffi::flow_set_log_callback(Some(sink), std::ptr::null_mut());
     let _graph = Graph::from_yaml(

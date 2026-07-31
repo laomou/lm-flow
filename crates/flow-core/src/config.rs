@@ -125,12 +125,14 @@ impl GraphConfig {
                 )));
             }
             match n.input_policy.r#type.as_str() {
-                "sync" => {}
-                "immediate" | "fixed_size" => {
-                    return Err(Error::Unsupported(format!(
-                        "节点 `{who}`: input_policy=`{}` 尚未实现(当前仅 `sync`)",
-                        n.input_policy.r#type
-                    )))
+                "sync" | "immediate" => {}
+                "fixed_size" => {
+                    if n.input_policy.capacity == 0 {
+                        // 容量 0 意味着「每个包都丢」,几乎肯定是漏配
+                        return Err(Error::InvalidArg(format!(
+                            "节点 `{who}`: fixed_size 策略的 capacity 必须 >= 1"
+                        )));
+                    }
                 }
                 other => {
                     return Err(Error::InvalidArg(format!(
@@ -268,16 +270,7 @@ nodes:
         assert_eq!(err.code(), crate::status::code::UNSUPPORTED);
         assert!(err.to_string().contains("max_in_flight"), "{err}");
 
-        let err = GraphConfig::from_yaml(
-            r#"
-nodes:
-  - name: "n"
-    kernel: "K"
-    input_policy: { type: "fixed_size", capacity: 2 }
-"#,
-        )
-        .unwrap_err();
-        assert_eq!(err.code(), crate::status::code::UNSUPPORTED);
+        // fixed_size 现已实现;仍保留「未实现的特性必须报错」这条原则的其它用例
     }
 
     #[test]

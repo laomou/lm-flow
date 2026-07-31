@@ -191,6 +191,8 @@ class SinkKernel : public flow::Kernel {
     char buf[64];
     snprintf(buf, sizeof(buf), "共处理 %lld 个包", static_cast<long long>(count_));
     cc.LogInfo(buf);
+    // 计数器是**按图**的,比全局日志更适合被测试断言
+    cc.CounterAdd("sink.closed");
     return flow::Status::Ok();
   }
 

@@ -77,6 +77,18 @@ pub fn fnv1a_type_id(mangled_name: &str) -> u64 {
     }
 }
 
+/// 用户注册的自定义类型名(用于诊断输出)。
+static TYPE_NAMES: std::sync::LazyLock<std::sync::Mutex<std::collections::BTreeMap<u64, String>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::BTreeMap::new()));
+
+/// 为某个 `type_id` 登记可读名字。同 id 重复登记以最后一次为准。
+pub fn register_type_name(id: u64, name: &str) {
+    TYPE_NAMES
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(id, name.to_string());
+}
+
 /// 类型标识的可读名字 —— 让「类型不符」的报错能指出是什么类型,而不是两个数字。
 pub fn type_name(id: u64) -> String {
     match id {
@@ -88,7 +100,12 @@ pub fn type_name(id: u64) -> String {
         type_id::STR => "Str".to_string(),
         type_id::BUFFER => "Buffer".to_string(),
         type_id::HOST_OBJECT => "HostObject".to_string(),
-        other => format!("type#{other}"),
+        other => TYPE_NAMES
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&other)
+            .cloned()
+            .unwrap_or_else(|| format!("type#{other}")),
     }
 }
 
