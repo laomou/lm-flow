@@ -30,12 +30,11 @@ output_ports: ["out"]
     let poller = graph.add_poller("out").unwrap();
     graph.start().unwrap();
 
-    let int_id = flow_core::packet::fnv1a_type_id("i");
     // 只喂 A 口:不该产出
     graph
         .input("x")
         .unwrap()
-        .send(Packet::new_interop(1i32, int_id).at(Timestamp(0)))
+        .send(Packet::from_i64(1i32 as i64).at(Timestamp(0)))
         .unwrap();
     graph.wait_until_idle().unwrap();
     assert!(poller.try_next().is_none(), "缺一路输入时 sync 不该触发");
@@ -44,12 +43,11 @@ output_ports: ["out"]
     graph
         .input("y")
         .unwrap()
-        .send(Packet::new_interop(2i32, int_id).at(Timestamp(0)))
+        .send(Packet::from_i64(2i32 as i64).at(Timestamp(0)))
         .unwrap();
     graph.wait_until_idle().unwrap();
     let out = poller.try_next().expect("齐备后应产出");
-    let ptr = out.foreign_ptr().expect("应有数据");
-    assert_eq!(unsafe { *(ptr as *const i32) }, 3);
+    assert_eq!(out.as_i64(), Some(3), "1 + 2 = 3");
 
     graph.close_all_inputs();
     let _ = graph.wait_done();
@@ -75,12 +73,11 @@ output_ports: ["out"]
     graph.add_poller("out").unwrap();
     graph.start().unwrap();
 
-    let int_id = flow_core::packet::fnv1a_type_id("i");
     // 只喂一路 —— immediate 下 Process 会被调用(ZipKernel 自己判断缺一路则不产出)
     graph
         .input("x")
         .unwrap()
-        .send(Packet::new_interop(1i32, int_id).at(Timestamp(0)))
+        .send(Packet::from_i64(1i32 as i64).at(Timestamp(0)))
         .unwrap();
     graph.wait_until_idle().unwrap();
 

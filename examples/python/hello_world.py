@@ -8,11 +8,13 @@
 拓扑:in ─► scale(C++ 算子) ─► mid ─► py_offset(Python 算子) ─► out
 
 运行:
-    maturin develop        # 或 pip install -e .
-    python examples/python/hello_world.py
+    python python/build.py --deps      # 首次:下依赖 + 编引擎与扩展
+    PYTHONPATH=.pydeps:python python3 examples/python/hello_world.py
 """
 
 import lmflow
+
+lmflow.register_builtin_kernels()   # 内置 C++ 算子(幂等,必须在建图前)
 
 # ---------------------------------------------------------------- 算子:Python 实现
 @lmflow.kernel("PyOffsetKernel")
@@ -32,8 +34,8 @@ class PyOffsetKernel(lmflow.Kernel):
         self.offset = cc.option_int("offset", 0)
 
     def process(self, cc):
-        value = cc.input(0).as_int()          # 内建类型 I64,跨语言稳定
-        cc.emit(0, lmflow.Packet.from_int(value + self.offset))
+        value = cc.input(0).as_int()          # 内建类型,跨语言稳定
+        cc.emit(0, value + self.offset)       # 裸 int 也可,引擎自动打包
 
     def close(self, cc):
         pass
@@ -67,7 +69,7 @@ def main() -> None:
         source = graph.input("in")
 
         for i in range(10):
-            source.send(lmflow.Packet.from_int(i), ts=i)
+            source.send(i, ts=i)
             packet = poller.next(timeout=5.0)      # 带超时:图卡住时不会永久挂起
             print(f"out: {packet.as_int()} @ ts={packet.timestamp}")
 

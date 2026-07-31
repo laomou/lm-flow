@@ -335,6 +335,42 @@ impl Packet {
         }
     }
 
+    /// 内建类型的便捷构造 —— 跨语言稳定,C++/Python 算子都能按类型读取。
+    pub fn from_i64(v: i64) -> Self {
+        Self::from_builtin(Builtin::I64(v))
+    }
+    pub fn from_f64(v: f64) -> Self {
+        Self::from_builtin(Builtin::F64(v))
+    }
+    pub fn from_bool(v: bool) -> Self {
+        Self::from_builtin(Builtin::Bool(v))
+    }
+    pub fn from_bytes(v: Vec<u8>) -> Self {
+        Self::from_builtin(Builtin::Bytes(v))
+    }
+    pub fn from_str(v: &str) -> Self {
+        Self::from_builtin(Builtin::Str(std::ffi::CString::new(v).unwrap_or_default()))
+    }
+    /// 读取内建整数;非整数包返回 None。
+    pub fn as_i64(&self) -> Option<i64> {
+        match self.as_builtin()? {
+            Builtin::I64(v) => Some(*v),
+            _ => None,
+        }
+    }
+    pub fn as_f64(&self) -> Option<f64> {
+        match self.as_builtin()? {
+            Builtin::F64(v) => Some(*v),
+            _ => None,
+        }
+    }
+    pub fn as_str(&self) -> Option<&str> {
+        match self.as_builtin()? {
+            Builtin::Str(s) => s.to_str().ok(),
+            _ => None,
+        }
+    }
+
     pub fn from_builtin(b: Builtin) -> Self {
         Self {
             data: Some(Arc::new(Payload::Builtin(b))),

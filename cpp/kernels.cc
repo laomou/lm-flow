@@ -14,6 +14,10 @@
  *  Invert            原地改写(省拷贝)            TakeInput + CoW MakeMutableBuffer
  *  Normalize         参数化归一化                  必需参数 / 数组参数 / 点号路径 / side packet
  *
+ * 类型约定:捆绑算子一律用**内建类型**(FLOW_TYPE_I64 等)而非 C++ 原生 typeid ——
+ * 这样它们从 C++、Rust、Python 三侧都能直接使用。若改用 InputSet<int>,
+ * Python 送来的整数(内建 I64)就会被类型校验拒绝。
+ *
  * 注册方式:本文件用**显式聚合注册**(flow_register_builtin_kernels),
  * 因为静态初始化对象在静态库中可能被链接器裁剪。用户自己的算子可以直接用
  * FLOW_REGISTER_KERNEL 宏(更省事),见 flow.hpp。
@@ -44,47 +48,48 @@ class PassThroughKernel : public flow::Kernel {
 class ScaleKernel : public flow::Kernel {
  public:
   static void GetContract(flow::Contract& c) {
-    c.InputSet<int>(0);
-    c.OutputSet<int>(0);
+    c.InputSetBuiltin(0, FLOW_TYPE_I64);
+    c.OutputSetBuiltin(0, FLOW_TYPE_I64);
   }
   flow::Status Open(flow::Context& cc) override {
-    factor_ = static_cast<int>(cc.OptionI64("factor", 1));
+    factor_ = cc.OptionI64("factor", 1);
     return flow::Status::Ok();
   }
   flow::Status Process(flow::Context& cc) override {
-    const int* v = cc.Input(0).TryGet<int>();
-    if (!v) return flow::Status::Error();  // 类型不符:安全拒绝,不是 UB
-    cc.Emit(0, flow::Packet::Make<int>(*v * factor_));
+    int64_t v = 0;
+    if (!cc.Input(0).AsI64(&v)) return cc.Fail("输入不是整数包");
+    cc.Emit(0, flow::Packet::FromI64(v * factor_));
     return flow::Status::Ok();
   }
 
  private:
-  int factor_ = 1;
+  int64_t factor_ = 1;
 };
 
 /* ---------- 3. 有状态累加:Close 时吐出总和 ---------- */
 class SumKernel : public flow::Kernel {
  public:
   static void GetContract(flow::Contract& c) {
-    c.InputSet<int>(0);
-    c.OutputSet<int>(0);
+    c.InputSetBuiltin(0, FLOW_TYPE_I64);
+    c.OutputSetBuiltin(0, FLOW_TYPE_I64);
   }
   flow::Status Open(flow::Context&) override {
     total_ = 0;
     return flow::Status::Ok();
   }
   flow::Status Process(flow::Context& cc) override {
-    if (const int* v = cc.Input(0).TryGet<int>()) total_ += *v;
+    int64_t v = 0;
+    if (cc.Input(0).AsI64(&v)) total_ += v;
     return flow::Status::Ok();  // 中途不产出
   }
   flow::Status Close(flow::Context& cc) override {
     // 流尾单包位置:表示「整条流结束时的一个汇总结果」
-    cc.Emit(0, flow::Packet::Make<int>(total_).At(FLOW_TS_POST_STREAM));
+    cc.Emit(0, flow::Packet::FromI64(total_).At(FLOW_TS_POST_STREAM));
     return flow::Status::Ok();
   }
 
  private:
-  int total_ = 0;
+  int64_t total_ = 0;
 };
 
 /* ---------- 4. 扇出:1 进 2 出 ---------- */
@@ -104,9 +109,9 @@ class SplitKernel : public flow::Kernel {
 class ZipKernel : public flow::Kernel {
  public:
   static void GetContract(flow::Contract& c) {
-    c.InputSet<int>(0);
-    c.InputSet<int>(1);
-    c.OutputSet<int>(0);
+    c.InputSetBuiltin(0, FLOW_TYPE_I64);
+    c.InputSetBuiltin(1, FLOW_TYPE_I64);
+    c.OutputSetBuiltin(0, FLOW_TYPE_I64);
   }
   flow::Status Open(flow::Context& cc) override {
     // 按 tag 定位,不依赖 YAML 书写顺序 —— 端口声明形如:
@@ -120,10 +125,12 @@ class ZipKernel : public flow::Kernel {
     return flow::Status::Ok();
   }
   flow::Status Process(flow::Context& cc) override {
-    const int* a = cc.Input(lhs_).TryGet<int>();
-    const int* b = cc.Input(rhs_).TryGet<int>();
-    if (!a || !b) return flow::Status::Ok();  // 缺一路:本次不产出
-    cc.Emit(0, flow::Packet::Make<int>(*a + *b));
+    int64_t a = 0, b = 0;
+    // 时间戳对齐后某口仍可能无数据(该时刻它就是没有)—— 这时不产出
+    if (!cc.Input(lhs_).AsI64(&a) || !cc.Input(rhs_).AsI64(&b)) {
+      return flow::Status::Ok();
+    }
+    cc.Emit(0, flow::Packet::FromI64(a + b));
     return flow::Status::Ok();
   }
 
@@ -135,17 +142,17 @@ class ZipKernel : public flow::Kernel {
 class FilterKernel : public flow::Kernel {
  public:
   static void GetContract(flow::Contract& c) {
-    c.InputSet<int>(0);
-    c.OutputSet<int>(0);
+    c.InputSetBuiltin(0, FLOW_TYPE_I64);
+    c.OutputSetBuiltin(0, FLOW_TYPE_I64);
   }
   flow::Status Open(flow::Context& cc) override {
-    threshold_ = static_cast<int>(cc.OptionI64("threshold", 0));
+    threshold_ = cc.OptionI64("threshold", 0);
     return flow::Status::Ok();
   }
   flow::Status Process(flow::Context& cc) override {
-    const int* v = cc.Input(0).TryGet<int>();
-    if (!v) return flow::Status::Error();
-    if (*v >= threshold_) {
+    int64_t v = 0;
+    if (!cc.Input(0).AsI64(&v)) return cc.Fail("输入不是整数包");
+    if (v >= threshold_) {
       cc.Forward(0, 0);
     } else {
       // 丢弃该包。必须告知下游「此刻之前不会再有数据」,否则下游会一直等。
@@ -155,20 +162,20 @@ class FilterKernel : public flow::Kernel {
   }
 
  private:
-  int threshold_ = 0;
+  int64_t threshold_ = 0;
 };
 
 /* ---------- 7. 类型转换:int -> std::string ---------- */
 class StringifyKernel : public flow::Kernel {
  public:
   static void GetContract(flow::Contract& c) {
-    c.InputSet<int>(0);
-    c.OutputSet<std::string>(0);
+    c.InputSetBuiltin(0, FLOW_TYPE_I64);
+    c.OutputSetBuiltin(0, FLOW_TYPE_STR);
   }
   flow::Status Process(flow::Context& cc) override {
-    const int* v = cc.Input(0).TryGet<int>();
-    if (!v) return flow::Status::Error();
-    cc.Emit(0, flow::Packet::Make<std::string>(std::to_string(*v)));
+    int64_t v = 0;
+    if (!cc.Input(0).AsI64(&v)) return cc.Fail("输入不是整数包");
+    cc.Emit(0, flow::Packet::FromStr(std::to_string(v).c_str()));
     return flow::Status::Ok();
   }
 };

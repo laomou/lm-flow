@@ -76,10 +76,22 @@ jobs:
         run: cargo +nightly miri test --lib
         continue-on-error: true
 
+  # Python 绑定:必须真的编出来并跑通,不能只查语法
   python:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
       - uses: actions/setup-python@v5
         with: { python-version: '3.11' }
+      - run: python -m pip install pybind11 numpy
+      - name: 构建引擎 + pybind11 扩展
+        run: python python/build.py
+      - name: Python 测试套件
+        run: PYTHONPATH=python python -m unittest discover -s python/tests -v
+      - name: hello_world.py 输出必须正确
+        run: |
+          out=$(PYTHONPATH=python python examples/python/hello_world.py)
+          expected=$(for i in $(seq 0 9); do echo "out: $((i*10+1)) @ ts=$i"; done)
+          [ "$out" = "$expected" ] || { echo "输出不符:"; echo "$out"; exit 1; }
       - run: python -m compileall -q python examples/python

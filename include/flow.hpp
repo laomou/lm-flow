@@ -223,6 +223,15 @@ class Contract {
     flow_contract_output_set_type(c_, i, TypeId<T>());
   }
 
+  /// 按**内建类型**声明(FLOW_TYPE_I64 等)。跨语言算子应当用这个而不是
+  /// `InputSet<T>` —— 后者用的是 C++ 的 typeid,Python/Go 侧无从产生同样的标识。
+  void InputSetBuiltin(size_t i, uint64_t builtin) {
+    flow_contract_input_set_type(c_, i, builtin);
+  }
+  void OutputSetBuiltin(size_t i, uint64_t builtin) {
+    flow_contract_output_set_type(c_, i, builtin);
+  }
+
  private:
   FlowContract* c_;
 };

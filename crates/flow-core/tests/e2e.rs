@@ -65,6 +65,9 @@ output_ports: ["out"]
 }
 
 /// C++ 算子读 options 并产出新包 —— 跨语言按类型传值的完整链路。
+///
+/// 捆绑算子的契约声明的是**内建类型**(而非 C++ 的 typeid),
+/// 这样同一个算子从 C++、Rust、Python 三侧都能用。
 #[test]
 fn cpp_kernel_reads_options_and_types() {
     init();
@@ -84,21 +87,22 @@ output_ports: ["out"]
     let poller = graph.add_poller("out").unwrap();
     graph.start().unwrap();
 
-    // ScaleKernel 的契约声明了 InputSet<int>,所以必须送一个「C++ 认得的 int」:
-    // 用 fnv1a_type_id 算出与 flow.hpp 一致的 type_id。
-    let int_id = flow_core::packet::fnv1a_type_id("i");
     graph
         .input("in")
         .unwrap()
-        .send(Packet::new_interop(6i32, int_id).at(Timestamp(0)))
+        .send(Packet::from_i64(6i32 as i64).at(Timestamp(0)))
         .unwrap();
     graph.close_all_inputs();
     graph.wait_done().unwrap();
 
     let out = poller.try_next().expect("应有输出");
-    assert_eq!(out.type_id(), int_id, "产出应带同样的 int 标识");
-    let ptr = out.foreign_ptr().expect("C++ 产出的包应可取指针");
-    assert_eq!(unsafe { *(ptr as *const i32) }, 42, "6 * factor(7) = 42");
+    // 捆绑算子一律用内建类型 —— 因此 C++/Rust/Python 三侧都能直接读
+    assert_eq!(
+        out.type_id(),
+        flow_core::packet::type_id::I64,
+        "产出应是内建整数类型"
+    );
+    assert_eq!(out.as_i64(), Some(42), "6 * factor(7) = 42");
 }
 
 /// 契约声明了具体类型时,类型不符必须报错 —— 而不是让算子按错误类型解读内存。

@@ -12,10 +12,16 @@
      独占时零拷贝;若上游是扇出、数据被别的分支共享,才会复制一份。
 """
 
-import cv2
 import numpy as np
 
 import lmflow
+
+try:
+    import cv2
+except ImportError:  # pragma: no cover
+    raise SystemExit("本示例需要 opencv-python:pip install opencv-python") from None
+
+lmflow.register_builtin_kernels()
 
 
 @lmflow.kernel("PyResizeKernel")
@@ -99,6 +105,8 @@ def main() -> None:
             frames.send(packet, ts=ts)
 
             out = poller.next(timeout=5.0)
+            if out is None:
+                break
             cv2.imshow("out", out.as_numpy())
             if cv2.waitKey(1) == 27:       # ESC
                 break

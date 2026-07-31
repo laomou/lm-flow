@@ -11,10 +11,6 @@ fn init() {
     flow_core::register_builtin_kernels();
 }
 
-fn int_id() -> u64 {
-    flow_core::packet::fnv1a_type_id("i")
-}
-
 fn zip_graph(policy: &str) -> Graph {
     init();
     let extra = if policy.is_empty() {
@@ -36,9 +32,8 @@ output_ports: ["out"]
     .unwrap()
 }
 
-fn read_int(p: &Packet) -> i32 {
-    let ptr = p.foreign_ptr().expect("应有数据");
-    unsafe { *(ptr as *const i32) }
+fn read_int(p: &Packet) -> i64 {
+    p.as_i64().expect("应是整数包")
 }
 
 /// **核心用例**:两路速度不同,必须按时间戳配对,不能按到达顺序配对。
@@ -56,7 +51,7 @@ fn pairs_by_timestamp_not_by_arrival_order() {
 
     // A 先连送三个
     for i in 0..3i32 {
-        a.send(Packet::new_interop(i * 10, int_id()).at(Timestamp(i as i64)))
+        a.send(Packet::from_i64((i * 10) as i64).at(Timestamp(i as i64)))
             .unwrap();
     }
     graph.wait_until_idle().unwrap();
@@ -66,8 +61,7 @@ fn pairs_by_timestamp_not_by_arrival_order() {
     );
 
     // B 送 ts=1(跳过了 ts=0)
-    b.send(Packet::new_interop(1, int_id()).at(Timestamp(1)))
-        .unwrap();
+    b.send(Packet::from_i64(1 as i64).at(Timestamp(1))).unwrap();
     graph.wait_until_idle().unwrap();
 
     // 现在 B 的边界已推到 2,故 ts=0 与 ts=1 都可判定
@@ -98,11 +92,11 @@ fn aligned_streams_pair_correctly() {
 
     // 交错送,故意让到达顺序与时间戳顺序不一致
     for i in 0..5i32 {
-        a.send(Packet::new_interop(i, int_id()).at(Timestamp(i as i64)))
+        a.send(Packet::from_i64(i as i64).at(Timestamp(i as i64)))
             .unwrap();
     }
     for i in 0..5i32 {
-        b.send(Packet::new_interop(i * 100, int_id()).at(Timestamp(i as i64)))
+        b.send(Packet::from_i64((i * 100) as i64).at(Timestamp(i as i64)))
             .unwrap();
     }
     graph.close_all_inputs();
@@ -128,7 +122,7 @@ fn closing_one_input_unblocks_alignment() {
     let a = graph.input("x").unwrap();
 
     for i in 0..3i32 {
-        a.send(Packet::new_interop(i, int_id()).at(Timestamp(i as i64)))
+        a.send(Packet::from_i64(i as i64).at(Timestamp(i as i64)))
             .unwrap();
     }
     graph.wait_until_idle().unwrap();
@@ -158,7 +152,7 @@ fn immediate_policy_skips_alignment() {
     graph
         .input("x")
         .unwrap()
-        .send(Packet::new_interop(1, int_id()).at(Timestamp(0)))
+        .send(Packet::from_i64(1 as i64).at(Timestamp(0)))
         .unwrap();
     graph.wait_until_idle().unwrap();
 
@@ -202,10 +196,10 @@ output_ports: ["out"]
 
     // 0..10 经过 Filter(阈值 5)后只剩 5..10;另一路每个时刻都送
     for i in 0..10i32 {
-        inp.send(Packet::new_interop(i, int_id()).at(Timestamp(i as i64)))
+        inp.send(Packet::from_i64(i as i64).at(Timestamp(i as i64)))
             .unwrap();
         other
-            .send(Packet::new_interop(1000, int_id()).at(Timestamp(i as i64)))
+            .send(Packet::from_i64(1000 as i64).at(Timestamp(i as i64)))
             .unwrap();
     }
     graph.close_all_inputs();
@@ -250,9 +244,9 @@ output_ports: ["out"]
 
     const N: i32 = 100;
     for i in 0..N {
-        a.send(Packet::new_interop(i, int_id()).at(Timestamp(i as i64)))
+        a.send(Packet::from_i64(i as i64).at(Timestamp(i as i64)))
             .unwrap();
-        b.send(Packet::new_interop(i * 1000, int_id()).at(Timestamp(i as i64)))
+        b.send(Packet::from_i64((i * 1000) as i64).at(Timestamp(i as i64)))
             .unwrap();
     }
     graph.close_all_inputs();
@@ -264,7 +258,7 @@ output_ports: ["out"]
     }
     assert_eq!(got.len(), N as usize, "不得丢包");
     for (ts, v) in &got {
-        let i = *ts as i32;
+        let i = *ts;
         assert_eq!(*v, i + i * 1000, "ts={ts} 的配对必须正确(并发下也不能错配)");
     }
 }

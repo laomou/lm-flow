@@ -313,13 +313,29 @@ FLOW_REGISTER_KERNEL(PassThroughKernel)    // 或 FLOW_REGISTER_KERNEL_AS(T, "�
 - 注册:**内置算子用显式聚合注册**(`flow_register_builtin_kernels`),因为静态初始化
   对象在静态库中可能被链接器裁剪;用户算子可直接用宏。
 
-### 5.2 Python 算子(pybind11)
+### 5.2 Python 算子(pybind11,已实现)
 
-见 §8 专章。约束:只收发内建类型;`process` 期间持 GIL;异常转错误码。
+```python
+@lmflow.kernel("PyDouble")
+class PyDouble(lmflow.Kernel):
+    @staticmethod
+    def get_contract(c):
+        c.input_set_any(0); c.output_set_any(0)
+    def open(self, cc):    self.factor = cc.option_int("factor", 2)
+    def process(self, cc): cc.emit(0, cc.input(0).as_int() * self.factor)
+```
+
+与 C++ 算子在 YAML 里**平等引用** —— 引擎不知道算子是什么语言写的。
+细节见 §8 专章。约束:只收发内建类型;回调期持 GIL;异常转错误码。
 
 ### 5.3 内置算子清单(`cpp/kernels.cc`)
 
 既是可用算子,也是 API 覆盖用例。
+
+> **类型约定**:捆绑算子一律用**内建类型**(`FLOW_TYPE_I64` 等)声明契约,
+> 而不是 `InputSet<int>`(C++ 的 typeid)。原因是后者 Python/Go 侧无从产生同样的
+> 标识 —— 若用它,Python 送来的整数会被类型校验拒绝。这条是「一套算子三语言可用」
+> 的前提,`flow.hpp` 为此提供了 `InputSetBuiltin`。
 
 | 算子 | 用途 | 覆盖接口 |
 |---|---|---|
@@ -673,13 +689,18 @@ WARN 日志。任何有损行为都必须可观测,否则「跑通了」和「�
 
 ---
 
-## 8. Python 接口
+## 8. Python 接口(已实现)
 
 ### 8.1 形态
 
-pybind11 模块 `lmflow._lmflow` 链接 `libflow_core`(**动态库**,见 §8.5),
-Python 包 `lmflow` 在其上提供 `@kernel` 装饰器与 `Kernel` 基类。
+pybind11 模块 `lmflow._lmflow`(`python/src/bindings.cc`)链接 `libflow_core`,
+只调用 `include/flow.h` 这一层 C ABI —— 和 C++ 算子走同一条路。
+Python 包 `lmflow`(`python/lmflow/__init__.py`)在其上提供 `@kernel` 装饰器、
+`Kernel` 基类、`Graph` 上下文管理器与类型常量。
 Python 既可**注册算子**,也可**驱动图**。
+
+构建:`python python/build.py --deps`(先把 pybind11/numpy 解到项目内的 `.pydeps`,
+不碰系统或用户站点 —— 在 PEP 668 管控的发行版上也能装),或 `pip install .`。
 
 ```python
 @lmflow.kernel("PyOffsetKernel")
