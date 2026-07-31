@@ -348,7 +348,9 @@ impl Packet {
     pub fn from_bytes(v: Vec<u8>) -> Self {
         Self::from_builtin(Builtin::Bytes(v))
     }
-    pub fn from_str(v: &str) -> Self {
+    /// 命名为 `from_string` 而非 `from_str`:后者会与标准库的
+    /// `FromStr::from_str` 混淆(clippy 会拦)。
+    pub fn from_string(v: &str) -> Self {
         Self::from_builtin(Builtin::Str(std::ffi::CString::new(v).unwrap_or_default()))
     }
     /// 读取内建整数;非整数包返回 None。

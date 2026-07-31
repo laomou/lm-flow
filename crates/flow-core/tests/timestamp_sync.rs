@@ -61,7 +61,7 @@ fn pairs_by_timestamp_not_by_arrival_order() {
     );
 
     // B 送 ts=1(跳过了 ts=0)
-    b.send(Packet::from_i64(1 as i64).at(Timestamp(1))).unwrap();
+    b.send(Packet::from_i64(1_i64).at(Timestamp(1))).unwrap();
     graph.wait_until_idle().unwrap();
 
     // 现在 B 的边界已推到 2,故 ts=0 与 ts=1 都可判定
@@ -108,7 +108,7 @@ fn aligned_streams_pair_correctly() {
     }
     assert_eq!(
         got,
-        (0..5).map(|i| (i as i64, i + i * 100)).collect::<Vec<_>>(),
+        (0..5).map(|i| (i, i + i * 100)).collect::<Vec<_>>(),
         "同一时间戳的两路必须配到一起"
     );
 }
@@ -152,7 +152,7 @@ fn immediate_policy_skips_alignment() {
     graph
         .input("x")
         .unwrap()
-        .send(Packet::from_i64(1 as i64).at(Timestamp(0)))
+        .send(Packet::from_i64(1_i64).at(Timestamp(0)))
         .unwrap();
     graph.wait_until_idle().unwrap();
 
@@ -199,7 +199,7 @@ output_ports: ["out"]
         inp.send(Packet::from_i64(i as i64).at(Timestamp(i as i64)))
             .unwrap();
         other
-            .send(Packet::from_i64(1000 as i64).at(Timestamp(i as i64)))
+            .send(Packet::from_i64(1000_i64).at(Timestamp(i as i64)))
             .unwrap();
     }
     graph.close_all_inputs();
