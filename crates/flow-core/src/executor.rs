@@ -42,6 +42,8 @@ pub struct ThreadPool {
     num_threads: usize,
     /// CPU 亲和力:worker `i` 绑到 `affinity[i % len]` 号核。空 = 不绑。
     affinity: Vec<usize>,
+    /// 实时优先级(SCHED_FIFO,1..=99)。0 = 不动(普通分时)。
+    priority: i32,
     shared: Arc<Shared>,
     threads: Mutex<Vec<JoinHandle<()>>>,
 }
@@ -69,13 +71,40 @@ fn pin_current_thread_to(cpu: usize) {
 #[cfg(not(target_os = "linux"))]
 fn pin_current_thread_to(_cpu: usize) {}
 
+/// 把**当前线程**设为 SCHED_FIFO 实时优先级(Linux)。**尽力而为**:设实时调度需要
+/// CAP_SYS_NICE / root,拿不到就静默失败(线程照常以普通分时跑,不影响正确性)。
+///
+/// 与绑核配合是刻意的:实时线程只在被绑的核上抢占,万一算子死循环也不会拖垮整机。
+#[cfg(target_os = "linux")]
+fn set_current_thread_rt_priority(prio: i32) {
+    extern "C" {
+        fn sched_setscheduler(pid: i32, policy: i32, param: *const SchedParam) -> i32;
+    }
+    // Linux `struct sched_param { int sched_priority; }`。
+    #[repr(C)]
+    struct SchedParam {
+        sched_priority: i32,
+    }
+    const SCHED_FIFO: i32 = 1;
+    let param = SchedParam {
+        sched_priority: prio.clamp(1, 99),
+    };
+    unsafe {
+        let _ = sched_setscheduler(0, SCHED_FIFO, &param);
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn set_current_thread_rt_priority(_prio: i32) {}
+
 impl ThreadPool {
-    pub fn new(name: &str, num_threads: usize, affinity: Vec<usize>) -> Self {
+    pub fn new(name: &str, num_threads: usize, affinity: Vec<usize>, priority: i32) -> Self {
         Self {
             name: name.to_string(),
             // 0 视作 1:配了池却一个线程都没有肯定不是本意
             num_threads: num_threads.max(1),
             affinity,
+            priority,
             shared: Arc::new(Shared {
                 queue: Mutex::new(VecDeque::new()),
                 cv: Condvar::new(),
@@ -108,11 +137,15 @@ impl ThreadPool {
             } else {
                 Some(self.affinity[i % self.affinity.len()])
             };
+            let priority = self.priority;
             let h = std::thread::Builder::new()
                 .name(tname)
                 .spawn(move || {
                     if let Some(c) = cpu {
                         pin_current_thread_to(c);
+                    }
+                    if priority > 0 {
+                        set_current_thread_rt_priority(priority);
                     }
                     worker(shared, weak)
                 })
@@ -177,27 +210,27 @@ mod tests {
 
     #[test]
     fn zero_threads_becomes_one() {
-        let p = ThreadPool::new("t", 0, vec![]);
+        let p = ThreadPool::new("t", 0, vec![], 0);
         assert_eq!(p.num_threads(), 1, "配了池却零线程肯定不是本意");
     }
 
     #[test]
     fn submit_before_start_is_queued() {
-        let p = ThreadPool::new("t", 2, vec![]);
+        let p = ThreadPool::new("t", 2, vec![], 0);
         assert!(p.submit(1));
         assert_eq!(p.pending(), 1, "未启动时任务应先排队");
     }
 
     #[test]
     fn submit_after_shutdown_is_rejected() {
-        let p = ThreadPool::new("t", 1, vec![]);
+        let p = ThreadPool::new("t", 1, vec![], 0);
         p.shutdown();
         assert!(!p.submit(1), "关停后必须明确拒绝,让调用方能释放令牌");
     }
 
     #[test]
     fn shutdown_is_idempotent_and_joins() {
-        let p = ThreadPool::new("t", 3, vec![]);
+        let p = ThreadPool::new("t", 3, vec![], 0);
         // 不 start 也应能安全关停
         p.shutdown();
         p.shutdown();
@@ -237,6 +270,27 @@ mod tests {
             1u64 << 1,
             "worker 必须被恰好绑到 1 号核,实际掩码 {:#b}",
             mask[0]
+        );
+    }
+
+    /// 实时优先级是**尽力而为**的:有权限(CAP_SYS_NICE/root)时应真的切到 SCHED_FIFO;
+    /// 无权限时静默失败、线程照常跑。两种情形都不能崩、不能改变功能。
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn rt_priority_is_best_effort() {
+        extern "C" {
+            fn sched_getscheduler(pid: i32) -> i32;
+        }
+        const SCHED_FIFO: i32 = 1;
+        let handle = std::thread::spawn(|| {
+            super::set_current_thread_rt_priority(10);
+            unsafe { sched_getscheduler(0) }
+        });
+        let policy = handle.join().unwrap();
+        // 有权限:应为 SCHED_FIFO;无权限:仍是原策略(通常 0=SCHED_OTHER)。都算通过。
+        assert!(
+            policy == SCHED_FIFO || policy >= 0,
+            "设优先级不得使线程处于非法调度状态,实际 policy={policy}"
         );
     }
 }

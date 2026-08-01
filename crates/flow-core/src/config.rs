@@ -24,6 +24,10 @@ pub struct ExecutorConfig {
     /// 仅 Linux 生效;其它平台忽略。用于实时/NUMA 场景固定核、减少迁移抖动。
     #[serde(default)]
     pub affinity: Vec<usize>,
+    /// 实时优先级(SCHED_FIFO,1..=99)。0 = 不动(默认,普通分时)。
+    /// 尽力而为:设实时调度需 CAP_SYS_NICE/root,拿不到就静默降级。仅 Linux。
+    #[serde(default)]
+    pub priority: i32,
 }
 
 /// 输入策略(节点级可插拔)。见 docs/design.md §7.10。
@@ -267,18 +271,20 @@ max_queued_packets: 500
         let cfg = GraphConfig::from_yaml(
             r#"
 executors:
-  - { name: "rt", type: "ThreadPoolExecutor", num_threads: 2, affinity: [2, 3] }
+  - { name: "rt", type: "ThreadPoolExecutor", num_threads: 2, affinity: [2, 3], priority: 10 }
 nodes:
   - { name: "n", kernel: "K", input_ports: ["a"], output_ports: ["b"] }
 "#,
         )
         .unwrap();
         assert_eq!(cfg.executors[0].affinity, vec![2, 3], "绑核列表应被解析");
-        // 不配 affinity 时默认空
+        assert_eq!(cfg.executors[0].priority, 10, "实时优先级应被解析");
+        // 不配时默认:不绑核、优先级 0(普通分时)
         let cfg2 =
             GraphConfig::from_yaml("executors:\n  - { name: c, type: ThreadPoolExecutor }\n")
                 .unwrap();
         assert!(cfg2.executors[0].affinity.is_empty(), "默认不绑核");
+        assert_eq!(cfg2.executors[0].priority, 0, "默认普通分时");
     }
 
     #[test]

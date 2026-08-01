@@ -666,7 +666,18 @@ executors:
 - **仅 Linux 生效**;其它平台静默忽略。**是尽力而为的优化**:绑核失败(核不存在等)不影响正确性。
 - 只用 glibc 已链接的 `sched_setaffinity` 符号(`extern "C"` 声明),不引入 `libc` crate,守住「零外部 crate 依赖」。
 - ⚠ 亲和力 ≠ **优先级**:它只限制「能在哪些核跑」,不改变线程分到多少 CPU 时间。
-  实时优先级(`SCHED_FIFO`/`nice`)是另一根轴,本版本未做。
+
+**实时优先级** —— 池可选 `priority: 1..=99`,把 worker 切到 `SCHED_FIFO` 实时调度:
+
+```yaml
+executors:
+  - { name: "rt", type: "ThreadPoolExecutor", num_threads: 2, affinity: [2, 3], priority: 20 }
+```
+
+- `0`(默认)= 普通分时(`SCHED_OTHER`),不动;`1..=99` = 该 RT 优先级的 `SCHED_FIFO`。
+- **尽力而为**:设实时调度需 `CAP_SYS_NICE`/root,拿不到就静默降级为普通分时,不影响正确性。仅 Linux。
+- 与绑核**配合**是刻意的:实时线程只在被绑的核上抢占,万一算子死循环也只拖垮那几个核、不拖垮整机。
+  worker 空闲时阻塞在 condvar 上(让出 CPU),故 idle 的 RT 线程不会空转饿死别人。
 
 **默认(节点未写 `executor`)= 宿主主线程,不是线程池**(ADR #16):
 
