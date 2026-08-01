@@ -108,6 +108,8 @@ jobs:
           out=$(PYTHONPATH=python python examples/python/hello_world.py)
           expected=$(for i in $(seq 0 9); do echo "out: $((i*10+1)) @ ts=$i"; done)
           [ "$out" = "$expected" ] || { echo "输出不符:"; echo "$out"; exit 1; }
+      - name: 实时管线示例必须端到端跑通(自带断言)
+        run: PYTHONPATH=python python examples/python/realtime_pipeline.py
       - run: python -m compileall -q python examples/python
 
   # 移动/嵌入式:引擎是可移植 Rust + cc 编的 C++,必须真能交叉编到各目标。

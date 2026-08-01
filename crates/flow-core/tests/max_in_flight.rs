@@ -8,7 +8,7 @@
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use flow_core::{Graph, Packet, Timestamp};
 
@@ -147,22 +147,21 @@ output_ports: ["out"]
     graph.start().unwrap();
     let input = graph.input("in").unwrap();
 
-    // 全部用较大的 ts,睡眠都被 clamp 到 5ms;8 个并行应几乎同时结束
-    let t0 = Instant::now();
+    // 全部用较大的 ts,睡眠都被 clamp 到 5ms。8 个任务会同时在 process 里睡,
+    // 于是**峰值并发**(同时处于 process 的调用数)应 ≥ 2 —— 串行的话峰值恒为 1。
+    // 这是「真并行」的稳健证据;不用墙钟耗时断言,因为共享 CI runner 上的绝对
+    // 耗时天然抖动(macOS runner 上就抖出过假阳性)。挂死由下面的 30s 超时兜底。
     for i in 10..18i32 {
         input.send(Packet::new(i).at(Timestamp(i as i64))).unwrap();
     }
     graph
         .wait_until_idle_timeout(Duration::from_secs(30))
         .unwrap();
-    let elapsed = t0.elapsed();
 
     let peak = reverse_sleep_kernel::MAX_CONCURRENCY.load(Ordering::SeqCst);
-    assert!(peak >= 2, "必须观察到并发执行,峰值并发={peak}");
-    // 8 个各 5ms 若串行 = 40ms;并行应远小于。给足裕量防 CI 抖动。
     assert!(
-        elapsed < Duration::from_millis(30),
-        "8 个 5ms 调用并行应远快于串行(40ms),实际 {elapsed:?} 峰值并发 {peak}"
+        peak >= 2,
+        "必须观察到并发执行(≥2 个调用同时在 process),峰值并发={peak}"
     );
 
     graph.close_all_inputs();
