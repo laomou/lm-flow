@@ -26,7 +26,7 @@ pub type NodeId = usize;
 pub type EdgeId = usize;
 
 /// 输入策略(节点级可插拔,见 docs/design.md §7.10)。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InputPolicy {
     /// 所有输入口齐备才触发。默认。
     Sync,
@@ -36,18 +36,69 @@ pub enum InputPolicy {
     /// 摄像头 30fps 而算子只跑 10fps 时,无界队列会让内存无限增长,丢旧帧才是正确取舍。
     /// 就绪条件同 `Sync`。
     FixedSize { capacity: usize },
+    /// **部分对齐**:把输入口划成若干组,每组内各自按时间戳对齐;任一组就绪即触发,
+    /// 且本次只带上该组的口(其余口留空)。分组是输入口的一个**完整划分**(每口恰属一组)。
+    /// 用于「A、B 该配对,C 独立」这类图。存的是输入口序号(建图时由端口名解析)。
+    SyncSet { sets: Vec<Vec<usize>> },
 }
 
 impl InputPolicy {
-    fn from_config(c: &crate::config::InputPolicyConfig) -> Self {
-        match c.r#type.as_str() {
+    /// 从配置构造。`ins` 用于把 `sync_set` 里的端口**名字**解析成序号并校验。
+    fn from_config(
+        c: &crate::config::InputPolicyConfig,
+        ins: &crate::kernel::PortTable,
+    ) -> Result<Self> {
+        Ok(match c.r#type.as_str() {
             "immediate" => InputPolicy::Immediate,
             "fixed_size" => InputPolicy::FixedSize {
                 capacity: c.capacity.max(1),
             },
+            "sync_set" => {
+                if c.sets.is_empty() {
+                    return Err(Error::InvalidArg(
+                        "sync_set 策略必须给出 sets(输入口分组)".into(),
+                    ));
+                }
+                let mut resolved: Vec<Vec<usize>> = Vec::new();
+                let mut seen = vec![false; ins.len()];
+                for set in &c.sets {
+                    if set.is_empty() {
+                        return Err(Error::InvalidArg("sync_set 的分组不得为空".into()));
+                    }
+                    let mut group = Vec::with_capacity(set.len());
+                    for name in set {
+                        let idx = ins.index_by_name(name).ok_or_else(|| {
+                            Error::InvalidArg(format!("sync_set 引用了不存在的输入口 `{name}`"))
+                        })?;
+                        if seen[idx] {
+                            return Err(Error::InvalidArg(format!(
+                                "sync_set 的输入口 `{name}` 出现在多个组里(分组须互斥)"
+                            )));
+                        }
+                        seen[idx] = true;
+                        group.push(idx);
+                    }
+                    resolved.push(group);
+                }
+                if let Some(miss) = (0..ins.len()).find(|&i| !seen[i]) {
+                    return Err(Error::InvalidArg(format!(
+                        "sync_set 必须覆盖全部输入口;至少漏了 `{}`(要独立就让它单独成组)",
+                        ins.name(miss).unwrap_or("?")
+                    )));
+                }
+                InputPolicy::SyncSet { sets: resolved }
+            }
             _ => InputPolicy::Sync,
-        }
+        })
     }
+}
+
+/// 一次触发的计划:处理时间戳 + 参与本次的输入口。
+/// `ports = None` 表示「全部口」(Sync / Immediate / FixedSize 的现状,不分配);
+/// `Some(set)` 表示「只这些口」(SyncSet 的就绪组)—— 认领时只对这些口弹包、推进 bound。
+struct Ready {
+    ts: Timestamp,
+    ports: Option<Vec<usize>>,
 }
 
 // ---------------------------------------------------------------- 状态机
@@ -324,7 +375,7 @@ impl Node {
             .map(|p| p.timestamp())
     }
 
-    /// 就绪判定。返回本次可处理的**输入时间戳**;`None` 表示还不能跑。
+    /// 就绪判定。返回本次的**触发计划**(处理时间戳 + 参与的输入口);`None` 表示还不能跑。
     ///
     /// `Sync` 采用时间戳对齐:
     ///   * `min_packet` = 各非空口队首时间戳的最小值;
@@ -333,9 +384,9 @@ impl Node {
     ///     于是可以在 `min_packet` 上安全地组一次 Process。
     ///
     /// 这条判据是多输入口正确性的核心:没有它,Zip 之类算子会把不同时刻的数据配到一起。
-    fn readiness(&self) -> Option<Timestamp> {
+    fn readiness(&self) -> Option<Ready> {
         let n = self.input_queues.len();
-        match self.policy {
+        match &self.policy {
             InputPolicy::Immediate => {
                 // 不做对齐:任一口有数据就跑
                 let mut min = Timestamp::done();
@@ -346,30 +397,49 @@ impl Node {
                         min = min.min(ts);
                     }
                 }
-                if any {
-                    Some(min)
-                } else {
-                    None
-                }
+                any.then_some(Ready {
+                    ts: min,
+                    ports: None,
+                })
             }
             InputPolicy::Sync | InputPolicy::FixedSize { .. } => {
-                let mut min_packet = Timestamp::done();
-                let mut min_bound = Timestamp::done();
-                for i in 0..n {
-                    match self.front_ts(i) {
-                        Some(ts) => min_packet = min_packet.min(ts),
-                        None => min_bound = min_bound.min(self.bound(i)),
+                self.sync_align(0..n).map(|ts| Ready { ts, ports: None })
+            }
+            InputPolicy::SyncSet { sets } => {
+                // 每组独立对齐;取**最早就绪**的那组,本次只带该组的口。
+                let mut best: Option<Ready> = None;
+                for set in sets {
+                    if let Some(ts) = self.sync_align(set.iter().copied()) {
+                        if best.as_ref().is_none_or(|b| ts < b.ts) {
+                            best = Some(Ready {
+                                ts,
+                                ports: Some(set.clone()),
+                            });
+                        }
                     }
                 }
-                if min_packet == Timestamp::done() {
-                    return None; // 没有任何数据
-                }
-                if min_bound > min_packet {
-                    Some(min_packet)
-                } else {
-                    None // 某空口还可能送来 <= min_packet 的包,必须再等
-                }
+                best
             }
+        }
+    }
+
+    /// 在给定的一组输入口上做 sync 对齐,返回对齐到的时间戳(逻辑同 §7.2 的 min_bound>min_packet)。
+    fn sync_align(&self, ports: impl Iterator<Item = usize>) -> Option<Timestamp> {
+        let mut min_packet = Timestamp::done();
+        let mut min_bound = Timestamp::done();
+        for i in ports {
+            match self.front_ts(i) {
+                Some(ts) => min_packet = min_packet.min(ts),
+                None => min_bound = min_bound.min(self.bound(i)),
+            }
+        }
+        if min_packet == Timestamp::done() {
+            return None; // 没有任何数据
+        }
+        if min_bound > min_packet {
+            Some(min_packet)
+        } else {
+            None // 某空口还可能送来 <= min_packet 的包,必须再等
         }
     }
 
@@ -921,7 +991,7 @@ impl GraphInner {
                 in_ports: ins.clone(),
                 out_ports: outs,
                 executor,
-                policy: InputPolicy::from_config(&n.input_policy),
+                policy: InputPolicy::from_config(&n.input_policy, &ins)?,
                 input_types: contract.input_types.clone(),
                 kernel,
                 ctxs,
@@ -1210,8 +1280,8 @@ impl GraphInner {
 
         // 内部消费者:每个输入口一份(仅克隆引用计数)
         for &(node, port) in &edge.consumers {
-            let cap = match self.nodes[node].policy {
-                InputPolicy::FixedSize { capacity } => Some(capacity),
+            let cap = match &self.nodes[node].policy {
+                InputPolicy::FixedSize { capacity } => Some(*capacity),
                 _ => None,
             };
             let mut dropped = 0u64;
@@ -1365,9 +1435,10 @@ impl GraphInner {
             return false; // 达容量上限;释放槽后由 finish→schedule_node 重扫
         }
         // 就绪判定(会短暂锁 input_queues / input_bounds,锁序 sched→queue/bound 一致)
-        let Some(ts) = node.readiness() else {
+        let Some(ready) = node.readiness() else {
             return false;
         };
+        let ts = ready.ts;
         let slot = s.free_slots.pop().expect("in_flight < max 时必有空槽");
         let seq = s.next_seq;
         s.next_seq += 1;
@@ -1378,6 +1449,12 @@ impl GraphInner {
         let ctx = unsafe { node.ctx_slot(slot) };
         ctx.reset();
         for port in 0..node.input_queues.len() {
+            // 只处理「参与本次触发」的口(SyncSet:就绪组;其余策略:全部口)。
+            // 非参与口原样不动:不弹包、不推进 bound —— 它的包(可能属别的组)留给下次。
+            let participates = ready.ports.as_ref().is_none_or(|set| set.contains(&port));
+            if !participates {
+                continue;
+            }
             // 只取时间戳恰好等于 ts 的包;某口在该时刻没有数据是合法的(算子看到空包),
             // 这正是时间戳对齐的语义 —— 若无条件每口弹一个,就会把不同时刻的数据配到一起。
             if node.front_ts(port) == Some(ts) {

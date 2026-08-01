@@ -38,6 +38,9 @@ pub struct InputPolicyConfig {
     pub r#type: String,
     #[serde(default)]
     pub capacity: usize,
+    /// `sync_set` 用:输入口分组(端口名),须完整划分全部输入口。
+    #[serde(default)]
+    pub sets: Vec<Vec<String>>,
 }
 
 fn default_policy_type() -> String {
@@ -49,6 +52,7 @@ impl Default for InputPolicyConfig {
         Self {
             r#type: default_policy_type(),
             capacity: 0,
+            sets: Vec::new(),
         }
     }
 }
@@ -145,9 +149,18 @@ impl GraphConfig {
                         )));
                     }
                 }
+                // sync_set 的分组合法性(名字存在、完整划分)在 Graph::build 里查 ——
+                // 那里才有输入口名表。这里只放行类型名。
+                "sync_set" => {
+                    if n.input_policy.sets.is_empty() {
+                        return Err(Error::InvalidArg(format!(
+                            "节点 `{who}`: sync_set 策略必须给出 sets(输入口分组)"
+                        )));
+                    }
+                }
                 other => {
                     return Err(Error::InvalidArg(format!(
-                    "节点 `{who}`: 未知 input_policy `{other}`(可选 sync / immediate / fixed_size)"
+                    "节点 `{who}`: 未知 input_policy `{other}`(可选 sync / immediate / fixed_size / sync_set)"
                 )))
                 }
             }

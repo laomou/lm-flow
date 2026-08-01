@@ -285,3 +285,134 @@ input_ports: ["in"]
     .unwrap_err();
     assert!(err.to_string().contains("未知 input_policy"), "{err}");
 }
+
+/// 测试用算子:每次触发时,把「哪些输入口非空」编码成位掩码(bit i = 输入口 i 有包)发出。
+/// 用它验证 SyncSet 每次只带上就绪那组的口。
+mod port_probe {
+    use flow_core::ffi::*;
+    use std::ffi::c_void;
+
+    unsafe extern "C" fn process(_s: *mut c_void, ctx: *mut FlowContext) -> i32 {
+        let n = flow_ctx_num_inputs(ctx);
+        let mut mask: i64 = 0;
+        for i in 0..n {
+            if !flow_ctx_input_is_empty(ctx, i) {
+                mask |= 1i64 << i;
+            }
+        }
+        let ts = flow_ctx_input_timestamp(ctx);
+        flow_ctx_emit(ctx, 0, flow_packet_from_i64(mask, ts));
+        0
+    }
+
+    pub fn register() {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            let vt = FlowKernelVTable {
+                create: None,
+                get_contract: None,
+                open: None,
+                process: Some(process),
+                close: None,
+                destroy: None,
+            };
+            let vt: &'static _ = Box::leak(Box::new(vt));
+            let name = std::ffi::CString::new("PortProbe").unwrap();
+            let rc = unsafe { flow_register_kernel(name.as_ptr(), vt, std::ptr::null_mut()) };
+            assert_eq!(rc, 0, "注册 PortProbe 失败");
+        });
+    }
+}
+
+/// SyncSet:分组各自按时间戳对齐、独立触发,每次只带**就绪那组**的口。
+#[test]
+fn sync_set_fires_groups_independently() {
+    init();
+    port_probe::register();
+    // 三个输入口 x=0,y=1,z=2;分成 {x,y} 与 {z}
+    let graph = Graph::from_yaml(
+        r#"
+nodes:
+  - name: "n"
+    kernel: "PortProbe"
+    input_ports: ["x", "y", "z"]
+    output_ports: ["out"]
+    input_policy: { type: "sync_set", sets: [["x", "y"], ["z"]] }
+input_ports: ["x", "y", "z"]
+output_ports: ["out"]
+"#,
+    )
+    .unwrap();
+    let out = graph.add_poller("out").unwrap();
+    graph.start().unwrap();
+    let (x, y, z) = (
+        graph.input("x").unwrap(),
+        graph.input("y").unwrap(),
+        graph.input("z").unwrap(),
+    );
+
+    // 只喂 x:{x,y} 组不齐,不该触发
+    x.send(Packet::from_i64(1).at(Timestamp(0))).unwrap();
+    graph.wait_until_idle().unwrap();
+    assert!(out.try_next().is_none(), "{{x,y}} 组缺 y 时不该触发");
+
+    // 补上 y@0:{x,y} 组齐 → 触发一次,掩码含 x、y(bit0|bit1=3),不含 z
+    y.send(Packet::from_i64(2).at(Timestamp(0))).unwrap();
+    graph.wait_until_idle().unwrap();
+    let p = out.try_next().expect("{{x,y}} 齐备后应触发");
+    assert_eq!(p.timestamp().0, 0);
+    assert_eq!(p.as_i64(), Some(0b011), "只应带 x、y 两口,不带 z");
+    assert!(out.try_next().is_none(), "不该有多余输出");
+
+    // 喂 z@5:{z} 组独立触发 → 掩码只含 z(bit2=4)
+    z.send(Packet::from_i64(9).at(Timestamp(5))).unwrap();
+    graph.wait_until_idle().unwrap();
+    let p = out.try_next().expect("{{z}} 组应独立触发");
+    assert_eq!(p.timestamp().0, 5);
+    assert_eq!(p.as_i64(), Some(0b100), "只应带 z 一口");
+
+    graph.close_all_inputs();
+    let _ = graph.wait_done();
+}
+
+/// SyncSet 配置校验:分组必须覆盖全部输入口(否则建图报错)。
+#[test]
+fn sync_set_rejects_incomplete_partition() {
+    init();
+    port_probe::register();
+    let err = Graph::from_yaml(
+        r#"
+nodes:
+  - name: "n"
+    kernel: "PortProbe"
+    input_ports: ["x", "y", "z"]
+    output_ports: ["out"]
+    input_policy: { type: "sync_set", sets: [["x", "y"]] }
+input_ports: ["x", "y", "z"]
+output_ports: ["out"]
+"#,
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("覆盖全部输入口"), "{err}");
+}
+
+/// SyncSet 配置校验:引用不存在的端口名 → 报错。
+#[test]
+fn sync_set_rejects_unknown_port() {
+    init();
+    port_probe::register();
+    let err = Graph::from_yaml(
+        r#"
+nodes:
+  - name: "n"
+    kernel: "PortProbe"
+    input_ports: ["x", "y"]
+    output_ports: ["out"]
+    input_policy: { type: "sync_set", sets: [["x", "nope"]] }
+input_ports: ["x", "y"]
+output_ports: ["out"]
+"#,
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("不存在的输入口"), "{err}");
+}
