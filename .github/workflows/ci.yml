@@ -141,3 +141,18 @@ jobs:
           cargo build --target aarch64-linux-android
       # 鸿蒙/OpenHarmony 标准系统是 target_os=linux(rustc 已确认),与 Linux 走同一套代码路径,
       # 由 rust/external-host 门禁间接覆盖;其 SDK 不在 runner 上,故不单列交叉编译。
+
+  # OpenCV 互转(flow_cv.hpp)是可选头,不进 core,但要保证它真能编、转换真对。
+  opencv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: sudo apt-get update && sudo apt-get install -y libopencv-dev
+      - run: cargo build --release
+      - name: 编译并运行 flow_cv.hpp 测试(含非连续 ROI 拷贝)
+        run: |
+          g++ -std=c++17 -Wall -Wextra -Werror -Iinclude cpp/flow_cv_test.cc \
+              target/release/libflow_core.a $(pkg-config --cflags --libs opencv4) \
+              -lpthread -ldl -lm -o /tmp/flow_cv_test
+          /tmp/flow_cv_test
