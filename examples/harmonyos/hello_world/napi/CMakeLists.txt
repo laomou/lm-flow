@@ -15,7 +15,7 @@ else()
   set(RUST_TARGET aarch64-unknown-linux-ohos)
 endif()
 
-get_filename_component(REPO_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../../.." ABSOLUTE)
+get_filename_component(REPO_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../../../.." ABSOLUTE)
 
 add_library(lmflow SHARED lmflow_napi.cpp)
 target_include_directories(lmflow PRIVATE "${REPO_ROOT}/include")

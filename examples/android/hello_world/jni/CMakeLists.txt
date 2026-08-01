@@ -18,7 +18,7 @@ else()
   message(FATAL_ERROR "未支持的 ANDROID_ABI: ${ANDROID_ABI}")
 endif()
 
-get_filename_component(REPO_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../../.." ABSOLUTE)
+get_filename_component(REPO_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../../../.." ABSOLUTE)
 set(FLOW_CORE "${REPO_ROOT}/target/${RUST_TARGET}/release/libflow_core.a"
     CACHE FILEPATH "为该 ABI 预编的 libflow_core.a")
 

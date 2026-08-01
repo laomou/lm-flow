@@ -35,10 +35,10 @@ lm-flow/
 │   ├── src/bindings.cc        Python bindings (pybind11)
 │   ├── lmflow/                Python package (pip install lm-flow → import lmflow)
 │   └── build.py               pip-free local build script
-├── examples/
-│   ├── cpp/                   External C++ host example (not part of the cargo build)
-│   ├── python/                Python examples
-│   └── android/ ios/ harmonyos/   Mobile integration examples
+├── examples/                  each example is a self-contained project: examples/<lang>/<name>/
+│   ├── cpp/hello_world/       standalone C++ project (CMake: find_package or build-from-source)
+│   ├── python/                hello_world/, realtime_pipeline/, opencv_pipeline/
+│   └── {android,ios,harmonyos}/hello_world/   mobile integration examples
 └── docs/design.md             Design document (authoritative)
 ```
 
@@ -165,4 +165,4 @@ target_link_libraries(my_app PRIVATE lmflow::flow_core)   # headers + libflow_co
 
 The C ABI is the only stable interface (`include/flow.h`); `flow.hpp` is the optional C++ kernel sugar, `flow_cv.hpp` is OpenCV interop, and `flow_platform_log.hpp` bridges engine logs to the platform logger (logcat / os_log / HiLog) in one call — `lmflow::InstallPlatformLogSink()`.
 
-Mobile integration examples: [`examples/android`](examples/android) (JNI), [`examples/ios`](examples/ios) (Swift), [`examples/harmonyos`](examples/harmonyos) (NAPI).
+Mobile integration examples: [`examples/android/hello_world`](examples/android/hello_world) (JNI), [`examples/ios/hello_world`](examples/ios/hello_world) (Swift), [`examples/harmonyos/hello_world`](examples/harmonyos/hello_world) (NAPI).

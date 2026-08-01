@@ -789,7 +789,7 @@ with lmflow.Graph.from_yaml(CONFIG) as graph:        # with 是硬要求,见 8.3
   Python 算子就在 Python 主线程上执行(§7.9)。
 - **只有显式把 Python 算子放进线程池时**才有下列问题:`process` 在引擎工作线程上被
   回调、期间持 GIL ⇒ 多个 Python 算子之间无法真并行。重计算应写成 C++ 算子,
-  或让 Python 算子留在主线程、把 C++ 算子放进池里(见 `examples/python/opencv_pipeline.py`)。
+  或让 Python 算子留在主线程、把 C++ 算子放进池里(见 `examples/python/opencv_pipeline/opencv_pipeline.py`)。
 - **所有可能阻塞的接口必须释放 GIL**(`poller.next` / `wait_done` / `send`),
   否则工作线程拿不到 GIL → 直接死锁。pybind11 用 `py::call_guard<py::gil_scoped_release>()`。
 - 引擎线程由 Rust 创建、Python 并不认识:每次 `gil_scoped_acquire` 会建立 thread state,

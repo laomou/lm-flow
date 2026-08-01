@@ -36,10 +36,10 @@ lm-flow/
 │   ├── src/bindings.cc        Python 绑定(pybind11)
 │   ├── lmflow/                Python 包(pip install lm-flow → import lmflow)
 │   └── build.py               免 pip 的本地构建脚本
-├── examples/
-│   ├── cpp/                   外部 C++ 宿主示例(不进 cargo 构建)
-│   ├── python/                Python 示例
-│   └── android/ ios/ harmonyos/   移动端集成示例
+├── examples/                  每个示例是独立工程:examples/<lang>/<name>/
+│   ├── cpp/hello_world/       独立 C++ 工程(CMake:find_package 或从源码构建)
+│   ├── python/                hello_world/、realtime_pipeline/、opencv_pipeline/
+│   └── {android,ios,harmonyos}/hello_world/   移动端集成示例
 └── docs/design.md             设计方案(权威文档)
 ```
 
@@ -168,4 +168,4 @@ target_link_libraries(my_app PRIVATE lmflow::flow_core)   # 头 + libflow_core.a
 
 C ABI 是唯一稳定接口(`include/flow.h`);`flow.hpp` 是可选的 C++ 算子糖层,`flow_cv.hpp` 是 OpenCV 互转,`flow_platform_log.hpp` 一行把引擎日志接到平台日志系统(logcat / os_log / HiLog)—— `lmflow::InstallPlatformLogSink()`。
 
-移动端集成示例:[`examples/android`](examples/android)(JNI)、[`examples/ios`](examples/ios)(Swift)、[`examples/harmonyos`](examples/harmonyos)(NAPI)。
+移动端集成示例:[`examples/android/hello_world`](examples/android/hello_world)(JNI)、[`examples/ios/hello_world`](examples/ios/hello_world)(Swift)、[`examples/harmonyos/hello_world`](examples/harmonyos/hello_world)(NAPI)。

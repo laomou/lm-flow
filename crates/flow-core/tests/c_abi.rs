@@ -2,7 +2,7 @@
 //!
 //! 这是 `docs/design.md` 里「边界①」的覆盖。刻意只用 `extern "C"` 函数与
 //! `LMFlowPacket` 裸结构体,不碰任何 Rust 侧便利 API —— 因为外部 C/C++/Python
-//! 宿主看到的就只有这些。`examples/cpp/hello_world_host.cc` 的逻辑与此一致。
+//! 宿主看到的就只有这些。`examples/cpp/hello_world/hello_world_host.cc` 的逻辑与此一致。
 
 use std::ffi::{c_char, c_void, CStr, CString};
 
@@ -56,7 +56,7 @@ fn abi_version_and_handshake() {
     );
 }
 
-/// 与 examples/cpp/hello_world_host.cc 等价的完整流程。
+/// 与 examples/cpp/hello_world/hello_world_host.cc 等价的完整流程。
 #[test]
 fn full_pipeline_through_c_abi() {
     flow_core::register_builtin_kernels();

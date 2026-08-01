@@ -152,11 +152,11 @@ jobs:
         run: PYTHONPATH=python python -m unittest discover -s python/tests -v
       - name: hello_world.py 输出必须正确
         run: |
-          out=$(PYTHONPATH=python python examples/python/hello_world.py)
+          out=$(PYTHONPATH=python python examples/python/hello_world/hello_world.py)
           expected=$(for i in $(seq 0 9); do echo "out: $((i*10+1)) @ ts=$i"; done)
           [ "$out" = "$expected" ] || { echo "输出不符:"; echo "$out"; exit 1; }
       - name: 实时管线示例必须端到端跑通(自带断言)
-        run: PYTHONPATH=python python examples/python/realtime_pipeline.py
+        run: PYTHONPATH=python python examples/python/realtime_pipeline/realtime_pipeline.py
       - run: python -m compileall -q python examples/python
 
   # ================================ cross-platform / mobile ================================
@@ -181,7 +181,7 @@ jobs:
           # examples/android 的 JNI 桥:证明它连同引擎能被 NDK 交叉编+链成 .so
           # (JNI 符号由 App 的 JVM 在运行时提供,故 -shared 允许其未定义;引擎符号须从 .a 解析)
           "$TOOL/aarch64-linux-android21-clang++" -std=c++17 -Wall -Wextra -Werror \
-            -shared -fPIC -Iinclude examples/android/jni/lmflow_jni.cc \
+            -shared -fPIC -Iinclude examples/android/hello_world/jni/lmflow_jni.cc \
             target/aarch64-linux-android/debug/libflow_core.a -llog -o /tmp/liblmflow_jni.so
           echo "Android JNI 桥交叉编+链接成功"
       # 鸿蒙/OpenHarmony 标准系统是 target_os=linux(rustc 已确认),与 Linux 走同一套代码路径,
@@ -204,14 +204,14 @@ jobs:
           # examples/ios 的桥接:iOS SDK 下编译+链接,证明 C ABI 头与库在 iOS 工具链可用
           # (只编+链不跑:runner 无真机;链接成功即证明头解析、符号解析、C++ 运行时可链)
           xcrun --sdk iphoneos clang -arch arm64 -miphoneos-version-min=13.0 -Iinclude \
-            examples/ios/bridge_smoke.c \
+            examples/ios/hello_world/bridge_smoke.c \
             target/aarch64-apple-ios/release/libflow_core.a -lc++ -o /tmp/ios_smoke
           echo "iOS 桥接编译+链接成功"
       - name: Swift 示例类型检查(Demo.swift 对着 C 模块 LmFlowC)
         run: |
           # 经 module.modulemap 把 flow.h 暴露成 Swift 模块,typecheck 证明 Demo.swift 的
           # C 互操作(OpaquePointer、LMFlowPacket、状态码比较等)真的对得上 C ABI。
-          swiftc -typecheck -I examples/ios examples/ios/Demo.swift
+          swiftc -typecheck -I examples/ios/hello_world examples/ios/hello_world/Demo.swift
           echo "Demo.swift 类型检查通过"
 
   # ================================ integration (OpenCV) ================================

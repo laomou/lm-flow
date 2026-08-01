@@ -40,7 +40,9 @@ add_custom_command(
   WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
   COMMENT "cargo build ${_cargo_flags} — compiles the Rust engine + C++ kernels into libflow_core.a"
   VERBATIM USES_TERMINAL)
-add_custom_target(flow_engine DEPENDS "${FLOW_LIB}")
+# flow_engine 用 ALL:让 `cmake --build` 默认就驱动 cargo 出 libflow_core.a ——
+# 否则(没有别的 target 依赖它时)install/consumer 会找不到这个库。
+add_custom_target(flow_engine ALL DEPENDS "${FLOW_LIB}")
 
 # 引擎作为 IMPORTED 静态库对外(带公共头 + 需要的系统库)。
 add_library(flow_core STATIC IMPORTED GLOBAL)
