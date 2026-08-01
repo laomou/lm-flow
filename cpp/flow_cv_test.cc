@@ -1,7 +1,8 @@
 // flow_cv.hpp 的单元测试 —— 需要 OpenCV,并链接引擎库(用到 flow_packet_* C ABI)。
 //
-//   g++ -std=c++17 -Iinclude cpp/flow_cv_test.cc target/release/libflow_core.a \
+//   g++ -std=c++17 -Iinclude cpp/flow_cv_test.cc target/release/libflow_core.a
 //       $(pkg-config --cflags --libs opencv4) -lpthread -ldl -lm -o flow_cv_test
+//   (以上两行是一条命令;这里不用反斜杠续行,免得 -Werror=comment 报「多行注释」)
 //
 // 覆盖:引擎分配→cv::Mat 读写、连续 Mat→包拷贝、**非连续 ROI** Mat→包(验证引擎侧
 // 按 strides 拷贝那条路)、以及只读视图读回一致。
