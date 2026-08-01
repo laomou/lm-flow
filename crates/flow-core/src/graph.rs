@@ -1778,6 +1778,13 @@ impl GraphInner {
                 if self.try_advance_closing() {
                     continue;
                 }
+                // try_advance_closing 把最后一个节点关掉并置 Terminated 时会返回 false
+                // (它不把“到达终态”算作推进)。此时图其实已跑完 —— 常见触发是:工作线程
+                // 在本轮 all_nodes_closed() 判定与这里之间关掉了最后一个节点。必须重判,
+                // 否则会把已完成的图误报成“卡住”(症状:未能关闭的节点列表为空 [])。
+                if self.all_nodes_closed() {
+                    break;
+                }
                 // 推不动了。这时**不能返回 Ok** —— 图并没有跑完。
                 // 区分两种成因,给出可操作的报错而不是静默成功或永久挂住:
                 let inputs_open: Vec<&str> = self
