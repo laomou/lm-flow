@@ -334,7 +334,7 @@ class PyDouble(lmflow.Kernel):
 与 C++ 算子在 YAML 里**平等引用** —— 引擎不知道算子是什么语言写的。
 细节见 §8 专章。约束:只收发内建类型;回调期持 GIL;异常转错误码。
 
-### 5.3 内置算子清单(`cpp/kernels.cc`)
+### 5.3 内置算子清单(`cpp/kernels/`,一文件一算子)
 
 既是可用算子,也是 API 覆盖用例。
 
@@ -893,7 +893,7 @@ lmflow/
 │   ├── flow.hpp               C++ 算子糖层(header-only,非 ABI)
 │   └── flow_cv.hpp            可选:LMFlowBuffer ↔ cv::Mat(仅需 OpenCV 者 include)
 ├── cpp/                       C++ 算子
-│   ├── kernels.cc             内置算子集(9 个)
+│   ├── kernels/               内置算子集(11 个,一文件一算子)
 │   └── abi_assert.cc          跨界结构体布局的编译期校验
 ├── crates/
 │   ├── flow-core/             引擎

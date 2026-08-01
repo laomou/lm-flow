@@ -10,9 +10,20 @@ fn main() {
         .cpp(true)
         .std("c++17")
         .include("../../include")
-        .file("../../cpp/kernels.cc")
-        .file("../../cpp/abi_assert.cc")
         .warnings(true);
+    // 内置算子:cpp/kernels/ 下一文件一算子 + register.cc 聚合。逐个收集编入 ——
+    // 新增算子文件会被自动编进来(但注册仍需在 register.cc 里显式登记,见 ADR #14)。
+    let mut kernels: Vec<std::path::PathBuf> = std::fs::read_dir("../../cpp/kernels")
+        .expect("读取 cpp/kernels 目录失败")
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().is_some_and(|x| x == "cc"))
+        .collect();
+    kernels.sort(); // 固定编译顺序,便于复现
+    for k in &kernels {
+        build.file(k);
+    }
+    // abi_assert.cc:只含 static_assert,布局不一致就编译失败(不留到运行期)。
+    build.file("../../cpp/abi_assert.cc");
     build.compile("flow_cpp");
 
     println!("cargo:rerun-if-changed=../../cpp");

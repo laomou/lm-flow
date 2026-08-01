@@ -21,8 +21,9 @@ lm-flow/
 │   ├── flow.h                 C ABI —— 唯一稳定接口
 │   └── flow.hpp               C++ 算子糖层(header-only,非 ABI)
 ├── cpp/                       C++ 算子
-│   ├── kernels.cc             内置示例算子集(11 个,覆盖不同用途)
-│   └── abi_assert.cc          跨界结构体布局的编译期校验
+│   ├── kernels/               内置示例算子集(11 个,一文件一算子 + register.cc 聚合)
+│   ├── abi_assert.cc          跨界结构体布局的编译期校验
+│   └── tests/                 C++ 测试可执行(flow.hpp 单测、CV 转换/图测试)
 ├── crates/
 │   └── flow-core/             引擎(lib + staticlib + cdylib)
 │       ├── build.rs           用 cc 编译 cpp/ 并链入
