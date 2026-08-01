@@ -1,4 +1,4 @@
-// flow_cv.hpp 的单元测试 —— 需要 OpenCV,并链接引擎库(用到 flow_packet_* C ABI)。
+// flow_cv.hpp 的单元测试 —— 需要 OpenCV,并链接引擎库(用到 lmflow_packet_* C ABI)。
 //
 //   g++ -std=c++17 -Iinclude cpp/flow_cv_test.cc target/release/libflow_core.a
 //       $(pkg-config --cflags --libs opencv4) -lpthread -ldl -lm -o flow_cv_test
@@ -18,10 +18,10 @@ int main() {
   // 1) 引擎分配缓冲 -> cv::Mat 写入 -> 只读视图读回
   {
     cv::Mat m;
-    flow::Packet p = flow::NewMatPacket(3, 4, 1, FLOW_DTYPE_U8, &m);
+    lmflow::Packet p = lmflow::NewMatPacket(3, 4, 1, LMFLOW_DTYPE_U8, &m);
     assert(m.rows == 3 && m.cols == 4 && m.channels() == 1);
     m.at<uint8_t>(1, 2) = 200;
-    const cv::Mat v = flow::CvView(p);
+    const cv::Mat v = lmflow::CvView(p);
     assert(v.at<uint8_t>(1, 2) == 200 && "写进引擎缓冲的值应能从只读视图读回");
   }
 
@@ -29,8 +29,8 @@ int main() {
   {
     cv::Mat src(2, 3, CV_8UC3);
     for (int i = 0; i < 2 * 3 * 3; ++i) src.data[i] = static_cast<uint8_t>(i);
-    flow::Packet p = flow::PacketFromMat(src);
-    const cv::Mat v = flow::CvView(p);
+    lmflow::Packet p = lmflow::PacketFromMat(src);
+    const cv::Mat v = lmflow::CvView(p);
     assert(v.rows == 2 && v.cols == 3 && v.channels() == 3);
     assert(std::equal(src.data, src.data + 18, v.data) && "连续 Mat 拷贝应逐字节一致");
   }
@@ -41,8 +41,8 @@ int main() {
     for (int i = 0; i < 16; ++i) big.data[i] = static_cast<uint8_t>(i);
     cv::Mat roi = big(cv::Rect(1, 1, 2, 2));  // 取中间 2x2:step0=4、cols=2 → 非连续
     assert(!roi.isContinuous() && "ROI 应是非连续的");
-    flow::Packet p = flow::PacketFromMat(roi);
-    const cv::Mat v = flow::CvView(p);
+    lmflow::Packet p = lmflow::PacketFromMat(roi);
+    const cv::Mat v = lmflow::CvView(p);
     // big[1..2][1..2] = 值 5,6,9,10
     assert(v.at<uint8_t>(0, 0) == 5 && v.at<uint8_t>(0, 1) == 6);
     assert(v.at<uint8_t>(1, 0) == 9 && v.at<uint8_t>(1, 1) == 10);
@@ -51,13 +51,13 @@ int main() {
   // 4) 可写 CoW:独占的包应能就地改写
   {
     cv::Mat m;
-    flow::Packet p = flow::NewMatPacket(2, 2, 1, FLOW_DTYPE_U8, &m);
+    lmflow::Packet p = lmflow::NewMatPacket(2, 2, 1, LMFLOW_DTYPE_U8, &m);
     m.setTo(0);
     cv::Mat mut;
-    FlowStatus st = flow::CvMutable(p, &mut);
-    assert(st == FLOW_OK);
+    LmflowStatus st = lmflow::CvMutable(p, &mut);
+    assert(st == LMFLOW_OK);
     mut.at<uint8_t>(0, 0) = 42;
-    const cv::Mat v = flow::CvView(p);
+    const cv::Mat v = lmflow::CvView(p);
     assert(v.at<uint8_t>(0, 0) == 42 && "独占包的就地改写应可见");
   }
 

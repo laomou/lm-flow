@@ -15,19 +15,19 @@
 namespace {
 
 // 构造函数抛异常(如打开设备失败):create 必须接住并返回 nullptr。
-struct ThrowingCtorKernel : flow::Kernel {
+struct ThrowingCtorKernel : lmflow::Kernel {
   ThrowingCtorKernel() { throw std::runtime_error("ctor boom"); }
-  flow::Status Process(flow::Context&) override { return flow::Status::Ok(); }
+  lmflow::Status Process(lmflow::Context&) override { return lmflow::Status::Ok(); }
 };
 
-// Process 抛异常:必须转成 FLOW_ERR_KERNEL。
-struct ThrowingProcessKernel : flow::Kernel {
-  flow::Status Process(flow::Context&) override { throw std::runtime_error("process boom"); }
+// Process 抛异常:必须转成 LMFLOW_ERR_KERNEL。
+struct ThrowingProcessKernel : lmflow::Kernel {
+  lmflow::Status Process(lmflow::Context&) override { throw std::runtime_error("process boom"); }
 };
 
 // 正常算子:Process 不碰 Context,便于纯头文件测试(无需引擎符号)。
-struct OkKernel : flow::Kernel {
-  flow::Status Process(flow::Context&) override { return flow::Status::Ok(); }
+struct OkKernel : lmflow::Kernel {
+  lmflow::Status Process(lmflow::Context&) override { return lmflow::Status::Ok(); }
 };
 
 }  // namespace
@@ -35,34 +35,34 @@ struct OkKernel : flow::Kernel {
 int main() {
   // 1) 构造抛异常:create 返回 nullptr,绝不让异常穿越 extern "C"。
   {
-    const FlowKernelVTable* vt = flow::KernelAdapter<ThrowingCtorKernel>::vtable();
+    const LmflowKernelVTable* vt = lmflow::KernelAdapter<ThrowingCtorKernel>::vtable();
     void* self = vt->create(nullptr);
     assert(self == nullptr && "构造抛异常时 create 必须返回 nullptr");
   }
 
   // 2) create 失败后 self==nullptr:open/process/close 必须安全返回错误(不 null 解引用)。
   {
-    const FlowKernelVTable* vt = flow::KernelAdapter<OkKernel>::vtable();
-    assert(vt->open(nullptr, nullptr) == FLOW_ERR_KERNEL);
-    assert(vt->process(nullptr, nullptr) == FLOW_ERR_KERNEL);
-    assert(vt->close(nullptr, nullptr) == FLOW_ERR_KERNEL);
+    const LmflowKernelVTable* vt = lmflow::KernelAdapter<OkKernel>::vtable();
+    assert(vt->open(nullptr, nullptr) == LMFLOW_ERR_KERNEL);
+    assert(vt->process(nullptr, nullptr) == LMFLOW_ERR_KERNEL);
+    assert(vt->close(nullptr, nullptr) == LMFLOW_ERR_KERNEL);
   }
 
-  // 3) Process 抛异常:process 转成 FLOW_ERR_KERNEL。
+  // 3) Process 抛异常:process 转成 LMFLOW_ERR_KERNEL。
   {
-    const FlowKernelVTable* vt = flow::KernelAdapter<ThrowingProcessKernel>::vtable();
+    const LmflowKernelVTable* vt = lmflow::KernelAdapter<ThrowingProcessKernel>::vtable();
     void* self = vt->create(nullptr);
     assert(self != nullptr);
-    assert(vt->process(self, nullptr) == FLOW_ERR_KERNEL);
+    assert(vt->process(self, nullptr) == LMFLOW_ERR_KERNEL);
     vt->destroy(self);
   }
 
-  // 4) 正常算子:create 非空,process 返回 FLOW_OK。
+  // 4) 正常算子:create 非空,process 返回 LMFLOW_OK。
   {
-    const FlowKernelVTable* vt = flow::KernelAdapter<OkKernel>::vtable();
+    const LmflowKernelVTable* vt = lmflow::KernelAdapter<OkKernel>::vtable();
     void* self = vt->create(nullptr);
     assert(self != nullptr);
-    assert(vt->process(self, nullptr) == FLOW_OK);
+    assert(vt->process(self, nullptr) == LMFLOW_OK);
     vt->destroy(self);
   }
 

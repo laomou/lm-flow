@@ -7,8 +7,8 @@ use std::sync::{LazyLock, Mutex};
 use crate::config::parse_port_spec;
 use crate::status::{Error, Result};
 
-/// 算子的函数指针表(布局与 `include/flow.h` 的 `FlowKernelVTable` 一致)。
-/// `ctx`/`contract` 参数在 C 侧是 `FlowContext*`/`FlowContract*`,此处用 `*mut c_void`
+/// 算子的函数指针表(布局与 `include/flow.h` 的 `LmflowKernelVTable` 一致)。
+/// `ctx`/`contract` 参数在 C 侧是 `LmflowContext*`/`LmflowContract*`,此处用 `*mut c_void`
 /// 以免模块间循环依赖;ffi 层负责转换。
 #[repr(C)]
 #[derive(Clone, Copy)]

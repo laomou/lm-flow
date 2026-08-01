@@ -32,9 +32,9 @@ extern "C" {
     /// 由 `cpp/kernels.cc` 提供:显式聚合注册内置 C++ 算子的实现。
     ///
     /// 用显式函数而非静态初始化,是因为静态初始化对象在静态库中可能被链接器裁剪
-    /// (见 docs/design.md §14 风险登记)。C ABI 的 `flow_register_builtin_kernels`
+    /// (见 docs/design.md §14 风险登记)。C ABI 的 `lmflow_register_builtin_kernels`
     /// 由下方 Rust 包装导出(这样它也能出现在 cdylib 的动态导出表里)。
-    fn flow_register_builtin_kernels_impl();
+    fn lmflow_register_builtin_kernels_impl();
 }
 
 /// 注册内置 C++ 算子。**幂等**:重复调用只在首次生效。
@@ -43,7 +43,7 @@ extern "C" {
 pub fn register_builtin_kernels() {
     use std::sync::Once;
     static ONCE: Once = Once::new();
-    ONCE.call_once(|| unsafe { flow_register_builtin_kernels_impl() });
+    ONCE.call_once(|| unsafe { lmflow_register_builtin_kernels_impl() });
 }
 
 /// C ABI:注册内置算子(见 `include/flow.h`)。是 [`register_builtin_kernels`] 的导出包装 ——
@@ -53,6 +53,6 @@ pub fn register_builtin_kernels() {
 /// # Safety
 /// 无参数、无指针入参;内部幂等。可从任意线程安全调用。
 #[no_mangle]
-pub unsafe extern "C" fn flow_register_builtin_kernels() {
+pub unsafe extern "C" fn lmflow_register_builtin_kernels() {
     register_builtin_kernels();
 }

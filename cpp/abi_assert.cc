@@ -5,7 +5,7 @@
  * 钉在一组显式常量上;Rust 侧 tests/abi_layout.rs 钉的是同一组常量。
  * 任何一侧改了字段而忘了同步另一侧,构建就会失败 —— 而不是留到运行期内存错乱。
  *
- * 顺带保持 flow.hpp 的 FLOW_REGISTER_KERNEL 宏处于「被编译」状态(编译期覆盖)。
+ * 顺带保持 flow.hpp 的 LMFLOW_REGISTER_KERNEL 宏处于「被编译」状态(编译期覆盖)。
  */
 #include <cstddef>
 #include <cstdint>
@@ -17,58 +17,58 @@
 
 static_assert(sizeof(void*) == 8, "预期 64 位指针");
 
-/* FlowPacket: payload | type_id | timestamp | owner | drop_fn */
-static_assert(sizeof(FlowPacket) == 40, "FlowPacket 大小变化 —— 同步 tests/abi_layout.rs");
-static_assert(alignof(FlowPacket) == 8, "FlowPacket 对齐变化");
-static_assert(offsetof(FlowPacket, payload) == 0, "FlowPacket::payload 偏移变化");
-static_assert(offsetof(FlowPacket, type_id) == 8, "FlowPacket::type_id 偏移变化");
-static_assert(offsetof(FlowPacket, timestamp) == 16, "FlowPacket::timestamp 偏移变化");
-static_assert(offsetof(FlowPacket, owner) == 24, "FlowPacket::owner 偏移变化");
-static_assert(offsetof(FlowPacket, drop_fn) == 32, "FlowPacket::drop_fn 偏移变化");
+/* LmflowPacket: payload | type_id | timestamp | owner | drop_fn */
+static_assert(sizeof(LmflowPacket) == 40, "LmflowPacket 大小变化 —— 同步 tests/abi_layout.rs");
+static_assert(alignof(LmflowPacket) == 8, "LmflowPacket 对齐变化");
+static_assert(offsetof(LmflowPacket, payload) == 0, "LmflowPacket::payload 偏移变化");
+static_assert(offsetof(LmflowPacket, type_id) == 8, "LmflowPacket::type_id 偏移变化");
+static_assert(offsetof(LmflowPacket, timestamp) == 16, "LmflowPacket::timestamp 偏移变化");
+static_assert(offsetof(LmflowPacket, owner) == 24, "LmflowPacket::owner 偏移变化");
+static_assert(offsetof(LmflowPacket, drop_fn) == 32, "LmflowPacket::drop_fn 偏移变化");
 
-/* FlowKernelVTable: 6 个函数指针 */
-static_assert(sizeof(FlowKernelVTable) == 48, "FlowKernelVTable 大小变化");
-static_assert(alignof(FlowKernelVTable) == 8, "FlowKernelVTable 对齐变化");
-static_assert(offsetof(FlowKernelVTable, create) == 0, "vtable::create 偏移变化");
-static_assert(offsetof(FlowKernelVTable, get_contract) == 8, "vtable::get_contract 偏移变化");
-static_assert(offsetof(FlowKernelVTable, open) == 16, "vtable::open 偏移变化");
-static_assert(offsetof(FlowKernelVTable, process) == 24, "vtable::process 偏移变化");
-static_assert(offsetof(FlowKernelVTable, close) == 32, "vtable::close 偏移变化");
-static_assert(offsetof(FlowKernelVTable, destroy) == 40, "vtable::destroy 偏移变化");
+/* LmflowKernelVTable: 6 个函数指针 */
+static_assert(sizeof(LmflowKernelVTable) == 48, "LmflowKernelVTable 大小变化");
+static_assert(alignof(LmflowKernelVTable) == 8, "LmflowKernelVTable 对齐变化");
+static_assert(offsetof(LmflowKernelVTable, create) == 0, "vtable::create 偏移变化");
+static_assert(offsetof(LmflowKernelVTable, get_contract) == 8, "vtable::get_contract 偏移变化");
+static_assert(offsetof(LmflowKernelVTable, open) == 16, "vtable::open 偏移变化");
+static_assert(offsetof(LmflowKernelVTable, process) == 24, "vtable::process 偏移变化");
+static_assert(offsetof(LmflowKernelVTable, close) == 32, "vtable::close 偏移变化");
+static_assert(offsetof(LmflowKernelVTable, destroy) == 40, "vtable::destroy 偏移变化");
 
-/* FlowBuffer: data | shape[8] | strides[8] | ndim | dtype | flags | device | reserved[2] */
-static_assert(sizeof(FlowBuffer) == 8 + 64 + 64 + 4 + 4 + 4 + 4 + 16,
-              "FlowBuffer 大小变化 —— 同步 Rust 侧并提升 FLOW_ABI_VERSION");
-static_assert(alignof(FlowBuffer) == 8, "FlowBuffer 对齐变化");
-static_assert(offsetof(FlowBuffer, data) == 0, "FlowBuffer::data 偏移变化");
-static_assert(offsetof(FlowBuffer, shape) == 8, "FlowBuffer::shape 偏移变化");
-static_assert(offsetof(FlowBuffer, strides) == 72, "FlowBuffer::strides 偏移变化");
-static_assert(offsetof(FlowBuffer, ndim) == 136, "FlowBuffer::ndim 偏移变化");
-static_assert(offsetof(FlowBuffer, dtype) == 140, "FlowBuffer::dtype 偏移变化");
-static_assert(offsetof(FlowBuffer, flags) == 144, "FlowBuffer::flags 偏移变化");
-static_assert(offsetof(FlowBuffer, device) == 148, "FlowBuffer::device 偏移变化");
-static_assert(offsetof(FlowBuffer, reserved) == 152, "FlowBuffer::reserved 偏移变化");
-static_assert(FLOW_MAX_DIMS == 8, "FLOW_MAX_DIMS 变化会改变 FlowBuffer 布局");
+/* LmflowBuffer: data | shape[8] | strides[8] | ndim | dtype | flags | device | reserved[2] */
+static_assert(sizeof(LmflowBuffer) == 8 + 64 + 64 + 4 + 4 + 4 + 4 + 16,
+              "LmflowBuffer 大小变化 —— 同步 Rust 侧并提升 LMFLOW_ABI_VERSION");
+static_assert(alignof(LmflowBuffer) == 8, "LmflowBuffer 对齐变化");
+static_assert(offsetof(LmflowBuffer, data) == 0, "LmflowBuffer::data 偏移变化");
+static_assert(offsetof(LmflowBuffer, shape) == 8, "LmflowBuffer::shape 偏移变化");
+static_assert(offsetof(LmflowBuffer, strides) == 72, "LmflowBuffer::strides 偏移变化");
+static_assert(offsetof(LmflowBuffer, ndim) == 136, "LmflowBuffer::ndim 偏移变化");
+static_assert(offsetof(LmflowBuffer, dtype) == 140, "LmflowBuffer::dtype 偏移变化");
+static_assert(offsetof(LmflowBuffer, flags) == 144, "LmflowBuffer::flags 偏移变化");
+static_assert(offsetof(LmflowBuffer, device) == 148, "LmflowBuffer::device 偏移变化");
+static_assert(offsetof(LmflowBuffer, reserved) == 152, "LmflowBuffer::reserved 偏移变化");
+static_assert(LMFLOW_MAX_DIMS == 8, "LMFLOW_MAX_DIMS 变化会改变 LmflowBuffer 布局");
 
 #endif /* 64-bit */
 
 /* 状态码 / 时间戳哨兵的取值约定 */
-static_assert(FLOW_OK == 0, "FLOW_OK 必须为 0");
-static_assert(FLOW_TS_UNSET < FLOW_TS_UNSTARTED, "时间戳哨兵顺序错误");
-static_assert(FLOW_TS_UNSTARTED < FLOW_TS_PRE_STREAM, "时间戳哨兵顺序错误");
-static_assert(FLOW_TS_PRE_STREAM < FLOW_TS_MIN, "时间戳哨兵顺序错误");
-static_assert(FLOW_TS_MIN < FLOW_TS_MAX, "时间戳哨兵顺序错误");
-static_assert(FLOW_TS_MAX < FLOW_TS_POST_STREAM, "时间戳哨兵顺序错误");
-static_assert(FLOW_TS_POST_STREAM < FLOW_TS_ONE_OVER_POST_STREAM, "时间戳哨兵顺序错误");
-static_assert(FLOW_TS_ONE_OVER_POST_STREAM < FLOW_TS_DONE, "时间戳哨兵顺序错误");
+static_assert(LMFLOW_OK == 0, "LMFLOW_OK 必须为 0");
+static_assert(LMFLOW_TS_UNSET < LMFLOW_TS_UNSTARTED, "时间戳哨兵顺序错误");
+static_assert(LMFLOW_TS_UNSTARTED < LMFLOW_TS_PRE_STREAM, "时间戳哨兵顺序错误");
+static_assert(LMFLOW_TS_PRE_STREAM < LMFLOW_TS_MIN, "时间戳哨兵顺序错误");
+static_assert(LMFLOW_TS_MIN < LMFLOW_TS_MAX, "时间戳哨兵顺序错误");
+static_assert(LMFLOW_TS_MAX < LMFLOW_TS_POST_STREAM, "时间戳哨兵顺序错误");
+static_assert(LMFLOW_TS_POST_STREAM < LMFLOW_TS_ONE_OVER_POST_STREAM, "时间戳哨兵顺序错误");
+static_assert(LMFLOW_TS_ONE_OVER_POST_STREAM < LMFLOW_TS_DONE, "时间戳哨兵顺序错误");
 
 /* ---- 保持糖层宏路径处于编译状态(不参与运行,仅编译期覆盖)---- */
 namespace {
-class AbiProbeKernel : public flow::Kernel {
+class AbiProbeKernel : public lmflow::Kernel {
  public:
-  static void GetContract(flow::Contract& c) { c.InputSetAny(0); }
-  flow::Status Process(flow::Context&) override { return flow::Status::Ok(); }
+  static void GetContract(lmflow::Contract& c) { c.InputSetAny(0); }
+  lmflow::Status Process(lmflow::Context&) override { return lmflow::Status::Ok(); }
 };
 }  // namespace
 
-FLOW_REGISTER_KERNEL(AbiProbeKernel)
+LMFLOW_REGISTER_KERNEL(AbiProbeKernel)

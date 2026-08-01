@@ -2,7 +2,7 @@
 
 use std::fmt;
 
-/// C ABI 状态码(与 `include/flow.h` 的 `FLOW_*` 常量一一对应)。
+/// C ABI 状态码(与 `include/flow.h` 的 `LMFLOW_*` 常量一一对应)。
 pub mod code {
     pub const OK: i32 = 0;
     pub const INVALID_ARG: i32 = 1;

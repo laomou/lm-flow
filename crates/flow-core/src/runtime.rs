@@ -77,7 +77,7 @@ impl CStrArena {
     }
 }
 
-/// 线程局部的「最近一次错误」文本,供 `flow_last_error` 返回。
+/// 线程局部的「最近一次错误」文本,供 `lmflow_last_error` 返回。
 pub mod last_error {
     use std::cell::RefCell;
     use std::ffi::{c_char, CString};
@@ -102,7 +102,7 @@ pub mod last_error {
 
 // ---------------------------------------------------------------- 图级共享状态
 
-/// 关闭原因,与 `FlowCloseReason` 一致。
+/// 关闭原因,与 `LmflowCloseReason` 一致。
 pub const CLOSE_NORMAL: i32 = 0;
 pub const CLOSE_ERROR: i32 = 1;
 pub const CLOSE_CANCELLED: i32 = 2;
@@ -161,7 +161,7 @@ impl GraphShared {
         self.error.lock().expect("错误锁中毒").clone()
     }
 
-    /// 图级错误文本的 C 指针 —— 注意 `flow_last_error` 是线程局部的,
+    /// 图级错误文本的 C 指针 —— 注意 `lmflow_last_error` 是线程局部的,
     /// 工作线程上算子的失败原因只能通过这里拿到。
     pub fn error_cstr(&self) -> *const std::ffi::c_char {
         let msg = self

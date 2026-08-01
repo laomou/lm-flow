@@ -7,55 +7,55 @@
 //!   1. `include/flow.h` 的结构体定义
 //!   2. `cpp/abi_assert.cc` 的 static_assert
 //!   3. 本文件
-//!   4. 提升 `FLOW_ABI_VERSION`
+//!   4. 提升 `LMFLOW_ABI_VERSION`
 
 use std::mem::{align_of, offset_of, size_of};
 
-use flow_core::ffi::{FlowBuffer, FlowNodeStats, FlowPacket};
+use flow_core::ffi::{LmflowBuffer, LmflowNodeStats, LmflowPacket};
 
 #[test]
-fn flow_packet_layout() {
-    assert_eq!(size_of::<FlowPacket>(), 40, "FlowPacket 大小");
-    assert_eq!(align_of::<FlowPacket>(), 8, "FlowPacket 对齐");
-    assert_eq!(offset_of!(FlowPacket, payload), 0);
-    assert_eq!(offset_of!(FlowPacket, type_id), 8);
-    assert_eq!(offset_of!(FlowPacket, timestamp), 16);
-    assert_eq!(offset_of!(FlowPacket, owner), 24);
-    assert_eq!(offset_of!(FlowPacket, drop_fn), 32);
+fn lmflow_packet_layout() {
+    assert_eq!(size_of::<LmflowPacket>(), 40, "LmflowPacket 大小");
+    assert_eq!(align_of::<LmflowPacket>(), 8, "LmflowPacket 对齐");
+    assert_eq!(offset_of!(LmflowPacket, payload), 0);
+    assert_eq!(offset_of!(LmflowPacket, type_id), 8);
+    assert_eq!(offset_of!(LmflowPacket, timestamp), 16);
+    assert_eq!(offset_of!(LmflowPacket, owner), 24);
+    assert_eq!(offset_of!(LmflowPacket, drop_fn), 32);
 }
 
 #[test]
 fn flow_buffer_layout() {
     // data(8) + shape[8](64) + strides[8](64) + ndim(4) + dtype(4) + flags(4) + device(4) + reserved[2](16)
-    assert_eq!(size_of::<FlowBuffer>(), 168, "FlowBuffer 大小");
-    assert_eq!(align_of::<FlowBuffer>(), 8, "FlowBuffer 对齐");
-    assert_eq!(offset_of!(FlowBuffer, data), 0);
-    assert_eq!(offset_of!(FlowBuffer, shape), 8);
-    assert_eq!(offset_of!(FlowBuffer, strides), 72);
-    assert_eq!(offset_of!(FlowBuffer, ndim), 136);
-    assert_eq!(offset_of!(FlowBuffer, dtype), 140);
-    assert_eq!(offset_of!(FlowBuffer, flags), 144);
-    assert_eq!(offset_of!(FlowBuffer, device), 148);
-    assert_eq!(offset_of!(FlowBuffer, reserved), 152);
+    assert_eq!(size_of::<LmflowBuffer>(), 168, "LmflowBuffer 大小");
+    assert_eq!(align_of::<LmflowBuffer>(), 8, "LmflowBuffer 对齐");
+    assert_eq!(offset_of!(LmflowBuffer, data), 0);
+    assert_eq!(offset_of!(LmflowBuffer, shape), 8);
+    assert_eq!(offset_of!(LmflowBuffer, strides), 72);
+    assert_eq!(offset_of!(LmflowBuffer, ndim), 136);
+    assert_eq!(offset_of!(LmflowBuffer, dtype), 140);
+    assert_eq!(offset_of!(LmflowBuffer, flags), 144);
+    assert_eq!(offset_of!(LmflowBuffer, device), 148);
+    assert_eq!(offset_of!(LmflowBuffer, reserved), 152);
 }
 
 #[test]
 fn flow_node_stats_uses_struct_size_for_forward_compat() {
-    // 与 FlowBuffer 不同,统计结构体用入参 struct_size 做前向兼容(见 docs/design.md §15.1),
+    // 与 LmflowBuffer 不同,统计结构体用入参 struct_size 做前向兼容(见 docs/design.md §15.1),
     // 所以这里只钉住「struct_size 是第一个字段」这一契约,而不钉总大小。
-    assert_eq!(offset_of!(FlowNodeStats, struct_size), 0);
+    assert_eq!(offset_of!(LmflowNodeStats, struct_size), 0);
     assert_eq!(size_of::<u32>(), 4);
 }
 
 #[test]
 fn abi_version_matches_header() {
-    // include/flow.h: #define FLOW_ABI_VERSION 1u
-    assert_eq!(flow_core::ffi::flow_abi_version(), 1);
+    // include/flow.h: #define LMFLOW_ABI_VERSION 1u
+    assert_eq!(flow_core::ffi::lmflow_abi_version(), 1);
 }
 
 #[test]
 fn invalid_id_matches_header() {
-    // include/flow.h: #define FLOW_INVALID_ID ((size_t)-1)
+    // include/flow.h: #define LMFLOW_INVALID_ID ((size_t)-1)
     assert_eq!(flow_core::ffi::INVALID_ID, usize::MAX);
 }
 
@@ -119,6 +119,6 @@ fn timestamp_sentinels_match_header() {
 
 #[test]
 fn max_dims_matches_header() {
-    // include/flow.h: #define FLOW_MAX_DIMS 8 —— 改它会改变 FlowBuffer 布局
+    // include/flow.h: #define LMFLOW_MAX_DIMS 8 —— 改它会改变 LmflowBuffer 布局
     assert_eq!(flow_core::packet::MAX_DIMS, 8);
 }

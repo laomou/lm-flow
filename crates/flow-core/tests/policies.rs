@@ -292,23 +292,23 @@ mod port_probe {
     use flow_core::ffi::*;
     use std::ffi::c_void;
 
-    unsafe extern "C" fn process(_s: *mut c_void, ctx: *mut FlowContext) -> i32 {
-        let n = flow_ctx_num_inputs(ctx);
+    unsafe extern "C" fn process(_s: *mut c_void, ctx: *mut LmflowContext) -> i32 {
+        let n = lmflow_ctx_num_inputs(ctx);
         let mut mask: i64 = 0;
         for i in 0..n {
-            if !flow_ctx_input_is_empty(ctx, i) {
+            if !lmflow_ctx_input_is_empty(ctx, i) {
                 mask |= 1i64 << i;
             }
         }
-        let ts = flow_ctx_input_timestamp(ctx);
-        flow_ctx_emit(ctx, 0, flow_packet_from_i64(mask, ts));
+        let ts = lmflow_ctx_input_timestamp(ctx);
+        lmflow_ctx_emit(ctx, 0, lmflow_packet_from_i64(mask, ts));
         0
     }
 
     pub fn register() {
         static ONCE: std::sync::Once = std::sync::Once::new();
         ONCE.call_once(|| {
-            let vt = FlowKernelVTable {
+            let vt = LmflowKernelVTable {
                 create: None,
                 get_contract: None,
                 open: None,
@@ -318,7 +318,7 @@ mod port_probe {
             };
             let vt: &'static _ = Box::leak(Box::new(vt));
             let name = std::ffi::CString::new("PortProbe").unwrap();
-            let rc = unsafe { flow_register_kernel(name.as_ptr(), vt, std::ptr::null_mut()) };
+            let rc = unsafe { lmflow_register_kernel(name.as_ptr(), vt, std::ptr::null_mut()) };
             assert_eq!(rc, 0, "注册 PortProbe 失败");
         });
     }

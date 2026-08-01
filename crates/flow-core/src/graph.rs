@@ -103,7 +103,7 @@ struct Ready {
 
 // ---------------------------------------------------------------- 状态机
 
-/// 与 `FlowGraphState` 一致。
+/// 与 `LmflowGraphState` 一致。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum State {
     Created = 0,
@@ -158,7 +158,7 @@ impl Edge {
 #[derive(Clone)]
 enum Observer {
     C {
-        cb: unsafe extern "C" fn(*mut c_void, crate::ffi::FlowPacket),
+        cb: unsafe extern "C" fn(*mut c_void, crate::ffi::LmflowPacket),
         user: *mut c_void,
     },
     Rust(Arc<dyn Fn(&Packet) + Send + Sync>),
@@ -760,7 +760,7 @@ impl std::fmt::Debug for Poller {
     }
 }
 
-/// `FlowNodeStats` 的 Rust 侧快照。
+/// `LmflowNodeStats` 的 Rust 侧快照。
 #[derive(Debug, Clone)]
 pub struct NodeStatsSnapshot {
     pub node_name: String,
@@ -1990,7 +1990,7 @@ impl GraphInner {
     pub fn add_observer(
         &self,
         port: &str,
-        cb: unsafe extern "C" fn(*mut c_void, crate::ffi::FlowPacket),
+        cb: unsafe extern "C" fn(*mut c_void, crate::ffi::LmflowPacket),
         user: *mut c_void,
     ) -> Result<()> {
         let edge = *self

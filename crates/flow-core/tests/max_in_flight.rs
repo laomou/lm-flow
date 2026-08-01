@@ -20,7 +20,7 @@ fn init() {
 /// 「睡 (10 - ts) 毫秒后把 ts 原样输出」的算子 —— ts 越小睡越久,故完成顺序与 ts 相反。
 mod reverse_sleep_kernel {
     use super::*;
-    use flow_core::ffi::{FlowContext, FlowContract};
+    use flow_core::ffi::{LmflowContext, LmflowContract};
     use std::ffi::c_void;
 
     // 记录 process 的**进入**顺序与并发峰值,用来证明并行。
@@ -30,27 +30,27 @@ mod reverse_sleep_kernel {
     unsafe extern "C" fn create(_f: *mut c_void) -> *mut c_void {
         std::ptr::null_mut() // 无状态
     }
-    unsafe extern "C" fn process(_self: *mut c_void, ctx: *mut FlowContext) -> i32 {
+    unsafe extern "C" fn process(_self: *mut c_void, ctx: *mut LmflowContext) -> i32 {
         let cur = CUR_CONCURRENCY.fetch_add(1, Ordering::SeqCst) + 1;
         MAX_CONCURRENCY.fetch_max(cur, Ordering::SeqCst);
 
-        let ts = flow_core::ffi::flow_ctx_input_timestamp(ctx);
+        let ts = flow_core::ffi::lmflow_ctx_input_timestamp(ctx);
         // ts 越小睡越久:制造「完成顺序与 ts 相反」。
         let sleep_ms = (70 - ts * 10).clamp(5, 70) as u64;
         std::thread::sleep(Duration::from_millis(sleep_ms));
-        flow_core::ffi::flow_ctx_forward(ctx, 0, 0); // 原样转发 0->0
+        flow_core::ffi::lmflow_ctx_forward(ctx, 0, 0); // 原样转发 0->0
 
         CUR_CONCURRENCY.fetch_sub(1, Ordering::SeqCst);
         0
     }
-    // get_contract 声明为 None,故不需要;但 vtable 字段类型要匹配 FlowContract。
+    // get_contract 声明为 None,故不需要;但 vtable 字段类型要匹配 LmflowContract。
     #[allow(dead_code)]
-    unsafe extern "C" fn _unused_contract(_f: *mut c_void, _c: *mut FlowContract) {}
+    unsafe extern "C" fn _unused_contract(_f: *mut c_void, _c: *mut LmflowContract) {}
 
     pub fn register() {
         static ONCE: std::sync::Once = std::sync::Once::new();
         ONCE.call_once(|| {
-            let vt = flow_core::ffi::FlowKernelVTable {
+            let vt = flow_core::ffi::LmflowKernelVTable {
                 create: Some(create),
                 get_contract: None,
                 open: None,
@@ -62,7 +62,7 @@ mod reverse_sleep_kernel {
             let vt: &'static _ = Box::leak(Box::new(vt));
             let name = std::ffi::CString::new("ReverseSleep").unwrap();
             let rc = unsafe {
-                flow_core::ffi::flow_register_kernel(name.as_ptr(), vt, std::ptr::null_mut())
+                flow_core::ffi::lmflow_register_kernel(name.as_ptr(), vt, std::ptr::null_mut())
             };
             assert_eq!(rc, 0, "注册 ReverseSleep 失败");
         });
@@ -228,22 +228,22 @@ output_ports: ["out"]
 /// 数据配错),且下游按时间戳单调。
 mod reverse_sleep2_kernel {
     use super::*;
-    use flow_core::ffi::FlowContext;
+    use flow_core::ffi::LmflowContext;
     use std::ffi::c_void;
 
-    unsafe extern "C" fn process(_self: *mut c_void, ctx: *mut FlowContext) -> i32 {
-        let ts = flow_core::ffi::flow_ctx_input_timestamp(ctx);
+    unsafe extern "C" fn process(_self: *mut c_void, ctx: *mut LmflowContext) -> i32 {
+        let ts = flow_core::ffi::lmflow_ctx_input_timestamp(ctx);
         let sleep_ms = (70 - ts * 10).clamp(5, 70) as u64;
         std::thread::sleep(Duration::from_millis(sleep_ms));
         // 两口都到齐才会被调用(sync);把 0 口原样转发,一个对齐时刻产出一个包。
-        flow_core::ffi::flow_ctx_forward(ctx, 0, 0);
+        flow_core::ffi::lmflow_ctx_forward(ctx, 0, 0);
         0
     }
 
     pub fn register() {
         static ONCE: std::sync::Once = std::sync::Once::new();
         ONCE.call_once(|| {
-            let vt = flow_core::ffi::FlowKernelVTable {
+            let vt = flow_core::ffi::LmflowKernelVTable {
                 create: None,
                 get_contract: None,
                 open: None,
@@ -254,7 +254,7 @@ mod reverse_sleep2_kernel {
             let vt: &'static _ = Box::leak(Box::new(vt));
             let name = std::ffi::CString::new("ReverseSleep2").unwrap();
             let rc = unsafe {
-                flow_core::ffi::flow_register_kernel(name.as_ptr(), vt, std::ptr::null_mut())
+                flow_core::ffi::lmflow_register_kernel(name.as_ptr(), vt, std::ptr::null_mut())
             };
             assert_eq!(rc, 0, "注册 ReverseSleep2 失败");
         });

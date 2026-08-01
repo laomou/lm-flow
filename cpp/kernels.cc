@@ -14,13 +14,13 @@
  *  Invert            原地改写(省拷贝)            TakeInput + CoW MakeMutableBuffer
  *  Normalize         参数化归一化                  必需参数 / 数组参数 / 点号路径 / side packet
  *
- * 类型约定:捆绑算子一律用**内建类型**(FLOW_TYPE_I64 等)而非 C++ 原生 typeid ——
+ * 类型约定:捆绑算子一律用**内建类型**(LMFLOW_TYPE_I64 等)而非 C++ 原生 typeid ——
  * 这样它们从 C++、Rust、Python 三侧都能直接使用。若改用 InputSet<int>,
  * Python 送来的整数(内建 I64)就会被类型校验拒绝。
  *
- * 注册方式:本文件用**显式聚合注册**(flow_register_builtin_kernels),
+ * 注册方式:本文件用**显式聚合注册**(lmflow_register_builtin_kernels),
  * 因为静态初始化对象在静态库中可能被链接器裁剪。用户自己的算子可以直接用
- * FLOW_REGISTER_KERNEL 宏(更省事),见 flow.hpp。
+ * LMFLOW_REGISTER_KERNEL 宏(更省事),见 flow.hpp。
  */
 #include <cstdint>
 #include <cstdio>
@@ -32,34 +32,34 @@
 namespace {
 
 /* ---------- 1. 直通:零拷贝转发 ---------- */
-class PassThroughKernel : public flow::Kernel {
+class PassThroughKernel : public lmflow::Kernel {
  public:
-  static void GetContract(flow::Contract& c) {
+  static void GetContract(lmflow::Contract& c) {
     c.InputSetAny(0);
     c.OutputSetAny(0);
   }
-  flow::Status Process(flow::Context& cc) override {
+  lmflow::Status Process(lmflow::Context& cc) override {
     cc.Forward(0, 0);  // 复用同一 payload,不拷贝
-    return flow::Status::Ok();
+    return lmflow::Status::Ok();
   }
 };
 
 /* ---------- 2. 数值变换:读 options ---------- */
-class ScaleKernel : public flow::Kernel {
+class ScaleKernel : public lmflow::Kernel {
  public:
-  static void GetContract(flow::Contract& c) {
-    c.InputSetBuiltin(0, FLOW_TYPE_I64);
-    c.OutputSetBuiltin(0, FLOW_TYPE_I64);
+  static void GetContract(lmflow::Contract& c) {
+    c.InputSetBuiltin(0, LMFLOW_TYPE_I64);
+    c.OutputSetBuiltin(0, LMFLOW_TYPE_I64);
   }
-  flow::Status Open(flow::Context& cc) override {
+  lmflow::Status Open(lmflow::Context& cc) override {
     factor_ = cc.OptionI64("factor", 1);
-    return flow::Status::Ok();
+    return lmflow::Status::Ok();
   }
-  flow::Status Process(flow::Context& cc) override {
+  lmflow::Status Process(lmflow::Context& cc) override {
     int64_t v = 0;
     if (!cc.Input(0).AsI64(&v)) return cc.Fail("输入不是整数包");
-    cc.Emit(0, flow::Packet::FromI64(v * factor_));
-    return flow::Status::Ok();
+    cc.Emit(0, lmflow::Packet::FromI64(v * factor_));
+    return lmflow::Status::Ok();
   }
 
  private:
@@ -67,25 +67,25 @@ class ScaleKernel : public flow::Kernel {
 };
 
 /* ---------- 3. 有状态累加:Close 时吐出总和 ---------- */
-class SumKernel : public flow::Kernel {
+class SumKernel : public lmflow::Kernel {
  public:
-  static void GetContract(flow::Contract& c) {
-    c.InputSetBuiltin(0, FLOW_TYPE_I64);
-    c.OutputSetBuiltin(0, FLOW_TYPE_I64);
+  static void GetContract(lmflow::Contract& c) {
+    c.InputSetBuiltin(0, LMFLOW_TYPE_I64);
+    c.OutputSetBuiltin(0, LMFLOW_TYPE_I64);
   }
-  flow::Status Open(flow::Context&) override {
+  lmflow::Status Open(lmflow::Context&) override {
     total_ = 0;
-    return flow::Status::Ok();
+    return lmflow::Status::Ok();
   }
-  flow::Status Process(flow::Context& cc) override {
+  lmflow::Status Process(lmflow::Context& cc) override {
     int64_t v = 0;
     if (cc.Input(0).AsI64(&v)) total_ += v;
-    return flow::Status::Ok();  // 中途不产出
+    return lmflow::Status::Ok();  // 中途不产出
   }
-  flow::Status Close(flow::Context& cc) override {
+  lmflow::Status Close(lmflow::Context& cc) override {
     // 流尾单包位置:表示「整条流结束时的一个汇总结果」
-    cc.Emit(0, flow::Packet::FromI64(total_).At(FLOW_TS_POST_STREAM));
-    return flow::Status::Ok();
+    cc.Emit(0, lmflow::Packet::FromI64(total_).At(LMFLOW_TS_POST_STREAM));
+    return lmflow::Status::Ok();
   }
 
  private:
@@ -93,45 +93,45 @@ class SumKernel : public flow::Kernel {
 };
 
 /* ---------- 4. 扇出:1 进 2 出 ---------- */
-class SplitKernel : public flow::Kernel {
+class SplitKernel : public lmflow::Kernel {
  public:
-  static void GetContract(flow::Contract& c) {
+  static void GetContract(lmflow::Contract& c) {
     c.InputSetAny(0);
     for (size_t i = 0; i < c.NumOutputs(); ++i) c.OutputSetAny(i);
   }
-  flow::Status Process(flow::Context& cc) override {
+  lmflow::Status Process(lmflow::Context& cc) override {
     for (size_t i = 0; i < cc.NumOutputs(); ++i) cc.Forward(0, i);  // 共享同一 payload
-    return flow::Status::Ok();
+    return lmflow::Status::Ok();
   }
 };
 
 /* ---------- 5. 汇合:2 进 1 出,按 tag 定位端口 ---------- */
-class ZipKernel : public flow::Kernel {
+class ZipKernel : public lmflow::Kernel {
  public:
-  static void GetContract(flow::Contract& c) {
-    c.InputSetBuiltin(0, FLOW_TYPE_I64);
-    c.InputSetBuiltin(1, FLOW_TYPE_I64);
-    c.OutputSetBuiltin(0, FLOW_TYPE_I64);
+  static void GetContract(lmflow::Contract& c) {
+    c.InputSetBuiltin(0, LMFLOW_TYPE_I64);
+    c.InputSetBuiltin(1, LMFLOW_TYPE_I64);
+    c.OutputSetBuiltin(0, LMFLOW_TYPE_I64);
   }
-  flow::Status Open(flow::Context& cc) override {
+  lmflow::Status Open(lmflow::Context& cc) override {
     // 按 tag 定位,不依赖 YAML 书写顺序 —— 端口声明形如:
     //     input_ports: ["A:left_stream", "B:right_stream"]
     // 于是不管两者谁先写、边名叫什么,LHS 永远是 tag 为 A 的那个口。
     lhs_ = cc.InputId("A");
     rhs_ = cc.InputId("B");
     // 若 YAML 没写 tag(input_ports: ["x","y"]),退回按声明顺序取序号 0/1。
-    if (lhs_ == FLOW_INVALID_ID) lhs_ = 0;
-    if (rhs_ == FLOW_INVALID_ID) rhs_ = 1;
-    return flow::Status::Ok();
+    if (lhs_ == LMFLOW_INVALID_ID) lhs_ = 0;
+    if (rhs_ == LMFLOW_INVALID_ID) rhs_ = 1;
+    return lmflow::Status::Ok();
   }
-  flow::Status Process(flow::Context& cc) override {
+  lmflow::Status Process(lmflow::Context& cc) override {
     int64_t a = 0, b = 0;
     // 时间戳对齐后某口仍可能无数据(该时刻它就是没有)—— 这时不产出
     if (!cc.Input(lhs_).AsI64(&a) || !cc.Input(rhs_).AsI64(&b)) {
-      return flow::Status::Ok();
+      return lmflow::Status::Ok();
     }
-    cc.Emit(0, flow::Packet::FromI64(a + b));
-    return flow::Status::Ok();
+    cc.Emit(0, lmflow::Packet::FromI64(a + b));
+    return lmflow::Status::Ok();
   }
 
  private:
@@ -139,17 +139,17 @@ class ZipKernel : public flow::Kernel {
 };
 
 /* ---------- 6. 过滤:不产出时推进时间戳边界 ---------- */
-class FilterKernel : public flow::Kernel {
+class FilterKernel : public lmflow::Kernel {
  public:
-  static void GetContract(flow::Contract& c) {
-    c.InputSetBuiltin(0, FLOW_TYPE_I64);
-    c.OutputSetBuiltin(0, FLOW_TYPE_I64);
+  static void GetContract(lmflow::Contract& c) {
+    c.InputSetBuiltin(0, LMFLOW_TYPE_I64);
+    c.OutputSetBuiltin(0, LMFLOW_TYPE_I64);
   }
-  flow::Status Open(flow::Context& cc) override {
+  lmflow::Status Open(lmflow::Context& cc) override {
     threshold_ = cc.OptionI64("threshold", 0);
-    return flow::Status::Ok();
+    return lmflow::Status::Ok();
   }
-  flow::Status Process(flow::Context& cc) override {
+  lmflow::Status Process(lmflow::Context& cc) override {
     int64_t v = 0;
     if (!cc.Input(0).AsI64(&v)) return cc.Fail("输入不是整数包");
     if (v >= threshold_) {
@@ -158,7 +158,7 @@ class FilterKernel : public flow::Kernel {
       // 丢弃该包。必须告知下游「此刻之前不会再有数据」,否则下游会一直等。
       cc.SetNextTimestampBound(0, cc.InputTimestamp() + 1);
     }
-    return flow::Status::Ok();
+    return lmflow::Status::Ok();
   }
 
  private:
@@ -166,41 +166,41 @@ class FilterKernel : public flow::Kernel {
 };
 
 /* ---------- 7. 类型转换:int -> std::string ---------- */
-class StringifyKernel : public flow::Kernel {
+class StringifyKernel : public lmflow::Kernel {
  public:
-  static void GetContract(flow::Contract& c) {
-    c.InputSetBuiltin(0, FLOW_TYPE_I64);
-    c.OutputSetBuiltin(0, FLOW_TYPE_STR);
+  static void GetContract(lmflow::Contract& c) {
+    c.InputSetBuiltin(0, LMFLOW_TYPE_I64);
+    c.OutputSetBuiltin(0, LMFLOW_TYPE_STR);
   }
-  flow::Status Process(flow::Context& cc) override {
+  lmflow::Status Process(lmflow::Context& cc) override {
     int64_t v = 0;
     if (!cc.Input(0).AsI64(&v)) return cc.Fail("输入不是整数包");
-    cc.Emit(0, flow::Packet::FromStr(std::to_string(v).c_str()));
-    return flow::Status::Ok();
+    cc.Emit(0, lmflow::Packet::FromStr(std::to_string(v).c_str()));
+    return lmflow::Status::Ok();
   }
 };
 
 /* ---------- 8. 汇点:只消费,无输出口 ---------- */
-class SinkKernel : public flow::Kernel {
+class SinkKernel : public lmflow::Kernel {
  public:
-  static void GetContract(flow::Contract& c) { c.InputSetAny(0); }
-  flow::Status Process(flow::Context& cc) override {
+  static void GetContract(lmflow::Contract& c) { c.InputSetAny(0); }
+  lmflow::Status Process(lmflow::Context& cc) override {
     // 走引擎日志而非 printf:库不该抢占宿主的 stdout
     char buf[64];
     snprintf(buf, sizeof(buf), "收到包 @ ts=%lld",
              static_cast<long long>(cc.InputTimestamp()));
-    cc.Log(FLOW_LOG_DEBUG, buf);
+    cc.Log(LMFLOW_LOG_DEBUG, buf);
     cc.CounterAdd("sink.packets");
     ++count_;
-    return flow::Status::Ok();
+    return lmflow::Status::Ok();
   }
-  flow::Status Close(flow::Context& cc) override {
+  lmflow::Status Close(lmflow::Context& cc) override {
     char buf[64];
     snprintf(buf, sizeof(buf), "共处理 %lld 个包", static_cast<long long>(count_));
     cc.LogInfo(buf);
     // 计数器是**按图**的,比全局日志更适合被测试断言
     cc.CounterAdd("sink.closed");
-    return flow::Status::Ok();
+    return lmflow::Status::Ok();
   }
 
  private:
@@ -210,18 +210,18 @@ class SinkKernel : public flow::Kernel {
 /* ---------- 9. 原地改写:CoW 省拷贝路径的示范 ----------
  * 线性管线上(本节点是唯一消费者)全程零拷贝;若上游是 Split 扇出、
  * payload 被别的分支共享,MakeMutableBuffer 才会复制一份,保证不污染对方。 */
-class InvertKernel : public flow::Kernel {
+class InvertKernel : public lmflow::Kernel {
  public:
-  static void GetContract(flow::Contract& c) {
+  static void GetContract(lmflow::Contract& c) {
     c.InputSetAny(0);
     c.OutputSetAny(0);
   }
-  flow::Status Process(flow::Context& cc) override {
+  lmflow::Status Process(lmflow::Context& cc) override {
     // 关键第一步:把包从输入槽**取走**。否则上下文仍持一份引用,CoW 必然复制。
-    flow::Packet p = cc.TakeInput(0);
-    FlowBuffer buf{};
-    if (FlowStatus st = p.MakeMutableBuffer(&buf)) return st;
-    if (buf.dtype != FLOW_DTYPE_U8 || buf.ndim < 2) return FLOW_ERR_INVALID_ARG;
+    lmflow::Packet p = cc.TakeInput(0);
+    LmflowBuffer buf{};
+    if (LmflowStatus st = p.MakeMutableBuffer(&buf)) return st;
+    if (buf.dtype != LMFLOW_DTYPE_U8 || buf.ndim < 2) return LMFLOW_ERR_INVALID_ARG;
 
     const size_t row_bytes = static_cast<size_t>(buf.shape[1]) *
                              (buf.ndim >= 3 ? static_cast<size_t>(buf.shape[2]) : 1);
@@ -230,7 +230,7 @@ class InvertKernel : public flow::Kernel {
       for (size_t x = 0; x < row_bytes; ++x) line[x] = static_cast<uint8_t>(255 - line[x]);
     }
     cc.Emit(0, std::move(p));
-    return flow::Status::Ok();
+    return lmflow::Status::Ok();
   }
 };
 
@@ -246,18 +246,18 @@ class InvertKernel : public flow::Kernel {
  *       std:   [0.229, 0.224, 0.225]
  *       roi:   { x: 8, y: 8 }  # 嵌套:用点号路径读
  */
-class NormalizeKernel : public flow::Kernel {
+class NormalizeKernel : public lmflow::Kernel {
  public:
-  static void GetContract(flow::Contract& c) {
+  static void GetContract(lmflow::Contract& c) {
     c.InputSetAny(0);
     c.OutputSetAny(0);
     // 声明必需的 side packet:宿主漏注入 → init 阶段就报错,不必等到 open
     c.RequireSidePacket("calibration");
   }
 
-  flow::Status Open(flow::Context& cc) override {
+  lmflow::Status Open(lmflow::Context& cc) override {
     // 必需参数:拼错 key 或漏配会当场失败,并带上可读原因(不是静默用默认值跑歪)
-    if (cc.RequireOption("scale", &scale_) != FLOW_OK) {
+    if (cc.RequireOption("scale", &scale_) != LMFLOW_OK) {
       return cc.Fail("options.scale 缺失或类型不符(必需参数)");
     }
 
@@ -277,22 +277,22 @@ class NormalizeKernel : public flow::Kernel {
     snprintf(buf, sizeof(buf), "scale=%g mean=%zu std=%zu roi=(%d,%d) calib=%s", scale_, n_mean_,
              n_std_, roi_x_, roi_y_, has_calib_ ? "yes" : "no");
     cc.LogInfo(buf);
-    return flow::Status::Ok();
+    return lmflow::Status::Ok();
   }
 
-  flow::Status Close(flow::Context& cc) override {
+  lmflow::Status Close(lmflow::Context& cc) override {
     // 只在正常排空时才认为结果可用;出错/被取消时不应提交
-    if (cc.CloseReason() == FLOW_CLOSE_NORMAL) {
+    if (cc.CloseReason() == LMFLOW_CLOSE_NORMAL) {
       cc.LogInfo("正常结束,结果有效");
     } else {
       cc.LogWarn("异常结束,丢弃结果");
     }
-    return flow::Status::Ok();
+    return lmflow::Status::Ok();
   }
 
-  flow::Status Process(flow::Context& cc) override {
+  lmflow::Status Process(lmflow::Context& cc) override {
     cc.Forward(0, 0);  // 真实实现会按 scale/mean/std 归一化,此处只示范参数获取
-    return flow::Status::Ok();
+    return lmflow::Status::Ok();
   }
 
  private:
@@ -320,42 +320,42 @@ class NormalizeKernel : public flow::Kernel {
  *     input_ports: ["select", "a", "b"]   # select=控制口;a=数据口0, b=数据口1
  *     output_ports: ["out"]
  */
-class MuxKernel : public flow::Kernel {
+class MuxKernel : public lmflow::Kernel {
  public:
-  static void GetContract(flow::Contract& c) {
-    c.InputSetBuiltin(0, FLOW_TYPE_I64);  // 输入 0 = 控制口
+  static void GetContract(lmflow::Contract& c) {
+    c.InputSetBuiltin(0, LMFLOW_TYPE_I64);  // 输入 0 = 控制口
     c.OutputSetAny(0);
   }
-  flow::Status Process(flow::Context& cc) override {
+  lmflow::Status Process(lmflow::Context& cc) override {
     int64_t k = 0;
     if (!cc.Input(0).AsI64(&k)) return cc.Fail("mux 控制口(输入 0)必须是 I64 选择器");
     const int64_t ndata = static_cast<int64_t>(cc.NumInputs()) - 1;  // 除控制口外
     if (k < 0 || k >= ndata) return cc.Fail("mux 选择器越界(数据口不够)");
     cc.Forward(static_cast<size_t>(1 + k), 0);  // 转发第 k 个数据口(零拷贝)
-    return flow::Status::Ok();
+    return lmflow::Status::Ok();
   }
 };
 
 }  // namespace
 
 /*
- * 显式聚合注册的实现。由 Rust 侧的 C ABI 包装 `flow_register_builtin_kernels`
+ * 显式聚合注册的实现。由 Rust 侧的 C ABI 包装 `lmflow_register_builtin_kernels`
  * (见 crates/flow-core/src/lib.rs)调用一次 —— 用 Rust 包装是为了让符号也能从
  * cdylib(.so/.dylib)导出(C++ 符号若无人从导出根引用会被链接器 GC 掉)。
  * 相比静态初始化,这条显式路径不会被链接器裁剪。
  */
-extern "C" void flow_register_builtin_kernels_impl(void) {
-#define FLOW_REG(T) flow_register_kernel(#T, flow::KernelAdapter<T>::vtable(), nullptr)
-  FLOW_REG(PassThroughKernel);
-  FLOW_REG(ScaleKernel);
-  FLOW_REG(SumKernel);
-  FLOW_REG(SplitKernel);
-  FLOW_REG(ZipKernel);
-  FLOW_REG(FilterKernel);
-  FLOW_REG(StringifyKernel);
-  FLOW_REG(SinkKernel);
-  FLOW_REG(InvertKernel);
-  FLOW_REG(NormalizeKernel);
-  FLOW_REG(MuxKernel);
-#undef FLOW_REG
+extern "C" void lmflow_register_builtin_kernels_impl(void) {
+#define LMFLOW_REG(T) lmflow_register_kernel(#T, lmflow::KernelAdapter<T>::vtable(), nullptr)
+  LMFLOW_REG(PassThroughKernel);
+  LMFLOW_REG(ScaleKernel);
+  LMFLOW_REG(SumKernel);
+  LMFLOW_REG(SplitKernel);
+  LMFLOW_REG(ZipKernel);
+  LMFLOW_REG(FilterKernel);
+  LMFLOW_REG(StringifyKernel);
+  LMFLOW_REG(SinkKernel);
+  LMFLOW_REG(InvertKernel);
+  LMFLOW_REG(NormalizeKernel);
+  LMFLOW_REG(MuxKernel);
+#undef LMFLOW_REG
 }

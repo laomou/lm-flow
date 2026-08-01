@@ -18,7 +18,7 @@ jobs:
           g++ -std=c++17 -Wall -Wextra -Werror -Iinclude -c examples/cpp/hello_world_host.cc -o /tmp/h.o
       - name: flow.hpp 糖层单元测试(异常不穿越 FFI + 构造失败安全)
         run: |
-          g++ -std=c++17 -Wall -Wextra -Werror -Iinclude cpp/flow_hpp_test.cc -o /tmp/flow_hpp_test
+          g++ -std=c++17 -Wall -Wextra -Werror -Iinclude cpp/tests/flow_hpp_test.cc -o /tmp/flow_hpp_test
           /tmp/flow_hpp_test
 
   rust:
@@ -38,7 +38,7 @@ jobs:
           [ "$out" = "$expected" ] || { echo "输出不符:"; echo "$out"; exit 1; }
 
   # 外部宿主视角:header 声明的符号必须都在库里,且真的能链接+运行。
-  # 这条曾抓到两个真问题:flow_register_builtin_kernels 漏在 header 之外、
+  # 这条曾抓到两个真问题:lmflow_register_builtin_kernels 漏在 header 之外、
   # 以及 C++ 示例忘了调它(一跑就「算子未注册」)。
   external-host:
     runs-on: ubuntu-latest
@@ -48,10 +48,10 @@ jobs:
       - run: cargo build --release
       - name: header 声明与库导出符号对齐
         run: |
-          decl=$(grep -oE "^[A-Za-z_][A-Za-z0-9_ *]*\bflow_[a-z_0-9]+\(" include/flow.h \
-                 | grep -oE "flow_[a-z_0-9]+" | sort -u)
+          decl=$(grep -oE "^[A-Za-z_][A-Za-z0-9_ *]*\blmflow_[a-z_0-9]+\(" include/flow.h \
+                 | grep -oE "lmflow_[a-z_0-9]+" | sort -u)
           syms=$(nm -g --defined-only target/release/libflow_core.a \
-                 | grep -oE " T flow_[a-z_0-9]+" | grep -oE "flow_[a-z_0-9]+" | sort -u)
+                 | grep -oE " T lmflow_[a-z_0-9]+" | grep -oE "lmflow_[a-z_0-9]+" | sort -u)
           missing=$(comm -23 <(echo "$decl") <(echo "$syms"))
           [ -z "$missing" ] || { echo "header 声明了但库里没有:"; echo "$missing"; exit 1; }
       - name: 编译并运行外部 C++ 宿主
@@ -154,13 +154,13 @@ jobs:
       - run: cargo build --release
       - name: 编译并运行 flow_cv.hpp 测试(含非连续 ROI 拷贝)
         run: |
-          g++ -std=c++17 -Wall -Wextra -Werror -Iinclude cpp/flow_cv_test.cc \
+          g++ -std=c++17 -Wall -Wextra -Werror -Iinclude cpp/tests/flow_cv_test.cc \
               target/release/libflow_core.a $(pkg-config --cflags --libs opencv4) \
               -lpthread -ldl -lm -o /tmp/flow_cv_test
           /tmp/flow_cv_test
       - name: OpenCV C++ 算子在真图里端到端(测试程序链 CV 库 + flow 库;引擎本身不含 CV)
         run: |
-          g++ -std=c++17 -Wall -Wextra -Werror -Iinclude cpp/flow_cv_graph_test.cc \
+          g++ -std=c++17 -Wall -Wextra -Werror -Iinclude cpp/tests/flow_cv_graph_test.cc \
               target/release/libflow_core.a $(pkg-config --cflags --libs opencv4) \
               -lpthread -ldl -lm -o /tmp/flow_cv_graph_test
           /tmp/flow_cv_graph_test

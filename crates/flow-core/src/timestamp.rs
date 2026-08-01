@@ -18,7 +18,7 @@ use std::fmt;
 pub struct Timestamp(pub i64);
 
 impl Default for Timestamp {
-    /// 默认为 `Unset`(与 C ABI 的 `FLOW_TS_UNSET` 一致)。
+    /// 默认为 `Unset`(与 C ABI 的 `LMFLOW_TS_UNSET` 一致)。
     fn default() -> Self {
         Self::unset()
     }

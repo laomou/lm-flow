@@ -142,7 +142,7 @@ pub struct Context {
     pub inputs_done: Vec<bool>,
     /// 算子经 `set_error` 提供的失败原因。
     pub error_msg: Option<String>,
-    /// 供 `flow_ctx_close_reason` 返回;进入 close 前由引擎写入。
+    /// 供 `lmflow_ctx_close_reason` 返回;进入 close 前由引擎写入。
     pub close_reason: i32,
     names: CStrArena,
 }

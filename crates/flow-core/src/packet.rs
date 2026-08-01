@@ -16,7 +16,7 @@ use std::sync::Arc;
 use crate::status::{Error, Result};
 use crate::timestamp::Timestamp;
 
-/// 内建类型标识,与 `include/flow.h` 的 `FLOW_TYPE_*` 一致。0..15 为内建保留。
+/// 内建类型标识,与 `include/flow.h` 的 `LMFLOW_TYPE_*` 一致。0..15 为内建保留。
 pub mod type_id {
     pub const NONE: u64 = 0;
     pub const BYTES: u64 = 1;
@@ -28,7 +28,7 @@ pub mod type_id {
     pub const HOST_OBJECT: u64 = 7; // 预留,本版本未启用
 }
 
-/// `FLOW_DTYPE_*`
+/// `LMFLOW_DTYPE_*`
 pub mod dtype {
     pub const U8: i32 = 0;
     pub const I8: i32 = 1;
@@ -56,12 +56,12 @@ pub fn dtype_size(dt: i32) -> usize {
 
 /// 计算与 C++ 糖层一致的类型标识。
 ///
-/// `flow.hpp` 里 `flow::TypeId<T>()` = `NormalizeTypeId(Fnv1a(typeid(T).name()))`,
+/// `flow.hpp` 里 `lmflow::TypeId<T>()` = `NormalizeTypeId(Fnv1a(typeid(T).name()))`,
 /// 参数就是**修饰名**(Itanium ABI 下 `int` 是 `"i"`、`double` 是 `"d"`、
 /// `std::string` 是 `"NSt7__cxx1112basic_string..."`)。
 ///
 /// Rust 宿主要送一个 C++ 算子能按类型读取的包时,用它算出 type_id 交给
-/// [`Packet::new_interop`];或用 `FLOW_DECLARE_TYPE_NAME` 在 C++ 侧改成稳定名,
+/// [`Packet::new_interop`];或用 `LMFLOW_DECLARE_TYPE_NAME` 在 C++ 侧改成稳定名,
 /// 两边都调用本函数即可对齐。
 pub fn fnv1a_type_id(mangled_name: &str) -> u64 {
     let mut h: u64 = 14695981039346656037;

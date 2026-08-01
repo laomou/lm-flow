@@ -2,7 +2,7 @@
 //!
 //! 约定
 //!  * 每个导出函数都用 `catch_unwind` 包裹 —— Rust panic 穿越 FFI 是 UB。
-//!  * 失败时写线程局部 `flow_last_error`,让调用方能拿到可读原因。
+//!  * 失败时写线程局部 `lmflow_last_error`,让调用方能拿到可读原因。
 //!  * 跨界结构体 `#[repr(C)]`,布局由 `tests/abi_layout.rs` 与 `cpp/abi_assert.cc` 双向钉死。
 //!  * 所有导出函数对空指针都做检查,返回错误码/默认值而不是崩溃。
 //!
@@ -68,7 +68,7 @@ unsafe fn cstr<'a>(p: *const c_char) -> Option<&'a str> {
     CStr::from_ptr(p).to_str().ok()
 }
 
-unsafe fn ctx_ref<'a>(c: *const FlowContext) -> Option<&'a Context> {
+unsafe fn ctx_ref<'a>(c: *const LmflowContext) -> Option<&'a Context> {
     if c.is_null() {
         None
     } else {
@@ -76,7 +76,7 @@ unsafe fn ctx_ref<'a>(c: *const FlowContext) -> Option<&'a Context> {
     }
 }
 
-unsafe fn ctx_mut<'a>(c: *mut FlowContext) -> Option<&'a mut Context> {
+unsafe fn ctx_mut<'a>(c: *mut LmflowContext) -> Option<&'a mut Context> {
     if c.is_null() {
         None
     } else {
@@ -84,7 +84,7 @@ unsafe fn ctx_mut<'a>(c: *mut FlowContext) -> Option<&'a mut Context> {
     }
 }
 
-unsafe fn contract_mut<'a>(c: *mut FlowContract) -> Option<&'a mut Contract> {
+unsafe fn contract_mut<'a>(c: *mut LmflowContract) -> Option<&'a mut Contract> {
     if c.is_null() {
         None
     } else {
@@ -95,23 +95,23 @@ unsafe fn contract_mut<'a>(c: *mut FlowContract) -> Option<&'a mut Contract> {
 // ---------------------------------------------------------------- 不透明句柄
 
 #[repr(C)]
-pub struct FlowGraph {
+pub struct LmflowGraph {
     _private: [u8; 0],
 }
 #[repr(C)]
-pub struct FlowInput {
+pub struct LmflowInput {
     _private: [u8; 0],
 }
 #[repr(C)]
-pub struct FlowPoller {
+pub struct LmflowPoller {
     _private: [u8; 0],
 }
 #[repr(C)]
-pub struct FlowContext {
+pub struct LmflowContext {
     _private: [u8; 0],
 }
 #[repr(C)]
-pub struct FlowContract {
+pub struct LmflowContract {
     _private: [u8; 0],
 }
 
@@ -125,7 +125,7 @@ pub struct InputHandle {
 
 #[repr(C)]
 #[derive(Clone, Copy)]
-pub struct FlowPacket {
+pub struct LmflowPacket {
     pub payload: *mut c_void,
     pub type_id: u64,
     pub timestamp: i64,
@@ -133,7 +133,7 @@ pub struct FlowPacket {
     pub drop_fn: Option<unsafe extern "C" fn(*mut c_void)>,
 }
 
-impl Default for FlowPacket {
+impl Default for LmflowPacket {
     fn default() -> Self {
         Self {
             payload: std::ptr::null_mut(),
@@ -146,30 +146,30 @@ impl Default for FlowPacket {
 }
 
 /// **借用**形态:不增加引用计数,调用方不得 drop。
-pub fn borrow_packet(p: &Packet) -> FlowPacket {
+pub fn borrow_packet(p: &Packet) -> LmflowPacket {
     match p.arc_ref() {
-        Some(arc) => FlowPacket {
+        Some(arc) => LmflowPacket {
             payload: arc.data_ptr(),
             type_id: arc.type_id(),
             timestamp: p.timestamp().0,
             owner: Arc::as_ptr(arc) as *mut c_void,
             drop_fn: None,
         },
-        None => FlowPacket {
+        None => LmflowPacket {
             timestamp: p.timestamp().0,
             ..Default::default()
         },
     }
 }
 
-/// **移交**形态:把一份引用交给调用方,调用方须 emit/send 或 flow_packet_drop。
-pub fn own_packet(p: Packet) -> FlowPacket {
+/// **移交**形态:把一份引用交给调用方,调用方须 emit/send 或 lmflow_packet_drop。
+pub fn own_packet(p: Packet) -> LmflowPacket {
     let ts = p.timestamp().0;
     match p.into_arc() {
         Some(arc) => {
             let payload = arc.data_ptr();
             let type_id = arc.type_id();
-            FlowPacket {
+            LmflowPacket {
                 payload,
                 type_id,
                 timestamp: ts,
@@ -177,7 +177,7 @@ pub fn own_packet(p: Packet) -> FlowPacket {
                 drop_fn: None,
             }
         }
-        None => FlowPacket {
+        None => LmflowPacket {
             timestamp: ts,
             ..Default::default()
         },
@@ -188,7 +188,7 @@ pub fn own_packet(p: Packet) -> FlowPacket {
 ///
 /// # Safety
 /// `fp` 必须是调用方拥有的包(owner 非空,或 payload+drop_fn 的自建包)。
-pub unsafe fn take_packet(fp: FlowPacket) -> Packet {
+pub unsafe fn take_packet(fp: LmflowPacket) -> Packet {
     let ts = Timestamp(fp.timestamp);
     if !fp.owner.is_null() {
         let arc = Arc::from_raw(fp.owner as *const Payload);
@@ -201,17 +201,17 @@ pub unsafe fn take_packet(fp: FlowPacket) -> Packet {
 }
 
 #[no_mangle]
-pub extern "C" fn flow_abi_version() -> u32 {
+pub extern "C" fn lmflow_abi_version() -> u32 {
     ABI_VERSION
 }
 
 #[no_mangle]
-pub extern "C" fn flow_last_error() -> *const c_char {
+pub extern "C" fn lmflow_last_error() -> *const c_char {
     last_error::get()
 }
 
 #[no_mangle]
-pub extern "C" fn flow_set_log_callback(
+pub extern "C" fn lmflow_set_log_callback(
     cb: Option<unsafe extern "C" fn(*mut c_void, i32, *const c_char)>,
     user: *mut c_void,
 ) {
@@ -219,7 +219,7 @@ pub extern "C" fn flow_set_log_callback(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn flow_packet_drop(pkt: *mut FlowPacket) {
+pub unsafe extern "C" fn lmflow_packet_drop(pkt: *mut LmflowPacket) {
     guard_val((), || {
         if pkt.is_null() {
             return;
@@ -232,27 +232,27 @@ pub unsafe extern "C" fn flow_packet_drop(pkt: *mut FlowPacket) {
                 f(p.payload);
             }
         }
-        *p = FlowPacket::default();
+        *p = LmflowPacket::default();
     });
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn flow_packet_clone(pkt: *const FlowPacket) -> FlowPacket {
-    guard_val(FlowPacket::default(), || {
+pub unsafe extern "C" fn lmflow_packet_clone(pkt: *const LmflowPacket) -> LmflowPacket {
+    guard_val(LmflowPacket::default(), || {
         if pkt.is_null() {
-            return FlowPacket::default();
+            return LmflowPacket::default();
         }
         let src = &*pkt;
         if src.owner.is_null() {
             // 自建包尚未进入引擎,无引用计数可增 —— 不支持克隆
-            last_error::set("flow_packet_clone 只能用于引擎持有的包(owner 非空)");
-            return FlowPacket::default();
+            last_error::set("lmflow_packet_clone 只能用于引擎持有的包(owner 非空)");
+            return LmflowPacket::default();
         }
         let arc = Arc::from_raw(src.owner as *const Payload);
         let cloned = arc.clone();
         // 原来的那份引用仍属调用方,不能在此释放
         let _ = Arc::into_raw(arc);
-        FlowPacket {
+        LmflowPacket {
             payload: cloned.data_ptr(),
             type_id: cloned.type_id(),
             timestamp: src.timestamp,
@@ -263,7 +263,7 @@ pub unsafe extern "C" fn flow_packet_clone(pkt: *const FlowPacket) -> FlowPacket
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn flow_packet_debug_string(pkt: *const FlowPacket) -> *const c_char {
+pub unsafe extern "C" fn lmflow_packet_debug_string(pkt: *const LmflowPacket) -> *const c_char {
     guard_val(c"".as_ptr(), || {
         thread_local! {
             static BUF: std::cell::RefCell<std::ffi::CString> =
@@ -288,7 +288,7 @@ pub unsafe extern "C" fn flow_packet_debug_string(pkt: *const FlowPacket) -> *co
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn flow_register_type_name(type_id: u64, name: *const c_char) -> i32 {
+pub unsafe extern "C" fn lmflow_register_type_name(type_id: u64, name: *const c_char) -> i32 {
     guard(|| {
         let Some(n) = cstr(name) else {
             return fail(Error::InvalidArg("类型名为空或非 UTF-8".into()));
@@ -299,7 +299,7 @@ pub unsafe extern "C" fn flow_register_type_name(type_id: u64, name: *const c_ch
 }
 
 #[no_mangle]
-pub extern "C" fn flow_type_name(type_id: u64) -> *const c_char {
+pub extern "C" fn lmflow_type_name(type_id: u64) -> *const c_char {
     guard_val(c"".as_ptr(), || {
         static A: std::sync::LazyLock<runtime::CStrArena> =
             std::sync::LazyLock::new(runtime::CStrArena::default);
@@ -309,17 +309,17 @@ pub extern "C" fn flow_type_name(type_id: u64) -> *const c_char {
 
 // ---------------------------------------------------------------- 内建类型
 
-fn own_builtin(b: Builtin, ts: i64) -> FlowPacket {
+fn own_builtin(b: Builtin, ts: i64) -> LmflowPacket {
     own_packet(Packet::from_builtin(b).at(Timestamp(ts)))
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn flow_packet_from_bytes(
+pub unsafe extern "C" fn lmflow_packet_from_bytes(
     data: *const c_void,
     len: usize,
     ts: i64,
-) -> FlowPacket {
-    guard_val(FlowPacket::default(), || {
+) -> LmflowPacket {
+    guard_val(LmflowPacket::default(), || {
         let v = if data.is_null() || len == 0 {
             Vec::new()
         } else {
@@ -330,29 +330,29 @@ pub unsafe extern "C" fn flow_packet_from_bytes(
 }
 
 #[no_mangle]
-pub extern "C" fn flow_packet_from_i64(value: i64, ts: i64) -> FlowPacket {
-    guard_val(FlowPacket::default(), || {
+pub extern "C" fn lmflow_packet_from_i64(value: i64, ts: i64) -> LmflowPacket {
+    guard_val(LmflowPacket::default(), || {
         own_builtin(Builtin::I64(value), ts)
     })
 }
 
 #[no_mangle]
-pub extern "C" fn flow_packet_from_f64(value: f64, ts: i64) -> FlowPacket {
-    guard_val(FlowPacket::default(), || {
+pub extern "C" fn lmflow_packet_from_f64(value: f64, ts: i64) -> LmflowPacket {
+    guard_val(LmflowPacket::default(), || {
         own_builtin(Builtin::F64(value), ts)
     })
 }
 
 #[no_mangle]
-pub extern "C" fn flow_packet_from_bool(value: bool, ts: i64) -> FlowPacket {
-    guard_val(FlowPacket::default(), || {
+pub extern "C" fn lmflow_packet_from_bool(value: bool, ts: i64) -> LmflowPacket {
+    guard_val(LmflowPacket::default(), || {
         own_builtin(Builtin::Bool(value), ts)
     })
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn flow_packet_from_str(utf8: *const c_char, ts: i64) -> FlowPacket {
-    guard_val(FlowPacket::default(), || {
+pub unsafe extern "C" fn lmflow_packet_from_str(utf8: *const c_char, ts: i64) -> LmflowPacket {
+    guard_val(LmflowPacket::default(), || {
         let s = cstr(utf8).unwrap_or("");
         own_builtin(
             Builtin::Str(std::ffi::CString::new(s).unwrap_or_default()),
@@ -362,7 +362,7 @@ pub unsafe extern "C" fn flow_packet_from_str(utf8: *const c_char, ts: i64) -> F
 }
 
 /// 借用形态的包 → 只读访问其内建 payload。
-unsafe fn peek_builtin<'a>(pkt: *const FlowPacket) -> Option<&'a Builtin> {
+unsafe fn peek_builtin<'a>(pkt: *const LmflowPacket) -> Option<&'a Builtin> {
     if pkt.is_null() {
         return None;
     }
@@ -377,8 +377,8 @@ unsafe fn peek_builtin<'a>(pkt: *const FlowPacket) -> Option<&'a Builtin> {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn flow_packet_as_bytes(
-    pkt: *const FlowPacket,
+pub unsafe extern "C" fn lmflow_packet_as_bytes(
+    pkt: *const LmflowPacket,
     data: *mut *const c_void,
     len: *mut usize,
 ) -> bool {
@@ -399,7 +399,7 @@ pub unsafe extern "C" fn flow_packet_as_bytes(
 macro_rules! as_scalar {
     ($name:ident, $variant:ident, $ty:ty) => {
         #[no_mangle]
-        pub unsafe extern "C" fn $name(pkt: *const FlowPacket, out: *mut $ty) -> bool {
+        pub unsafe extern "C" fn $name(pkt: *const LmflowPacket, out: *mut $ty) -> bool {
             guard_val(false, || match peek_builtin(pkt) {
                 Some(Builtin::$variant(v)) => {
                     if !out.is_null() {
@@ -412,13 +412,13 @@ macro_rules! as_scalar {
         }
     };
 }
-as_scalar!(flow_packet_as_i64, I64, i64);
-as_scalar!(flow_packet_as_f64, F64, f64);
-as_scalar!(flow_packet_as_bool, Bool, bool);
+as_scalar!(lmflow_packet_as_i64, I64, i64);
+as_scalar!(lmflow_packet_as_f64, F64, f64);
+as_scalar!(lmflow_packet_as_bool, Bool, bool);
 
 #[no_mangle]
-pub unsafe extern "C" fn flow_packet_as_str(
-    pkt: *const FlowPacket,
+pub unsafe extern "C" fn lmflow_packet_as_str(
+    pkt: *const LmflowPacket,
     out: *mut *const c_char,
 ) -> bool {
     guard_val(false, || match peek_builtin(pkt) {
@@ -432,11 +432,11 @@ pub unsafe extern "C" fn flow_packet_as_str(
     })
 }
 
-// ---------------------------------------------------------------- FlowBuffer
+// ---------------------------------------------------------------- LmflowBuffer
 
 #[repr(C)]
 #[derive(Clone, Copy)]
-pub struct FlowBuffer {
+pub struct LmflowBuffer {
     pub data: *mut c_void,
     pub shape: [i64; packet::MAX_DIMS],
     pub strides: [i64; packet::MAX_DIMS],
@@ -447,7 +447,7 @@ pub struct FlowBuffer {
     pub reserved: [i64; 2],
 }
 
-impl Default for FlowBuffer {
+impl Default for LmflowBuffer {
     fn default() -> Self {
         Self {
             data: std::ptr::null_mut(),
@@ -464,11 +464,11 @@ impl Default for FlowBuffer {
 
 pub const BUF_FLAG_READONLY: u32 = 1;
 
-fn fill_buffer(out: *mut FlowBuffer, b: &BufferData, readonly: bool, data: *mut c_void) {
+fn fill_buffer(out: *mut LmflowBuffer, b: &BufferData, readonly: bool, data: *mut c_void) {
     if out.is_null() {
         return;
     }
-    let v = FlowBuffer {
+    let v = LmflowBuffer {
         data,
         shape: b.shape,
         strides: b.strides,
@@ -482,22 +482,22 @@ fn fill_buffer(out: *mut FlowBuffer, b: &BufferData, readonly: bool, data: *mut 
 }
 
 #[no_mangle]
-pub extern "C" fn flow_dtype_size(dt: i32) -> usize {
+pub extern "C" fn lmflow_dtype_size(dt: i32) -> usize {
     packet::dtype_size(dt)
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn flow_packet_new_buffer(
+pub unsafe extern "C" fn lmflow_packet_new_buffer(
     ndim: i32,
     shape: *const i64,
     dtype: i32,
     ts: i64,
-    out: *mut FlowBuffer,
-) -> FlowPacket {
-    guard_val(FlowPacket::default(), || {
+    out: *mut LmflowBuffer,
+) -> LmflowPacket {
+    guard_val(LmflowPacket::default(), || {
         if ndim <= 0 || shape.is_null() {
-            last_error::set("flow_packet_new_buffer: ndim 必须为正且 shape 非空");
-            return FlowPacket::default();
+            last_error::set("lmflow_packet_new_buffer: ndim 必须为正且 shape 非空");
+            return LmflowPacket::default();
         }
         let dims = std::slice::from_raw_parts(shape, ndim as usize);
         match BufferData::new(dims, dtype) {
@@ -512,23 +512,23 @@ pub unsafe extern "C" fn flow_packet_new_buffer(
             }
             Err(e) => {
                 last_error::set(&e.to_string());
-                FlowPacket::default()
+                LmflowPacket::default()
             }
         }
     })
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn flow_packet_from_buffer(src: *const FlowBuffer, ts: i64) -> FlowPacket {
-    guard_val(FlowPacket::default(), || {
+pub unsafe extern "C" fn lmflow_packet_from_buffer(src: *const LmflowBuffer, ts: i64) -> LmflowPacket {
+    guard_val(LmflowPacket::default(), || {
         if src.is_null() {
-            return FlowPacket::default();
+            return LmflowPacket::default();
         }
         let s = &*src;
         let dims = &s.shape[..s.ndim.max(0) as usize];
         let Ok(mut b) = BufferData::new(dims, s.dtype) else {
-            last_error::set("flow_packet_from_buffer: shape/dtype 非法");
-            return FlowPacket::default();
+            last_error::set("lmflow_packet_from_buffer: shape/dtype 非法");
+            return LmflowPacket::default();
         };
         // 拷进一份行优先连续的缓冲,支持**任意 strides** —— 转置、带步长切片、
         // 甚至负步长的 numpy 视图都要拷对(否则静默数据损坏)。
@@ -585,9 +585,9 @@ pub unsafe extern "C" fn flow_packet_from_buffer(src: *const FlowBuffer, ts: i64
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn flow_packet_as_buffer(
-    pkt: *const FlowPacket,
-    out: *mut FlowBuffer,
+pub unsafe extern "C" fn lmflow_packet_as_buffer(
+    pkt: *const LmflowPacket,
+    out: *mut LmflowBuffer,
 ) -> bool {
     guard_val(false, || match peek_builtin(pkt) {
         Some(Builtin::Buffer(b)) => {
@@ -599,9 +599,9 @@ pub unsafe extern "C" fn flow_packet_as_buffer(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn flow_packet_make_mutable_buffer(
-    pkt: *mut FlowPacket,
-    out: *mut FlowBuffer,
+pub unsafe extern "C" fn lmflow_packet_make_mutable_buffer(
+    pkt: *mut LmflowPacket,
+    out: *mut LmflowBuffer,
 ) -> i32 {
     guard(|| {
         if pkt.is_null() {
@@ -622,7 +622,7 @@ pub unsafe extern "C" fn flow_packet_make_mutable_buffer(
                 fill_buffer(out, &snapshot, false, data);
                 code::OK
             }
-            Ok(_) => fail(Error::InvalidArg("该包不是 FlowBuffer".into())),
+            Ok(_) => fail(Error::InvalidArg("该包不是 LmflowBuffer".into())),
             Err(e) => fail(e),
         };
         *fp = own_packet(p);
@@ -631,8 +631,8 @@ pub unsafe extern "C" fn flow_packet_make_mutable_buffer(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn flow_packet_make_mutable_bytes(
-    pkt: *mut FlowPacket,
+pub unsafe extern "C" fn lmflow_packet_make_mutable_bytes(
+    pkt: *mut LmflowPacket,
     data: *mut *mut c_void,
     len: *mut usize,
 ) -> i32 {
@@ -667,19 +667,19 @@ pub unsafe extern "C" fn flow_packet_make_mutable_bytes(
 
 #[repr(C)]
 #[derive(Clone, Copy)]
-pub struct FlowKernelVTable {
+pub struct LmflowKernelVTable {
     pub create: Option<unsafe extern "C" fn(*mut c_void) -> *mut c_void>,
-    pub get_contract: Option<unsafe extern "C" fn(*mut c_void, *mut FlowContract)>,
-    pub open: Option<unsafe extern "C" fn(*mut c_void, *mut FlowContext) -> i32>,
-    pub process: Option<unsafe extern "C" fn(*mut c_void, *mut FlowContext) -> i32>,
-    pub close: Option<unsafe extern "C" fn(*mut c_void, *mut FlowContext) -> i32>,
+    pub get_contract: Option<unsafe extern "C" fn(*mut c_void, *mut LmflowContract)>,
+    pub open: Option<unsafe extern "C" fn(*mut c_void, *mut LmflowContext) -> i32>,
+    pub process: Option<unsafe extern "C" fn(*mut c_void, *mut LmflowContext) -> i32>,
+    pub close: Option<unsafe extern "C" fn(*mut c_void, *mut LmflowContext) -> i32>,
     pub destroy: Option<unsafe extern "C" fn(*mut c_void)>,
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn flow_register_kernel(
+pub unsafe extern "C" fn lmflow_register_kernel(
     name: *const c_char,
-    vt: *const FlowKernelVTable,
+    vt: *const LmflowKernelVTable,
     factory: *mut c_void,
 ) -> i32 {
     guard(|| {
@@ -690,27 +690,27 @@ pub unsafe extern "C" fn flow_register_kernel(
             return fail(Error::InvalidArg(format!("算子 `{n}` 的 vtable 为空")));
         }
         let v = &*vt;
-        // FlowKernelVTable 与 KernelVTable 布局相同,只是 ctx 参数的具体类型不同
-        // FlowKernelVTable 与 KernelVTable 的函数指针 ABI 完全相同,仅上下文参数的
-        // 具名类型不同(FlowContext*/FlowContract* ↔ void*)。显式标注转换目标类型。
+        // LmflowKernelVTable 与 KernelVTable 布局相同,只是 ctx 参数的具体类型不同
+        // LmflowKernelVTable 与 KernelVTable 的函数指针 ABI 完全相同,仅上下文参数的
+        // 具名类型不同(LmflowContext*/LmflowContract* ↔ void*)。显式标注转换目标类型。
         type CtxFn = unsafe extern "C" fn(*mut c_void, *mut c_void) -> i32;
         type ContractFn = unsafe extern "C" fn(*mut c_void, *mut c_void);
         let converted = KernelVTable {
             create: v.create,
             get_contract: std::mem::transmute::<
-                Option<unsafe extern "C" fn(*mut c_void, *mut FlowContract)>,
+                Option<unsafe extern "C" fn(*mut c_void, *mut LmflowContract)>,
                 Option<ContractFn>,
             >(v.get_contract),
             open: std::mem::transmute::<
-                Option<unsafe extern "C" fn(*mut c_void, *mut FlowContext) -> i32>,
+                Option<unsafe extern "C" fn(*mut c_void, *mut LmflowContext) -> i32>,
                 Option<CtxFn>,
             >(v.open),
             process: std::mem::transmute::<
-                Option<unsafe extern "C" fn(*mut c_void, *mut FlowContext) -> i32>,
+                Option<unsafe extern "C" fn(*mut c_void, *mut LmflowContext) -> i32>,
                 Option<CtxFn>,
             >(v.process),
             close: std::mem::transmute::<
-                Option<unsafe extern "C" fn(*mut c_void, *mut FlowContext) -> i32>,
+                Option<unsafe extern "C" fn(*mut c_void, *mut LmflowContext) -> i32>,
                 Option<CtxFn>,
             >(v.close),
             destroy: v.destroy,
@@ -720,12 +720,12 @@ pub unsafe extern "C" fn flow_register_kernel(
 }
 
 #[no_mangle]
-pub extern "C" fn flow_registered_kernel_count() -> usize {
+pub extern "C" fn lmflow_registered_kernel_count() -> usize {
     guard_val(0, || crate::kernel::registered_names().len())
 }
 
 #[no_mangle]
-pub extern "C" fn flow_registered_kernel_name(idx: usize) -> *const c_char {
+pub extern "C" fn lmflow_registered_kernel_name(idx: usize) -> *const c_char {
     guard_val(c"".as_ptr(), || {
         static ARENA: std::sync::LazyLock<runtime::CStrArena> =
             std::sync::LazyLock::new(runtime::CStrArena::default);
@@ -739,25 +739,25 @@ pub extern "C" fn flow_registered_kernel_name(idx: usize) -> *const c_char {
 // ---------------------------------------------------------------- Contract
 
 #[no_mangle]
-pub unsafe extern "C" fn flow_contract_num_inputs(c: *const FlowContract) -> usize {
+pub unsafe extern "C" fn lmflow_contract_num_inputs(c: *const LmflowContract) -> usize {
     guard_val(0, || {
-        contract_mut(c as *mut FlowContract).map_or(0, |x| x.inputs.len())
+        contract_mut(c as *mut LmflowContract).map_or(0, |x| x.inputs.len())
     })
 }
 #[no_mangle]
-pub unsafe extern "C" fn flow_contract_num_outputs(c: *const FlowContract) -> usize {
+pub unsafe extern "C" fn lmflow_contract_num_outputs(c: *const LmflowContract) -> usize {
     guard_val(0, || {
-        contract_mut(c as *mut FlowContract).map_or(0, |x| x.outputs.len())
+        contract_mut(c as *mut LmflowContract).map_or(0, |x| x.outputs.len())
     })
 }
 #[no_mangle]
-pub unsafe extern "C" fn flow_contract_input_id(
-    c: *const FlowContract,
+pub unsafe extern "C" fn lmflow_contract_input_id(
+    c: *const LmflowContract,
     tag: *const c_char,
     index: usize,
 ) -> usize {
     guard_val(INVALID_ID, || {
-        let Some(x) = contract_mut(c as *mut FlowContract) else {
+        let Some(x) = contract_mut(c as *mut LmflowContract) else {
             return INVALID_ID;
         };
         x.inputs
@@ -766,13 +766,13 @@ pub unsafe extern "C" fn flow_contract_input_id(
     })
 }
 #[no_mangle]
-pub unsafe extern "C" fn flow_contract_output_id(
-    c: *const FlowContract,
+pub unsafe extern "C" fn lmflow_contract_output_id(
+    c: *const LmflowContract,
     tag: *const c_char,
     index: usize,
 ) -> usize {
     guard_val(INVALID_ID, || {
-        let Some(x) = contract_mut(c as *mut FlowContract) else {
+        let Some(x) = contract_mut(c as *mut LmflowContract) else {
             return INVALID_ID;
         };
         x.outputs
@@ -781,12 +781,12 @@ pub unsafe extern "C" fn flow_contract_output_id(
     })
 }
 #[no_mangle]
-pub unsafe extern "C" fn flow_contract_input_index(
-    c: *const FlowContract,
+pub unsafe extern "C" fn lmflow_contract_input_index(
+    c: *const LmflowContract,
     name: *const c_char,
 ) -> usize {
     guard_val(INVALID_ID, || {
-        let Some(x) = contract_mut(c as *mut FlowContract) else {
+        let Some(x) = contract_mut(c as *mut LmflowContract) else {
             return INVALID_ID;
         };
         x.inputs
@@ -795,12 +795,12 @@ pub unsafe extern "C" fn flow_contract_input_index(
     })
 }
 #[no_mangle]
-pub unsafe extern "C" fn flow_contract_output_index(
-    c: *const FlowContract,
+pub unsafe extern "C" fn lmflow_contract_output_index(
+    c: *const LmflowContract,
     name: *const c_char,
 ) -> usize {
     guard_val(INVALID_ID, || {
-        let Some(x) = contract_mut(c as *mut FlowContract) else {
+        let Some(x) = contract_mut(c as *mut LmflowContract) else {
             return INVALID_ID;
         };
         x.outputs
@@ -817,30 +817,30 @@ fn contract_arena() -> &'static runtime::CStrArena {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn flow_contract_input_name(
-    c: *const FlowContract,
+pub unsafe extern "C" fn lmflow_contract_input_name(
+    c: *const LmflowContract,
     idx: usize,
 ) -> *const c_char {
     guard_val(c"".as_ptr(), || {
-        contract_mut(c as *mut FlowContract)
+        contract_mut(c as *mut LmflowContract)
             .and_then(|x| x.inputs.name(idx).map(|s| contract_arena().intern(s)))
             .unwrap_or(c"".as_ptr())
     })
 }
 #[no_mangle]
-pub unsafe extern "C" fn flow_contract_output_name(
-    c: *const FlowContract,
+pub unsafe extern "C" fn lmflow_contract_output_name(
+    c: *const LmflowContract,
     idx: usize,
 ) -> *const c_char {
     guard_val(c"".as_ptr(), || {
-        contract_mut(c as *mut FlowContract)
+        contract_mut(c as *mut LmflowContract)
             .and_then(|x| x.outputs.name(idx).map(|s| contract_arena().intern(s)))
             .unwrap_or(c"".as_ptr())
     })
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn flow_contract_input_set_any(c: *mut FlowContract, idx: usize) {
+pub unsafe extern "C" fn lmflow_contract_input_set_any(c: *mut LmflowContract, idx: usize) {
     guard_val((), || {
         if let Some(x) = contract_mut(c) {
             if let Some(s) = x.input_types.get_mut(idx) {
@@ -850,7 +850,7 @@ pub unsafe extern "C" fn flow_contract_input_set_any(c: *mut FlowContract, idx: 
     });
 }
 #[no_mangle]
-pub unsafe extern "C" fn flow_contract_output_set_any(c: *mut FlowContract, idx: usize) {
+pub unsafe extern "C" fn lmflow_contract_output_set_any(c: *mut LmflowContract, idx: usize) {
     guard_val((), || {
         if let Some(x) = contract_mut(c) {
             if let Some(s) = x.output_types.get_mut(idx) {
@@ -860,8 +860,8 @@ pub unsafe extern "C" fn flow_contract_output_set_any(c: *mut FlowContract, idx:
     });
 }
 #[no_mangle]
-pub unsafe extern "C" fn flow_contract_input_set_type(
-    c: *mut FlowContract,
+pub unsafe extern "C" fn lmflow_contract_input_set_type(
+    c: *mut LmflowContract,
     idx: usize,
     type_id: u64,
 ) {
@@ -874,8 +874,8 @@ pub unsafe extern "C" fn flow_contract_input_set_type(
     });
 }
 #[no_mangle]
-pub unsafe extern "C" fn flow_contract_output_set_type(
-    c: *mut FlowContract,
+pub unsafe extern "C" fn lmflow_contract_output_set_type(
+    c: *mut LmflowContract,
     idx: usize,
     type_id: u64,
 ) {
@@ -888,8 +888,8 @@ pub unsafe extern "C" fn flow_contract_output_set_type(
     });
 }
 #[no_mangle]
-pub unsafe extern "C" fn flow_contract_require_side_packet(
-    c: *mut FlowContract,
+pub unsafe extern "C" fn lmflow_contract_require_side_packet(
+    c: *mut LmflowContract,
     name: *const c_char,
 ) {
     guard_val((), || {
@@ -902,16 +902,16 @@ pub unsafe extern "C" fn flow_contract_require_side_packet(
 // ---------------------------------------------------------------- Context
 
 #[no_mangle]
-pub unsafe extern "C" fn flow_ctx_num_inputs(c: *const FlowContext) -> usize {
+pub unsafe extern "C" fn lmflow_ctx_num_inputs(c: *const LmflowContext) -> usize {
     guard_val(0, || ctx_ref(c).map_or(0, |x| x.in_ports.len()))
 }
 #[no_mangle]
-pub unsafe extern "C" fn flow_ctx_num_outputs(c: *const FlowContext) -> usize {
+pub unsafe extern "C" fn lmflow_ctx_num_outputs(c: *const LmflowContext) -> usize {
     guard_val(0, || ctx_ref(c).map_or(0, |x| x.out_ports.len()))
 }
 #[no_mangle]
-pub unsafe extern "C" fn flow_ctx_input_id(
-    c: *const FlowContext,
+pub unsafe extern "C" fn lmflow_ctx_input_id(
+    c: *const LmflowContext,
     tag: *const c_char,
     index: usize,
 ) -> usize {
@@ -922,8 +922,8 @@ pub unsafe extern "C" fn flow_ctx_input_id(
     })
 }
 #[no_mangle]
-pub unsafe extern "C" fn flow_ctx_output_id(
-    c: *const FlowContext,
+pub unsafe extern "C" fn lmflow_ctx_output_id(
+    c: *const LmflowContext,
     tag: *const c_char,
     index: usize,
 ) -> usize {
@@ -934,7 +934,7 @@ pub unsafe extern "C" fn flow_ctx_output_id(
     })
 }
 #[no_mangle]
-pub unsafe extern "C" fn flow_ctx_input_index(c: *const FlowContext, name: *const c_char) -> usize {
+pub unsafe extern "C" fn lmflow_ctx_input_index(c: *const LmflowContext, name: *const c_char) -> usize {
     guard_val(INVALID_ID, || {
         ctx_ref(c)
             .and_then(|x| x.in_ports.index_by_name(cstr(name).unwrap_or("")))
@@ -942,8 +942,8 @@ pub unsafe extern "C" fn flow_ctx_input_index(c: *const FlowContext, name: *cons
     })
 }
 #[no_mangle]
-pub unsafe extern "C" fn flow_ctx_output_index(
-    c: *const FlowContext,
+pub unsafe extern "C" fn lmflow_ctx_output_index(
+    c: *const LmflowContext,
     name: *const c_char,
 ) -> usize {
     guard_val(INVALID_ID, || {
@@ -953,7 +953,7 @@ pub unsafe extern "C" fn flow_ctx_output_index(
     })
 }
 #[no_mangle]
-pub unsafe extern "C" fn flow_ctx_input_name(c: *const FlowContext, idx: usize) -> *const c_char {
+pub unsafe extern "C" fn lmflow_ctx_input_name(c: *const LmflowContext, idx: usize) -> *const c_char {
     guard_val(c"".as_ptr(), || {
         ctx_ref(c)
             .and_then(|x| x.in_ports.name(idx).map(|s| x.intern(s)))
@@ -961,7 +961,7 @@ pub unsafe extern "C" fn flow_ctx_input_name(c: *const FlowContext, idx: usize) 
     })
 }
 #[no_mangle]
-pub unsafe extern "C" fn flow_ctx_output_name(c: *const FlowContext, idx: usize) -> *const c_char {
+pub unsafe extern "C" fn lmflow_ctx_output_name(c: *const LmflowContext, idx: usize) -> *const c_char {
     guard_val(c"".as_ptr(), || {
         ctx_ref(c)
             .and_then(|x| x.out_ports.name(idx).map(|s| x.intern(s)))
@@ -969,19 +969,19 @@ pub unsafe extern "C" fn flow_ctx_output_name(c: *const FlowContext, idx: usize)
     })
 }
 #[no_mangle]
-pub unsafe extern "C" fn flow_ctx_node_name(c: *const FlowContext) -> *const c_char {
+pub unsafe extern "C" fn lmflow_ctx_node_name(c: *const LmflowContext) -> *const c_char {
     guard_val(c"".as_ptr(), || {
         ctx_ref(c).map_or(c"".as_ptr(), |x| x.node_name_cstr())
     })
 }
 #[no_mangle]
-pub unsafe extern "C" fn flow_ctx_kernel_name(c: *const FlowContext) -> *const c_char {
+pub unsafe extern "C" fn lmflow_ctx_kernel_name(c: *const LmflowContext) -> *const c_char {
     guard_val(c"".as_ptr(), || {
         ctx_ref(c).map_or(c"".as_ptr(), |x| x.kernel_name_cstr())
     })
 }
 #[no_mangle]
-pub unsafe extern "C" fn flow_ctx_log(c: *const FlowContext, level: i32, msg: *const c_char) {
+pub unsafe extern "C" fn lmflow_ctx_log(c: *const LmflowContext, level: i32, msg: *const c_char) {
     guard_val((), || {
         if let (Some(x), Some(m)) = (ctx_ref(c), cstr(msg)) {
             x.log(level, m);
@@ -989,21 +989,21 @@ pub unsafe extern "C" fn flow_ctx_log(c: *const FlowContext, level: i32, msg: *c
     });
 }
 #[no_mangle]
-pub unsafe extern "C" fn flow_ctx_set_error(c: *const FlowContext, msg: *const c_char) {
+pub unsafe extern "C" fn lmflow_ctx_set_error(c: *const LmflowContext, msg: *const c_char) {
     guard_val((), || {
         // set_error 需要可变访问;上下文在回调期间由算子独占,故此转换安全
-        if let (Some(x), Some(m)) = (ctx_mut(c as *mut FlowContext), cstr(msg)) {
+        if let (Some(x), Some(m)) = (ctx_mut(c as *mut LmflowContext), cstr(msg)) {
             x.set_error(m);
         }
     });
 }
 #[no_mangle]
-pub unsafe extern "C" fn flow_ctx_close_reason(c: *const FlowContext) -> i32 {
+pub unsafe extern "C" fn lmflow_ctx_close_reason(c: *const LmflowContext) -> i32 {
     guard_val(0, || ctx_ref(c).map_or(0, |x| x.close_reason))
 }
 #[no_mangle]
-pub unsafe extern "C" fn flow_ctx_counter_add(
-    c: *const FlowContext,
+pub unsafe extern "C" fn lmflow_ctx_counter_add(
+    c: *const LmflowContext,
     name: *const c_char,
     delta: i64,
 ) {
@@ -1015,27 +1015,27 @@ pub unsafe extern "C" fn flow_ctx_counter_add(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn flow_ctx_input_is_empty(c: *const FlowContext, idx: usize) -> bool {
+pub unsafe extern "C" fn lmflow_ctx_input_is_empty(c: *const LmflowContext, idx: usize) -> bool {
     guard_val(true, || {
         ctx_ref(c).is_none_or(|x| x.input(idx).is_none_or(|p| p.is_empty()))
     })
 }
 #[no_mangle]
-pub unsafe extern "C" fn flow_ctx_input_is_done(c: *const FlowContext, idx: usize) -> bool {
+pub unsafe extern "C" fn lmflow_ctx_input_is_done(c: *const LmflowContext, idx: usize) -> bool {
     guard_val(false, || {
         ctx_ref(c).is_some_and(|x| x.inputs_done.get(idx).copied().unwrap_or(false))
     })
 }
 #[no_mangle]
-pub unsafe extern "C" fn flow_ctx_input(c: *const FlowContext, idx: usize) -> FlowPacket {
-    guard_val(FlowPacket::default(), || match ctx_ref(c) {
+pub unsafe extern "C" fn lmflow_ctx_input(c: *const LmflowContext, idx: usize) -> LmflowPacket {
+    guard_val(LmflowPacket::default(), || match ctx_ref(c) {
         Some(x) => x.input(idx).map(borrow_packet).unwrap_or_default(),
-        None => FlowPacket::default(),
+        None => LmflowPacket::default(),
     })
 }
 #[no_mangle]
-pub unsafe extern "C" fn flow_ctx_input_payload(
-    c: *const FlowContext,
+pub unsafe extern "C" fn lmflow_ctx_input_payload(
+    c: *const LmflowContext,
     idx: usize,
 ) -> *const c_void {
     guard_val(std::ptr::null(), || {
@@ -1046,20 +1046,20 @@ pub unsafe extern "C" fn flow_ctx_input_payload(
     })
 }
 #[no_mangle]
-pub unsafe extern "C" fn flow_ctx_input_timestamp(c: *const FlowContext) -> i64 {
+pub unsafe extern "C" fn lmflow_ctx_input_timestamp(c: *const LmflowContext) -> i64 {
     guard_val(Timestamp::unset().0, || {
         ctx_ref(c).map_or(Timestamp::unset().0, |x| x.input_ts.0)
     })
 }
 #[no_mangle]
-pub unsafe extern "C" fn flow_ctx_take_input(c: *mut FlowContext, idx: usize) -> FlowPacket {
-    guard_val(FlowPacket::default(), || match ctx_mut(c) {
+pub unsafe extern "C" fn lmflow_ctx_take_input(c: *mut LmflowContext, idx: usize) -> LmflowPacket {
+    guard_val(LmflowPacket::default(), || match ctx_mut(c) {
         Some(x) => own_packet(x.take_input(idx)),
-        None => FlowPacket::default(),
+        None => LmflowPacket::default(),
     })
 }
 #[no_mangle]
-pub unsafe extern "C" fn flow_ctx_emit(c: *mut FlowContext, out_idx: usize, pkt: FlowPacket) {
+pub unsafe extern "C" fn lmflow_ctx_emit(c: *mut LmflowContext, out_idx: usize, pkt: LmflowPacket) {
     guard_val((), || {
         let p = take_packet(pkt);
         if let Some(x) = ctx_mut(c) {
@@ -1071,7 +1071,7 @@ pub unsafe extern "C" fn flow_ctx_emit(c: *mut FlowContext, out_idx: usize, pkt:
     });
 }
 #[no_mangle]
-pub unsafe extern "C" fn flow_ctx_forward(c: *mut FlowContext, in_idx: usize, out_idx: usize) {
+pub unsafe extern "C" fn lmflow_ctx_forward(c: *mut LmflowContext, in_idx: usize, out_idx: usize) {
     guard_val((), || {
         if let Some(x) = ctx_mut(c) {
             if let Err(e) = x.forward(in_idx, out_idx) {
@@ -1082,8 +1082,8 @@ pub unsafe extern "C" fn flow_ctx_forward(c: *mut FlowContext, in_idx: usize, ou
     });
 }
 #[no_mangle]
-pub unsafe extern "C" fn flow_ctx_set_next_ts_bound(
-    c: *mut FlowContext,
+pub unsafe extern "C" fn lmflow_ctx_set_next_ts_bound(
+    c: *mut LmflowContext,
     out_idx: usize,
     bound: i64,
 ) {
@@ -1099,7 +1099,7 @@ pub unsafe extern "C" fn flow_ctx_set_next_ts_bound(
 macro_rules! opt_scalar {
     ($name:ident, $method:ident, $ty:ty) => {
         #[no_mangle]
-        pub unsafe extern "C" fn $name(c: *const FlowContext, key: *const c_char, def: $ty) -> $ty {
+        pub unsafe extern "C" fn $name(c: *const LmflowContext, key: *const c_char, def: $ty) -> $ty {
             guard_val(def, || {
                 ctx_ref(c)
                     .and_then(|x| cstr(key).and_then(|k| x.options.$method(k)))
@@ -1108,20 +1108,20 @@ macro_rules! opt_scalar {
         }
     };
 }
-opt_scalar!(flow_ctx_option_i64, i64, i64);
-opt_scalar!(flow_ctx_option_f64, f64, f64);
-opt_scalar!(flow_ctx_option_bool, bool, bool);
+opt_scalar!(lmflow_ctx_option_i64, i64, i64);
+opt_scalar!(lmflow_ctx_option_f64, f64, f64);
+opt_scalar!(lmflow_ctx_option_bool, bool, bool);
 
 #[no_mangle]
-pub unsafe extern "C" fn flow_ctx_has_option(c: *const FlowContext, key: *const c_char) -> bool {
+pub unsafe extern "C" fn lmflow_ctx_has_option(c: *const LmflowContext, key: *const c_char) -> bool {
     guard_val(false, || {
         ctx_ref(c).is_some_and(|x| cstr(key).is_some_and(|k| x.options.has(k)))
     })
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn flow_ctx_option_str(
-    c: *const FlowContext,
+pub unsafe extern "C" fn lmflow_ctx_option_str(
+    c: *const LmflowContext,
     key: *const c_char,
     def: *const c_char,
 ) -> *const c_char {
@@ -1136,7 +1136,7 @@ macro_rules! require_scalar {
     ($name:ident, $method:ident, $ty:ty) => {
         #[no_mangle]
         pub unsafe extern "C" fn $name(
-            c: *const FlowContext,
+            c: *const LmflowContext,
             key: *const c_char,
             out: *mut $ty,
         ) -> i32 {
@@ -1163,13 +1163,13 @@ macro_rules! require_scalar {
         }
     };
 }
-require_scalar!(flow_ctx_require_option_i64, i64, i64);
-require_scalar!(flow_ctx_require_option_f64, f64, f64);
-require_scalar!(flow_ctx_require_option_bool, bool, bool);
+require_scalar!(lmflow_ctx_require_option_i64, i64, i64);
+require_scalar!(lmflow_ctx_require_option_f64, f64, f64);
+require_scalar!(lmflow_ctx_require_option_bool, bool, bool);
 
 #[no_mangle]
-pub unsafe extern "C" fn flow_ctx_require_option_str(
-    c: *const FlowContext,
+pub unsafe extern "C" fn lmflow_ctx_require_option_str(
+    c: *const LmflowContext,
     key: *const c_char,
     out: *mut *const c_char,
 ) -> i32 {
@@ -1196,15 +1196,15 @@ pub unsafe extern "C" fn flow_ctx_require_option_str(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn flow_ctx_option_count(c: *const FlowContext, key: *const c_char) -> usize {
+pub unsafe extern "C" fn lmflow_ctx_option_count(c: *const LmflowContext, key: *const c_char) -> usize {
     guard_val(0, || {
         ctx_ref(c).map_or(0, |x| cstr(key).map_or(0, |k| x.options.count(k)))
     })
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn flow_ctx_option_i64_array(
-    c: *const FlowContext,
+pub unsafe extern "C" fn lmflow_ctx_option_i64_array(
+    c: *const LmflowContext,
     key: *const c_char,
     out: *mut i64,
     cap: usize,
@@ -1223,8 +1223,8 @@ pub unsafe extern "C" fn flow_ctx_option_i64_array(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn flow_ctx_option_f64_array(
-    c: *const FlowContext,
+pub unsafe extern "C" fn lmflow_ctx_option_f64_array(
+    c: *const LmflowContext,
     key: *const c_char,
     out: *mut f64,
     cap: usize,
@@ -1243,8 +1243,8 @@ pub unsafe extern "C" fn flow_ctx_option_f64_array(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn flow_ctx_option_str_array(
-    c: *const FlowContext,
+pub unsafe extern "C" fn lmflow_ctx_option_str_array(
+    c: *const LmflowContext,
     key: *const c_char,
     out: *mut *const c_char,
     cap: usize,
@@ -1263,7 +1263,7 @@ pub unsafe extern "C" fn flow_ctx_option_str_array(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn flow_ctx_options_json(c: *const FlowContext) -> *const c_char {
+pub unsafe extern "C" fn lmflow_ctx_options_json(c: *const LmflowContext) -> *const c_char {
     guard_val(c"{}".as_ptr(), || {
         ctx_ref(c).map_or(c"{}".as_ptr(), |x| x.options.json_cstr())
     })
@@ -1272,8 +1272,8 @@ pub unsafe extern "C" fn flow_ctx_options_json(c: *const FlowContext) -> *const 
 // ---- side packet ----
 
 #[no_mangle]
-pub unsafe extern "C" fn flow_ctx_has_side_packet(
-    c: *const FlowContext,
+pub unsafe extern "C" fn lmflow_ctx_has_side_packet(
+    c: *const LmflowContext,
     name: *const c_char,
 ) -> bool {
     guard_val(false, || {
@@ -1282,11 +1282,11 @@ pub unsafe extern "C" fn flow_ctx_has_side_packet(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn flow_ctx_side_packet(
-    c: *const FlowContext,
+pub unsafe extern "C" fn lmflow_ctx_side_packet(
+    c: *const LmflowContext,
     name: *const c_char,
-) -> FlowPacket {
-    guard_val(FlowPacket::default(), || {
+) -> LmflowPacket {
+    guard_val(LmflowPacket::default(), || {
         ctx_ref(c)
             .and_then(|x| cstr(name).and_then(|n| x.side_packets.get(n)))
             .map(borrow_packet)
@@ -1297,28 +1297,28 @@ pub unsafe extern "C" fn flow_ctx_side_packet(
 // ---------------------------------------------------------------- 图
 
 #[no_mangle]
-pub extern "C" fn flow_graph_new() -> *mut FlowGraph {
+pub extern "C" fn lmflow_graph_new() -> *mut LmflowGraph {
     guard_val(std::ptr::null_mut(), || {
         // 此处只分配空槽,真正建图在 init_from_yaml。
         // 顺便把错误状态清干净,免得调用方读到上一次遗留的 last_error。
         last_error::set("");
-        Box::into_raw(Box::new(GraphSlot::default())) as *mut FlowGraph
+        Box::into_raw(Box::new(GraphSlot::default())) as *mut LmflowGraph
     })
 }
 
-/// `flow_graph_new` 先返回一个空槽,`init_from_yaml` 才真正建图。
+/// `lmflow_graph_new` 先返回一个空槽,`init_from_yaml` 才真正建图。
 ///
-/// 输入/输出句柄(`FlowInput*`/`FlowPoller*`)**不**由本槽持有 —— 它们是**调用方拥有**的:
-/// `flow_graph_input`/`flow_graph_add_poller` 返回一个独立的 `Box::into_raw` 句柄,
-/// 各自持一份 `Arc<GraphInner>`,须由调用方 `flow_input_free`/`flow_poller_free` 释放。
-/// 这样即使先 `flow_graph_free` 了图,句柄内存依旧有效(其 Arc 撑着引擎),
+/// 输入/输出句柄(`LmflowInput*`/`LmflowPoller*`)**不**由本槽持有 —— 它们是**调用方拥有**的:
+/// `lmflow_graph_input`/`lmflow_graph_add_poller` 返回一个独立的 `Box::into_raw` 句柄,
+/// 各自持一份 `Arc<GraphInner>`,须由调用方 `lmflow_input_free`/`lmflow_poller_free` 释放。
+/// 这样即使先 `lmflow_graph_free` 了图,句柄内存依旧有效(其 Arc 撑着引擎),
 /// 之后再用只会得到「图已结束」的错误,而不是 use-after-free。
 #[derive(Default)]
 pub struct GraphSlot {
     graph: Option<Graph>,
 }
 
-unsafe fn slot_mut<'a>(g: *mut FlowGraph) -> Option<&'a mut GraphSlot> {
+unsafe fn slot_mut<'a>(g: *mut LmflowGraph) -> Option<&'a mut GraphSlot> {
     if g.is_null() {
         None
     } else {
@@ -1327,7 +1327,7 @@ unsafe fn slot_mut<'a>(g: *mut FlowGraph) -> Option<&'a mut GraphSlot> {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn flow_graph_free(g: *mut FlowGraph) {
+pub unsafe extern "C" fn lmflow_graph_free(g: *mut LmflowGraph) {
     guard_val((), || {
         if g.is_null() {
             return;
@@ -1342,7 +1342,7 @@ pub unsafe extern "C" fn flow_graph_free(g: *mut FlowGraph) {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn flow_graph_init_from_yaml(g: *mut FlowGraph, yaml: *const c_char) -> i32 {
+pub unsafe extern "C" fn lmflow_graph_init_from_yaml(g: *mut LmflowGraph, yaml: *const c_char) -> i32 {
     guard(|| {
         let Some(slot) = slot_mut(g) else {
             return fail(Error::InvalidArg("graph 句柄为空".into()));
@@ -1364,8 +1364,8 @@ pub unsafe extern "C" fn flow_graph_init_from_yaml(g: *mut FlowGraph, yaml: *con
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn flow_graph_init_from_yaml_file(
-    g: *mut FlowGraph,
+pub unsafe extern "C" fn lmflow_graph_init_from_yaml_file(
+    g: *mut LmflowGraph,
     path: *const c_char,
 ) -> i32 {
     guard(|| {
@@ -1385,7 +1385,7 @@ pub unsafe extern "C" fn flow_graph_init_from_yaml_file(
     })
 }
 
-unsafe fn with_graph<F: FnOnce(&Graph) -> i32>(g: *mut FlowGraph, f: F) -> i32 {
+unsafe fn with_graph<F: FnOnce(&Graph) -> i32>(g: *mut LmflowGraph, f: F) -> i32 {
     match slot_mut(g).and_then(|s| s.graph.as_ref()) {
         Some(gr) => f(gr),
         None => fail(Error::State("图尚未初始化".into())),
@@ -1393,15 +1393,15 @@ unsafe fn with_graph<F: FnOnce(&Graph) -> i32>(g: *mut FlowGraph, f: F) -> i32 {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn flow_graph_start(g: *mut FlowGraph) -> i32 {
+pub unsafe extern "C" fn lmflow_graph_start(g: *mut LmflowGraph) -> i32 {
     guard(|| with_graph(g, |gr| to_status(gr.start())))
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn flow_graph_set_side_packet(
-    g: *mut FlowGraph,
+pub unsafe extern "C" fn lmflow_graph_set_side_packet(
+    g: *mut LmflowGraph,
     name: *const c_char,
-    pkt: FlowPacket,
+    pkt: LmflowPacket,
 ) -> i32 {
     guard(|| {
         let p = take_packet(pkt);
@@ -1413,10 +1413,10 @@ pub unsafe extern "C" fn flow_graph_set_side_packet(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn flow_graph_input(
-    g: *mut FlowGraph,
+pub unsafe extern "C" fn lmflow_graph_input(
+    g: *mut LmflowGraph,
     port: *const c_char,
-) -> *mut FlowInput {
+) -> *mut LmflowInput {
     guard_val(std::ptr::null_mut(), || {
         let Some(slot) = slot_mut(g) else {
             last_error::set("graph 句柄为空");
@@ -1433,8 +1433,8 @@ pub unsafe extern "C" fn flow_graph_input(
         let inner = gr.inner().clone();
         match inner.input_edge_by_name(name) {
             Some(edge) => {
-                // 调用方拥有:独立 Box,持一份 Arc<GraphInner>。须 flow_input_free 释放。
-                Box::into_raw(Box::new(InputHandle { graph: inner, edge })) as *mut FlowInput
+                // 调用方拥有:独立 Box,持一份 Arc<GraphInner>。须 lmflow_input_free 释放。
+                Box::into_raw(Box::new(InputHandle { graph: inner, edge })) as *mut LmflowInput
             }
             None => {
                 last_error::set(&format!("图输入口 `{name}` 不存在"));
@@ -1444,7 +1444,7 @@ pub unsafe extern "C" fn flow_graph_input(
     })
 }
 
-unsafe fn input_ref<'a>(i: *mut FlowInput) -> Option<&'a InputHandle> {
+unsafe fn input_ref<'a>(i: *mut LmflowInput) -> Option<&'a InputHandle> {
     if i.is_null() {
         None
     } else {
@@ -1453,7 +1453,7 @@ unsafe fn input_ref<'a>(i: *mut FlowInput) -> Option<&'a InputHandle> {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn flow_input_send(i: *mut FlowInput, pkt: FlowPacket) -> i32 {
+pub unsafe extern "C" fn lmflow_input_send(i: *mut LmflowInput, pkt: LmflowPacket) -> i32 {
     guard(|| {
         let p = take_packet(pkt);
         match input_ref(i) {
@@ -1464,7 +1464,7 @@ pub unsafe extern "C" fn flow_input_send(i: *mut FlowInput, pkt: FlowPacket) -> 
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn flow_input_try_send(i: *mut FlowInput, pkt: FlowPacket) -> i32 {
+pub unsafe extern "C" fn lmflow_input_try_send(i: *mut LmflowInput, pkt: LmflowPacket) -> i32 {
     guard(|| {
         let p = take_packet(pkt);
         match input_ref(i) {
@@ -1475,7 +1475,7 @@ pub unsafe extern "C" fn flow_input_try_send(i: *mut FlowInput, pkt: FlowPacket)
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn flow_input_close(i: *mut FlowInput) {
+pub unsafe extern "C" fn lmflow_input_close(i: *mut LmflowInput) {
     guard_val((), || {
         if let Some(h) = input_ref(i) {
             h.graph.close_edge_pub(h.edge);
@@ -1484,7 +1484,7 @@ pub unsafe extern "C" fn flow_input_close(i: *mut FlowInput) {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn flow_input_free(i: *mut FlowInput) {
+pub unsafe extern "C" fn lmflow_input_free(i: *mut LmflowInput) {
     guard_val((), || {
         if !i.is_null() {
             // 调用方拥有:归还这份句柄(及其对引擎的 Arc)。图可能已 free,但句柄仍安全。
@@ -1494,10 +1494,10 @@ pub unsafe extern "C" fn flow_input_free(i: *mut FlowInput) {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn flow_graph_add_packet(
-    g: *mut FlowGraph,
+pub unsafe extern "C" fn lmflow_graph_add_packet(
+    g: *mut LmflowGraph,
     port: *const c_char,
-    pkt: FlowPacket,
+    pkt: LmflowPacket,
 ) -> i32 {
     guard(|| {
         let p = take_packet(pkt);
@@ -1515,7 +1515,7 @@ pub unsafe extern "C" fn flow_graph_add_packet(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn flow_graph_close_input(g: *mut FlowGraph, port: *const c_char) -> i32 {
+pub unsafe extern "C" fn lmflow_graph_close_input(g: *mut LmflowGraph, port: *const c_char) -> i32 {
     guard(|| {
         let Some(name) = cstr(port) else {
             return fail(Error::InvalidArg("端口名为空".into()));
@@ -1525,7 +1525,7 @@ pub unsafe extern "C" fn flow_graph_close_input(g: *mut FlowGraph, port: *const 
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn flow_graph_close_all_inputs(g: *mut FlowGraph) {
+pub unsafe extern "C" fn lmflow_graph_close_all_inputs(g: *mut LmflowGraph) {
     guard_val((), || {
         let _ = with_graph(g, |gr| {
             gr.close_all_inputs();
@@ -1535,19 +1535,19 @@ pub unsafe extern "C" fn flow_graph_close_all_inputs(g: *mut FlowGraph) {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn flow_graph_add_poller(
-    g: *mut FlowGraph,
+pub unsafe extern "C" fn lmflow_graph_add_poller(
+    g: *mut LmflowGraph,
     port: *const c_char,
-) -> *mut FlowPoller {
-    flow_graph_add_poller_ex(g, port, false)
+) -> *mut LmflowPoller {
+    lmflow_graph_add_poller_ex(g, port, false)
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn flow_graph_add_poller_ex(
-    g: *mut FlowGraph,
+pub unsafe extern "C" fn lmflow_graph_add_poller_ex(
+    g: *mut LmflowGraph,
     port: *const c_char,
     observe_timestamp_bounds: bool,
-) -> *mut FlowPoller {
+) -> *mut LmflowPoller {
     guard_val(std::ptr::null_mut(), || {
         if observe_timestamp_bounds {
             last_error::set("observe_timestamp_bounds 属后续阶段,本版本尚未实现");
@@ -1567,8 +1567,8 @@ pub unsafe extern "C" fn flow_graph_add_poller_ex(
         };
         match gr.add_poller(name) {
             Ok(p) => {
-                // 调用方拥有:独立 Box,持一份 Arc<GraphInner>。须 flow_poller_free 释放。
-                Box::into_raw(Box::new(p)) as *mut FlowPoller
+                // 调用方拥有:独立 Box,持一份 Arc<GraphInner>。须 lmflow_poller_free 释放。
+                Box::into_raw(Box::new(p)) as *mut LmflowPoller
             }
             Err(e) => {
                 last_error::set(&e.to_string());
@@ -1578,7 +1578,7 @@ pub unsafe extern "C" fn flow_graph_add_poller_ex(
     })
 }
 
-unsafe fn poller_ref<'a>(p: *mut FlowPoller) -> Option<&'a Poller> {
+unsafe fn poller_ref<'a>(p: *mut LmflowPoller) -> Option<&'a Poller> {
     if p.is_null() {
         None
     } else {
@@ -1587,7 +1587,7 @@ unsafe fn poller_ref<'a>(p: *mut FlowPoller) -> Option<&'a Poller> {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn flow_poller_next(p: *mut FlowPoller, out: *mut FlowPacket) -> bool {
+pub unsafe extern "C" fn lmflow_poller_next(p: *mut LmflowPoller, out: *mut LmflowPacket) -> bool {
     guard_val(false, || match poller_ref(p) {
         Some(poller) => match poller.next() {
             Some(pkt) => {
@@ -1603,7 +1603,7 @@ pub unsafe extern "C" fn flow_poller_next(p: *mut FlowPoller, out: *mut FlowPack
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn flow_poller_try_next(p: *mut FlowPoller, out: *mut FlowPacket) -> bool {
+pub unsafe extern "C" fn lmflow_poller_try_next(p: *mut LmflowPoller, out: *mut LmflowPacket) -> bool {
     guard_val(false, || match poller_ref(p).and_then(|x| x.try_next()) {
         Some(pkt) => {
             if !out.is_null() {
@@ -1616,9 +1616,9 @@ pub unsafe extern "C" fn flow_poller_try_next(p: *mut FlowPoller, out: *mut Flow
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn flow_poller_next_timeout(
-    p: *mut FlowPoller,
-    out: *mut FlowPacket,
+pub unsafe extern "C" fn lmflow_poller_next_timeout(
+    p: *mut LmflowPoller,
+    out: *mut LmflowPacket,
     timeout_ms: i64,
 ) -> i32 {
     guard(|| {
@@ -1639,7 +1639,7 @@ pub unsafe extern "C" fn flow_poller_next_timeout(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn flow_poller_free(p: *mut FlowPoller) {
+pub unsafe extern "C" fn lmflow_poller_free(p: *mut LmflowPoller) {
     guard_val((), || {
         if !p.is_null() {
             // 调用方拥有:归还这份句柄(及其对引擎的 Arc)。图可能已 free,但句柄仍安全。
@@ -1649,21 +1649,21 @@ pub unsafe extern "C" fn flow_poller_free(p: *mut FlowPoller) {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn flow_graph_observe(
-    g: *mut FlowGraph,
+pub unsafe extern "C" fn lmflow_graph_observe(
+    g: *mut LmflowGraph,
     port: *const c_char,
-    cb: Option<unsafe extern "C" fn(*mut c_void, FlowPacket)>,
+    cb: Option<unsafe extern "C" fn(*mut c_void, LmflowPacket)>,
     user: *mut c_void,
 ) -> i32 {
-    flow_graph_observe_ex(g, port, false, cb, user)
+    lmflow_graph_observe_ex(g, port, false, cb, user)
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn flow_graph_observe_ex(
-    g: *mut FlowGraph,
+pub unsafe extern "C" fn lmflow_graph_observe_ex(
+    g: *mut LmflowGraph,
     port: *const c_char,
     observe_timestamp_bounds: bool,
-    cb: Option<unsafe extern "C" fn(*mut c_void, FlowPacket)>,
+    cb: Option<unsafe extern "C" fn(*mut c_void, LmflowPacket)>,
     user: *mut c_void,
 ) -> i32 {
     guard(|| {
@@ -1683,7 +1683,7 @@ pub unsafe extern "C" fn flow_graph_observe_ex(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn flow_graph_cancel(g: *mut FlowGraph) {
+pub unsafe extern "C" fn lmflow_graph_cancel(g: *mut LmflowGraph) {
     guard_val((), || {
         let _ = with_graph(g, |gr| {
             gr.cancel();
@@ -1693,12 +1693,12 @@ pub unsafe extern "C" fn flow_graph_cancel(g: *mut FlowGraph) {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn flow_graph_wait_done(g: *mut FlowGraph) -> i32 {
+pub unsafe extern "C" fn lmflow_graph_wait_done(g: *mut LmflowGraph) -> i32 {
     guard(|| with_graph(g, |gr| to_status(gr.wait_done())))
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn flow_graph_wait_done_timeout(g: *mut FlowGraph, ms: i64) -> i32 {
+pub unsafe extern "C" fn lmflow_graph_wait_done_timeout(g: *mut LmflowGraph, ms: i64) -> i32 {
     guard(|| {
         with_graph(g, |gr| {
             to_status(gr.wait_done_timeout(std::time::Duration::from_millis(ms.max(0) as u64)))
@@ -1707,12 +1707,12 @@ pub unsafe extern "C" fn flow_graph_wait_done_timeout(g: *mut FlowGraph, ms: i64
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn flow_graph_wait_until_idle(g: *mut FlowGraph) -> i32 {
+pub unsafe extern "C" fn lmflow_graph_wait_until_idle(g: *mut LmflowGraph) -> i32 {
     guard(|| with_graph(g, |gr| to_status(gr.wait_until_idle())))
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn flow_graph_wait_until_idle_timeout(g: *mut FlowGraph, ms: i64) -> i32 {
+pub unsafe extern "C" fn lmflow_graph_wait_until_idle_timeout(g: *mut LmflowGraph, ms: i64) -> i32 {
     guard(|| {
         with_graph(g, |gr| {
             to_status(
@@ -1723,7 +1723,7 @@ pub unsafe extern "C" fn flow_graph_wait_until_idle_timeout(g: *mut FlowGraph, m
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn flow_graph_pause(g: *mut FlowGraph) {
+pub unsafe extern "C" fn lmflow_graph_pause(g: *mut LmflowGraph) {
     guard_val((), || {
         if let Some(gr) = graph_of(g) {
             gr.pause();
@@ -1732,7 +1732,7 @@ pub unsafe extern "C" fn flow_graph_pause(g: *mut FlowGraph) {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn flow_graph_resume(g: *mut FlowGraph) {
+pub unsafe extern "C" fn lmflow_graph_resume(g: *mut LmflowGraph) {
     guard_val((), || {
         if let Some(gr) = graph_of(g) {
             gr.resume();
@@ -1741,7 +1741,7 @@ pub unsafe extern "C" fn flow_graph_resume(g: *mut FlowGraph) {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn flow_graph_last_error(g: *mut FlowGraph) -> *const c_char {
+pub unsafe extern "C" fn lmflow_graph_last_error(g: *mut LmflowGraph) -> *const c_char {
     guard_val(c"".as_ptr(), || {
         match slot_mut(g).and_then(|s| s.graph.as_ref()) {
             Some(gr) => gr.inner().shared.error_cstr(),
@@ -1751,7 +1751,7 @@ pub unsafe extern "C" fn flow_graph_last_error(g: *mut FlowGraph) -> *const c_ch
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn flow_graph_state(g: *mut FlowGraph) -> i32 {
+pub unsafe extern "C" fn lmflow_graph_state(g: *mut LmflowGraph) -> i32 {
     guard_val(0, || match slot_mut(g).and_then(|s| s.graph.as_ref()) {
         Some(gr) => gr.state() as i32,
         None => State::Created as i32,
@@ -1760,24 +1760,24 @@ pub unsafe extern "C" fn flow_graph_state(g: *mut FlowGraph) -> i32 {
 
 // ---- 内省 ----
 
-unsafe fn graph_of<'a>(g: *mut FlowGraph) -> Option<&'a Graph> {
+unsafe fn graph_of<'a>(g: *mut LmflowGraph) -> Option<&'a Graph> {
     slot_mut(g).and_then(|s| s.graph.as_ref())
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn flow_graph_total_queued(g: *mut FlowGraph) -> usize {
+pub unsafe extern "C" fn lmflow_graph_total_queued(g: *mut LmflowGraph) -> usize {
     guard_val(0, || {
         graph_of(g).map_or(0, |gr| gr.inner().shared.total_queued())
     })
 }
 #[no_mangle]
-pub unsafe extern "C" fn flow_graph_total_queued_bytes(g: *mut FlowGraph) -> u64 {
+pub unsafe extern "C" fn lmflow_graph_total_queued_bytes(g: *mut LmflowGraph) -> u64 {
     guard_val(0, || {
         graph_of(g).map_or(0, |gr| gr.inner().shared.total_queued_bytes())
     })
 }
 #[no_mangle]
-pub unsafe extern "C" fn flow_graph_queue_depth(g: *mut FlowGraph, port: *const c_char) -> usize {
+pub unsafe extern "C" fn lmflow_graph_queue_depth(g: *mut LmflowGraph, port: *const c_char) -> usize {
     guard_val(INVALID_ID, || {
         graph_of(g)
             .and_then(|gr| cstr(port).and_then(|p| gr.inner().queue_depth_by_name(p)))
@@ -1785,7 +1785,7 @@ pub unsafe extern "C" fn flow_graph_queue_depth(g: *mut FlowGraph, port: *const 
     })
 }
 #[no_mangle]
-pub unsafe extern "C" fn flow_graph_dropped_count(g: *mut FlowGraph, port: *const c_char) -> u64 {
+pub unsafe extern "C" fn lmflow_graph_dropped_count(g: *mut LmflowGraph, port: *const c_char) -> u64 {
     guard_val(0, || {
         graph_of(g)
             .and_then(|gr| cstr(port).and_then(|p| gr.inner().dropped_by_name(p)))
@@ -1793,19 +1793,19 @@ pub unsafe extern "C" fn flow_graph_dropped_count(g: *mut FlowGraph, port: *cons
     })
 }
 #[no_mangle]
-pub unsafe extern "C" fn flow_graph_num_input_ports(g: *mut FlowGraph) -> usize {
+pub unsafe extern "C" fn lmflow_graph_num_input_ports(g: *mut LmflowGraph) -> usize {
     guard_val(0, || {
         graph_of(g).map_or(0, |gr| gr.inner().num_input_ports())
     })
 }
 #[no_mangle]
-pub unsafe extern "C" fn flow_graph_num_output_ports(g: *mut FlowGraph) -> usize {
+pub unsafe extern "C" fn lmflow_graph_num_output_ports(g: *mut LmflowGraph) -> usize {
     guard_val(0, || {
         graph_of(g).map_or(0, |gr| gr.inner().num_output_ports())
     })
 }
 #[no_mangle]
-pub unsafe extern "C" fn flow_graph_num_nodes(g: *mut FlowGraph) -> usize {
+pub unsafe extern "C" fn lmflow_graph_num_nodes(g: *mut LmflowGraph) -> usize {
     guard_val(0, || graph_of(g).map_or(0, |gr| gr.inner().nodes_len()))
 }
 
@@ -1816,8 +1816,8 @@ fn graph_arena() -> &'static runtime::CStrArena {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn flow_graph_input_port_name(
-    g: *mut FlowGraph,
+pub unsafe extern "C" fn lmflow_graph_input_port_name(
+    g: *mut LmflowGraph,
     idx: usize,
 ) -> *const c_char {
     guard_val(c"".as_ptr(), || {
@@ -1831,8 +1831,8 @@ pub unsafe extern "C" fn flow_graph_input_port_name(
     })
 }
 #[no_mangle]
-pub unsafe extern "C" fn flow_graph_output_port_name(
-    g: *mut FlowGraph,
+pub unsafe extern "C" fn lmflow_graph_output_port_name(
+    g: *mut LmflowGraph,
     idx: usize,
 ) -> *const c_char {
     guard_val(c"".as_ptr(), || {
@@ -1846,7 +1846,7 @@ pub unsafe extern "C" fn flow_graph_output_port_name(
     })
 }
 #[no_mangle]
-pub unsafe extern "C" fn flow_graph_node_name(g: *mut FlowGraph, idx: usize) -> *const c_char {
+pub unsafe extern "C" fn lmflow_graph_node_name(g: *mut LmflowGraph, idx: usize) -> *const c_char {
     guard_val(c"".as_ptr(), || {
         graph_of(g)
             .and_then(|gr| {
@@ -1859,7 +1859,7 @@ pub unsafe extern "C" fn flow_graph_node_name(g: *mut FlowGraph, idx: usize) -> 
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn flow_graph_dump(g: *mut FlowGraph) -> *const c_char {
+pub unsafe extern "C" fn lmflow_graph_dump(g: *mut LmflowGraph) -> *const c_char {
     guard_val(c"".as_ptr(), || {
         thread_local! {
             static BUF: std::cell::RefCell<std::ffi::CString> =
@@ -1874,7 +1874,7 @@ pub unsafe extern "C" fn flow_graph_dump(g: *mut FlowGraph) -> *const c_char {
 }
 
 #[repr(C)]
-pub struct FlowNodeStats {
+pub struct LmflowNodeStats {
     pub struct_size: u32,
     pub reserved0: u32,
     pub node_name: *const c_char,
@@ -1889,18 +1889,18 @@ pub struct FlowNodeStats {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn flow_graph_node_stats(
-    g: *mut FlowGraph,
+pub unsafe extern "C" fn lmflow_graph_node_stats(
+    g: *mut LmflowGraph,
     idx: usize,
-    out: *mut FlowNodeStats,
+    out: *mut LmflowNodeStats,
 ) -> bool {
     guard_val(false, || {
         if out.is_null() {
             return false;
         }
         let declared = (*out).struct_size as usize;
-        if declared < std::mem::size_of::<FlowNodeStats>() {
-            last_error::set("FlowNodeStats.struct_size 太小 —— 请填 sizeof(FlowNodeStats)");
+        if declared < std::mem::size_of::<LmflowNodeStats>() {
+            last_error::set("LmflowNodeStats.struct_size 太小 —— 请填 sizeof(LmflowNodeStats)");
             return false;
         }
         let Some(gr) = graph_of(g) else { return false };
@@ -1909,8 +1909,8 @@ pub unsafe extern "C" fn flow_graph_node_stats(
         };
         std::ptr::write(
             out,
-            FlowNodeStats {
-                struct_size: std::mem::size_of::<FlowNodeStats>() as u32,
+            LmflowNodeStats {
+                struct_size: std::mem::size_of::<LmflowNodeStats>() as u32,
                 reserved0: 0,
                 node_name: graph_arena().intern(&s.node_name),
                 kernel_name: graph_arena().intern(&s.kernel_name),
@@ -1928,7 +1928,7 @@ pub unsafe extern "C" fn flow_graph_node_stats(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn flow_graph_counter_value(g: *mut FlowGraph, name: *const c_char) -> i64 {
+pub unsafe extern "C" fn lmflow_graph_counter_value(g: *mut LmflowGraph, name: *const c_char) -> i64 {
     guard_val(0, || {
         graph_of(g)
             .and_then(|gr| cstr(name).map(|n| gr.inner().shared.counter_value(n)))
@@ -1936,13 +1936,13 @@ pub unsafe extern "C" fn flow_graph_counter_value(g: *mut FlowGraph, name: *cons
     })
 }
 #[no_mangle]
-pub unsafe extern "C" fn flow_graph_counter_count(g: *mut FlowGraph) -> usize {
+pub unsafe extern "C" fn lmflow_graph_counter_count(g: *mut LmflowGraph) -> usize {
     guard_val(0, || {
         graph_of(g).map_or(0, |gr| gr.inner().shared.counter_names().len())
     })
 }
 #[no_mangle]
-pub unsafe extern "C" fn flow_graph_counter_name(g: *mut FlowGraph, idx: usize) -> *const c_char {
+pub unsafe extern "C" fn lmflow_graph_counter_name(g: *mut LmflowGraph, idx: usize) -> *const c_char {
     guard_val(c"".as_ptr(), || {
         graph_of(g)
             .and_then(|gr| {

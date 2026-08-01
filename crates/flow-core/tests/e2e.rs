@@ -9,7 +9,7 @@ use std::sync::Mutex;
 use flow_core::{Graph, Packet, State, Timestamp};
 
 /// 日志回调是**进程级**的,cargo 又并行跑测试 —— 不串行化就会互相把回调覆盖掉,
-/// 导致断言看到 0 条日志。所有使用 flow_set_log_callback 的测试都必须持此锁。
+/// 导致断言看到 0 条日志。所有使用 lmflow_set_log_callback 的测试都必须持此锁。
 static LOG_LOCK: Mutex<()> = Mutex::new(());
 
 fn log_guard() -> std::sync::MutexGuard<'static, ()> {
@@ -622,19 +622,19 @@ max_queued_packets: 2
 /// 而不是误报 `WouldBlock`。旧实现里 `pump_step` 只跑主线程任务,池图上它恒为 false,
 /// 于是阻塞 send 一撞水位就直接报错 —— 本测试就是那个回归的守卫。
 mod slow_sink_kernel {
-    use flow_core::ffi::FlowContext;
+    use flow_core::ffi::LmflowContext;
     use std::ffi::c_void;
     use std::time::Duration;
 
     // 慢消费 sink(无输出口):睡 3ms 后丢弃。发端会远快于它,必然反复撞水位。
-    unsafe extern "C" fn process(_s: *mut c_void, _ctx: *mut FlowContext) -> i32 {
+    unsafe extern "C" fn process(_s: *mut c_void, _ctx: *mut LmflowContext) -> i32 {
         std::thread::sleep(Duration::from_millis(3));
         0
     }
     pub fn register() {
         static ONCE: std::sync::Once = std::sync::Once::new();
         ONCE.call_once(|| {
-            let vt = flow_core::ffi::FlowKernelVTable {
+            let vt = flow_core::ffi::LmflowKernelVTable {
                 create: None,
                 get_contract: None,
                 open: None,
@@ -645,7 +645,7 @@ mod slow_sink_kernel {
             let vt: &'static _ = Box::leak(Box::new(vt));
             let name = std::ffi::CString::new("SlowSink").unwrap();
             let rc = unsafe {
-                flow_core::ffi::flow_register_kernel(name.as_ptr(), vt, std::ptr::null_mut())
+                flow_core::ffi::lmflow_register_kernel(name.as_ptr(), vt, std::ptr::null_mut())
             };
             assert_eq!(rc, 0, "注册 SlowSink 失败");
         });
@@ -708,7 +708,7 @@ fn watchdog_warns_on_slow_kernel() {
             MSGS.lock().unwrap_or_else(|e| e.into_inner()).push(s);
         }
     }
-    flow_core::ffi::flow_set_log_callback(Some(sink), std::ptr::null_mut());
+    flow_core::ffi::lmflow_set_log_callback(Some(sink), std::ptr::null_mut());
 
     let graph = Graph::from_yaml(
         r#"
@@ -731,7 +731,7 @@ watchdog_ms: 1
     graph
         .wait_done_timeout(std::time::Duration::from_secs(10))
         .unwrap();
-    flow_core::ffi::flow_set_log_callback(None, std::ptr::null_mut());
+    flow_core::ffi::lmflow_set_log_callback(None, std::ptr::null_mut());
 
     let msgs = MSGS.lock().unwrap_or_else(|e| e.into_inner());
     assert!(
@@ -959,7 +959,7 @@ fn warns_about_unconsumed_ports() {
     init();
     let _log = log_guard();
     WARNINGS.lock().expect("锁中毒").clear();
-    flow_core::ffi::flow_set_log_callback(Some(sink), std::ptr::null_mut());
+    flow_core::ffi::lmflow_set_log_callback(Some(sink), std::ptr::null_mut());
     let _graph = Graph::from_yaml(
         r#"
 nodes:
@@ -968,7 +968,7 @@ input_ports: ["in", "unused"]
 "#,
     )
     .unwrap();
-    flow_core::ffi::flow_set_log_callback(None, std::ptr::null_mut());
+    flow_core::ffi::lmflow_set_log_callback(None, std::ptr::null_mut());
 
     let w = WARNINGS.lock().expect("锁中毒").join("\n");
     assert!(w.contains("unused"), "未被消费的图输入口应告警: {w}");
