@@ -104,6 +104,7 @@ impl Edge {
 }
 
 /// 推模式订阅者。C 宿主给函数指针,Rust 宿主给闭包 —— 后者才是 Rust 侧的自然写法。
+#[derive(Clone)]
 enum Observer {
     C {
         cb: unsafe extern "C" fn(*mut c_void, crate::ffi::FlowPacket),
@@ -1183,8 +1184,18 @@ impl GraphInner {
             }
         }
         {
-            let observers = edge.observers.lock().expect("observer 列表锁中毒");
-            for o in observers.iter() {
+            // 快照订阅者后**释放锁再回调** —— 回调是宿主代码(可能慢、可能回调进引擎),
+            // 持锁调用会造成争用甚至重入死锁(observer 若又触达同一条边的 observers 锁)。
+            // observer 只增不删,快照是安全的。
+            let observers: Vec<Observer> = {
+                let guard = edge.observers.lock().expect("observer 列表锁中毒");
+                if guard.is_empty() {
+                    Vec::new()
+                } else {
+                    guard.clone()
+                }
+            };
+            for o in &observers {
                 for pkt in &packets {
                     match o {
                         Observer::C { cb, user } => {

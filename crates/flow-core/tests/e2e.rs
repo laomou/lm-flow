@@ -580,6 +580,46 @@ output_ports: ["out"]
     .unwrap()
 }
 
+/// 同一端口挂多个 observer + 一个 poller:每个订阅者都**独立**收到全部包(不漏不串)。
+/// 也顺带覆盖「快照订阅者后释放锁再回调」这条路径。
+#[test]
+fn multiple_observers_and_poller_all_receive() {
+    use std::sync::{Arc, Mutex};
+    init();
+    let graph = simple_graph();
+    let seen_a = Arc::new(Mutex::new(Vec::new()));
+    let seen_b = Arc::new(Mutex::new(Vec::new()));
+    let a = seen_a.clone();
+    let b = seen_b.clone();
+    graph
+        .observe("out", move |p| {
+            a.lock().unwrap().push(*p.get::<i32>().unwrap())
+        })
+        .unwrap();
+    graph
+        .observe("out", move |p| {
+            b.lock().unwrap().push(*p.get::<i32>().unwrap())
+        })
+        .unwrap();
+    let poller = graph.add_poller("out").unwrap();
+    graph.start().unwrap();
+    let input = graph.input("in").unwrap();
+    for i in 0..5i32 {
+        input.send(Packet::new(i).at(Timestamp(i as i64))).unwrap();
+    }
+    graph.close_all_inputs();
+    graph.wait_done().unwrap();
+
+    let want: Vec<i32> = (0..5).collect();
+    assert_eq!(*seen_a.lock().unwrap(), want, "observer A 应收到全部");
+    assert_eq!(*seen_b.lock().unwrap(), want, "observer B 应独立收到全部");
+    let mut got = Vec::new();
+    while let Some(p) = poller.try_next() {
+        got.push(*p.get::<i32>().unwrap());
+    }
+    assert_eq!(got, want, "poller 也应独立收到全部");
+}
+
 // ---------------------------------------------------------------- 兜底关流与 side packet
 
 /// 图被直接丢弃(未走 wait_done)时,已 open 的算子仍必须收到 Close ——
