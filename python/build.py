@@ -81,6 +81,9 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--deps", action="store_true", help="先把 pybind11/numpy 下到项目内")
     ap.add_argument("--debug", action="store_true", help="链接 debug 版引擎")
+    ap.add_argument("--with-cv-test", action="store_true",
+                    help="测试专用:把 CV 算子(CvInvertTest)编进扩展,让 Python 能调用它;"
+                         "需系统有 OpenCV(pkg-config opencv4)。不带此开关 = 扩展零 OpenCV(ADR #14)")
     args = ap.parse_args()
 
     if args.deps:
@@ -100,13 +103,29 @@ def main() -> int:
 
     incs = [sysconfig.get_paths()["include"], str(ROOT / "include")] + include_dirs()
     cxx = os.environ.get("CXX", "g++")
+
+    # 测试开关:把 CV 算子(链 OpenCV)编进扩展,让 Python 能直接调用 CvInvertTest。
+    # 单独一个 TU(cpp/tests/cv_test_register.cc)避免与 bindings.cc 的 namespace lmflow 撞名。
+    # 生产构建不带此开关 → 扩展零 OpenCV 依赖(ADR #14)。
+    cv_cflags: list[str] = []
+    cv_libs: list[str] = []
+    extra_srcs: list[str] = []
+    if args.with_cv_test:
+        cv_cflags = ["-DLMFLOW_WITH_CV_TEST", f"-I{ROOT / 'cpp' / 'tests'}"] + \
+            subprocess.check_output(["pkg-config", "--cflags", "opencv4"]).decode().split()
+        cv_libs = subprocess.check_output(["pkg-config", "--libs", "opencv4"]).decode().split()
+        extra_srcs = [str(ROOT / "cpp" / "tests" / "cv_test_register.cc")]
+        print("== (test) 带 CV 测试算子构建:链 OpenCV,Python 可调用 CvInvertTest ==")
+
     cmd = [
         cxx, "-O2", "-shared", "-std=c++17", "-fPIC",
         # 只导出扩展模块入口:避免把引擎符号泄进宿主进程、与别的库撞名
         "-fvisibility=hidden",
+        *cv_cflags,
         *(f"-I{d}" for d in incs),
-        str(src), str(lib),
+        str(src), *extra_srcs, str(lib),
         "-lpthread", "-ldl", "-lm",
+        *cv_libs,
         "-o", str(out),
     ]
     print("== 2/2 编译 pybind11 扩展 ==")

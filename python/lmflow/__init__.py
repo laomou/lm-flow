@@ -171,6 +171,23 @@ def register_builtin_kernels() -> None:
     _native.register_builtin_kernels()
 
 
+def has_cv_test_kernels() -> bool:
+    """扩展是否带 CV 测试算子(以 ``python build.py --with-cv-test`` 构建)。
+
+    生产扩展默认**不含** OpenCV(ADR #14),故默认返回 False;带开关构建后才有
+    ``CvInvertTest`` 供从 Python 调用。
+    """
+    return hasattr(_native, "register_cv_test_kernels")
+
+
+def register_cv_test_kernels() -> None:
+    """测试专用:注册 CV 算子 ``CvInvertTest``。仅当扩展带 ``--with-cv-test`` 构建时可用。"""
+    fn = getattr(_native, "register_cv_test_kernels", None)
+    if fn is None:
+        raise RuntimeError("扩展未带 CV 测试算子构建。请用:python python/build.py --with-cv-test")
+    fn()
+
+
 def set_log_callback(fn: Callable[[int, str], Any] | None) -> None:
     """设置日志回调 ``fn(level, message)``;传 ``None`` 恢复静默。
 

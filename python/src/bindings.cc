@@ -754,6 +754,13 @@ py::tuple Graph::new_buffer(const std::vector<int64_t>& shape, const py::object&
 
 extern "C" void lmflow_register_builtin_kernels(void);
 
+// 仅当以 --with-cv-test 构建时:CV 测试算子(链 OpenCV)被编进本扩展,
+// 由 cpp/tests/cv_test_register.cc 提供这个 extern "C" 注册入口。生产构建里它不存在,
+// 扩展保持零 OpenCV 依赖(ADR #14)。
+#ifdef LMFLOW_WITH_CV_TEST
+extern "C" void lmflow_register_cv_test_kernels(void);
+#endif
+
 namespace {
 py::object g_log_cb;
 
@@ -789,6 +796,10 @@ PYBIND11_MODULE(_lmflow, m) {
   m.def("abi_version", &lmflow_abi_version);
   m.def("register_builtin_kernels", &lmflow_register_builtin_kernels,
         "注册内置 C++ 算子(幂等,必须在建图之前调用)");
+#ifdef LMFLOW_WITH_CV_TEST
+  m.def("register_cv_test_kernels", &lmflow_register_cv_test_kernels,
+        "测试专用:注册 CV 算子(CvInvertTest);仅当扩展以 --with-cv-test 构建时存在");
+#endif
   m.def("register_kernel", &register_python_kernel, py::arg("name"), py::arg("cls"),
         "把一个 Python 类注册成算子");
   m.def(
