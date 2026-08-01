@@ -183,10 +183,12 @@ impl ThreadPool {
 
     /// 投递一个就绪节点。关停后返回 `false`,由调用方善后(释放已取得的令牌)。
     pub fn submit(&self, node: NodeId) -> bool {
+        let mut q = self.shared.queue.lock().unwrap_or_else(|e| e.into_inner());
+        // 在**队列锁内**查 stop:与 shutdown 的锁内置位配对。否则关停后仍可能入队,
+        // 任务成孤儿留在队里(其 in_flight 永不归零)。
         if self.shared.stop.load(Ordering::SeqCst) {
             return false;
         }
-        let mut q = self.shared.queue.lock().unwrap_or_else(|e| e.into_inner());
         q.push_back(node);
         drop(q);
         self.shared.cv.notify_one();
@@ -203,7 +205,14 @@ impl ThreadPool {
 
     /// 关停并 join。幂等。
     pub fn shutdown(&self) {
-        self.shared.stop.store(true, Ordering::SeqCst);
+        // 置 stop **必须在队列锁内**:take() 是「锁内查 stop → cv.wait(原子释放锁并 park)」。
+        // 若在锁外置位 + notify_all,可能恰好落在 worker「查到 stop=false」与「park」之间 ——
+        // 那次唤醒无人接收而丢失,worker 永久 park,shutdown 的 join 随之挂死。
+        // 这是高并发超订下偶发的死锁根因;锁内置位使 stop 的读写全程受同一把锁保护,窗口消失。
+        {
+            let _q = self.shared.queue.lock().unwrap_or_else(|e| e.into_inner());
+            self.shared.stop.store(true, Ordering::SeqCst);
+        }
         self.shared.cv.notify_all();
         let handles: Vec<JoinHandle<()>> = {
             let mut h = self.threads.lock().unwrap_or_else(|e| e.into_inner());

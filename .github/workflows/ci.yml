@@ -48,7 +48,7 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo build --all
-      - run: cargo test --all          # 含 ABI 布局、C ABI 冒烟、内存记账、CoW 不变量
+      - run: timeout 600 cargo test --all   # 含 ABI 布局/C ABI/内存记账/CoW;timeout 兜底,偶发挂起也快失败而非烧满 CI
       - name: 示例必须能跑出正确结果
         run: |
           out=$(cargo run --quiet --example hello_world)
@@ -119,7 +119,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@nightly
         with: { components: rust-src }
       - name: TSan(Rust + C++ 混合,含 max_in_flight 并行路径)
-        run: RUSTFLAGS="-Zsanitizer=thread" cargo +nightly test -Zbuild-std --target x86_64-unknown-linux-gnu --lib --tests
+        run: RUSTFLAGS="-Zsanitizer=thread" timeout 1200 cargo +nightly test -Zbuild-std --target x86_64-unknown-linux-gnu --lib --tests
 
   # ASan / Miri:辅助排查,暂不作门禁(build-std + C++ 侧易有误报,
   # Miri 也不完整支持线程与跨 FFI 的真实函数指针)。
