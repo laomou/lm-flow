@@ -1,7 +1,10 @@
 # lmflow 设计方案
 
-> 状态:**MVP 已跑通**。Rust 引擎(阶段 B)、C ABI、C++ 糖层、10 个算子、113 个测试全部就位;
-> Rust / C++ 两种宿主的 hello_world 都能输出正确结果。Python 绑定(pybind11)待做。
+> 状态:**成品**。Rust 引擎、C ABI、C++ 糖层(含 OpenCV 互转)、10 个内置算子、
+> Python 绑定(pybind11)、原生 SDK 发布(各平台头文件+库)全部就位;**193 个测试**
+> (Rust 164 + Python 29)全绿,TSan 硬门禁 0 竞态。Rust / C++ / Python 三种宿主的
+> hello_world 都输出正确;支持线程池绑核 + 实时优先级(Linux/Android),可交叉编到
+> Android / iOS / 鸿蒙。
 > 定位:一个数据流图计算框架 —— 把计算描述成**有向图**,节点是**算子(Kernel)**,
 > 边上流动**带时间戳的数据包(Packet)**。
 > 组成:**Rust 引擎 + C ABI 门面 + C++/Python 算子**。
@@ -23,11 +26,11 @@
 
 | 阶段 | 内容 |
 |---|---|
-| **B(当前)** | 简化调度:每条边一个 FIFO;节点就绪 = 每个输入口至少有一个包。时间戳只透传。 |
-| **A(后续)** | 多输入口的时间戳同步对齐、bound 传播、`process_timestamps` 模式、back-edge、`max_in_flight > 1` 的并行 context 池。 |
+| **B(已完成)** | 每条边一个 FIFO;节点就绪 = 每个输入口至少有一个包。多输入按时间戳对齐、bound 传播、`max_in_flight > 1` 并行 context 池均已落地。 |
+| **A(后续)** | `process_timestamps` 模式、back-edge、零输入口 source 节点。 |
 
-**B 阶段明确不做**(且 `init` 时会因 `FLOW_ERR_UNSUPPORTED` 报错,**不静默忽略**):
-`max_in_flight > 1`、back-edge、零输入口节点(source)。
+**仍明确不做**(且 `init` 时会因 `FLOW_ERR_UNSUPPORTED` 报错,**不静默忽略**):
+back-edge、零输入口节点(source)、子图。
 
 ### 0.3 非目标
 
@@ -910,7 +913,7 @@ lmflow/
 
 ---
 
-## 13. 测试策略(已落地 113 个)
+## 13. 测试策略(已落地 193 个:Rust 164 + Python 29)
 
 | 测试文件 | 数量 | 覆盖 |
 |---|---|---|
@@ -926,7 +929,7 @@ lmflow/
 - **ABI 布局**:`abi_layout.rs` + `abi_assert.cc` 双向钉死(已实测能拦住破坏)。
 - **C ABI 冒烟**:Rust 集成测试直接调 `extern "C"`,覆盖边界①。
 - **端到端**:`hello_world` 输出序列断言(0..9,时间戳对应)。
-- **并发**(本设计的核心风险):**TSan 是硬门禁 —— 152 个测试 0 条竞态报告**
+- **并发**(本设计的核心风险):**TSan 是硬门禁 —— 164 个测试 0 条竞态报告**
   (`RUSTFLAGS=-Zsanitizer=thread cargo +nightly test -Zbuild-std --lib --tests`;
   排除 doctest 是因 `-Zbuild-std` 下 rustdoc 会因 sanitizer ABI 不一致而编不过,属工具链限制)。
   覆盖 `max_in_flight` 并行路径:乱序完成仍按序、并行下取消/销毁不漏释放、多输入对齐叠加并行。
