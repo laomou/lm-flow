@@ -566,6 +566,57 @@ max_queued_packets: 4
     );
 }
 
+/// watchdog:单次算子回调超过阈值必须打 WARN(卡死/慢帧可观测)。
+#[test]
+fn watchdog_warns_on_slow_kernel() {
+    use std::ffi::{c_char, c_void, CStr};
+    let _lg = log_guard(); // 日志回调是进程级的,串行化
+    init();
+    slow_sink_kernel::register(); // SlowSink 睡 3ms
+
+    static MSGS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    MSGS.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    unsafe extern "C" fn sink(_u: *mut c_void, _lv: i32, msg: *const c_char) {
+        if !msg.is_null() {
+            let s = unsafe { CStr::from_ptr(msg) }
+                .to_string_lossy()
+                .into_owned();
+            MSGS.lock().unwrap_or_else(|e| e.into_inner()).push(s);
+        }
+    }
+    flow_core::ffi::flow_set_log_callback(Some(sink), std::ptr::null_mut());
+
+    let graph = Graph::from_yaml(
+        r#"
+executors:
+  - { name: "cpu", type: "ThreadPoolExecutor", num_threads: 1 }
+nodes:
+  - { name: "s", kernel: "SlowSink", executor: "cpu", input_ports: ["in"], output_ports: [] }
+input_ports: ["in"]
+watchdog_ms: 1
+"#,
+    )
+    .unwrap();
+    graph.start().unwrap();
+    graph
+        .input("in")
+        .unwrap()
+        .send(Packet::new(0i32).at(Timestamp(0)))
+        .unwrap();
+    graph.close_all_inputs();
+    graph
+        .wait_done_timeout(std::time::Duration::from_secs(10))
+        .unwrap();
+    flow_core::ffi::flow_set_log_callback(None, std::ptr::null_mut());
+
+    let msgs = MSGS.lock().unwrap_or_else(|e| e.into_inner());
+    assert!(
+        msgs.iter().any(|m| m.contains("watchdog")),
+        "3ms 的算子在 watchdog_ms=1 下必须打 WARN,实际日志: {:?}",
+        *msgs
+    );
+}
+
 // ---------------------------------------------------------------- 辅助
 
 fn simple_graph() -> Graph {
