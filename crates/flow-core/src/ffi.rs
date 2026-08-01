@@ -519,7 +519,10 @@ pub unsafe extern "C" fn lmflow_packet_new_buffer(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn lmflow_packet_from_buffer(src: *const LmflowBuffer, ts: i64) -> LmflowPacket {
+pub unsafe extern "C" fn lmflow_packet_from_buffer(
+    src: *const LmflowBuffer,
+    ts: i64,
+) -> LmflowPacket {
     guard_val(LmflowPacket::default(), || {
         if src.is_null() {
             return LmflowPacket::default();
@@ -934,7 +937,10 @@ pub unsafe extern "C" fn lmflow_ctx_output_id(
     })
 }
 #[no_mangle]
-pub unsafe extern "C" fn lmflow_ctx_input_index(c: *const LmflowContext, name: *const c_char) -> usize {
+pub unsafe extern "C" fn lmflow_ctx_input_index(
+    c: *const LmflowContext,
+    name: *const c_char,
+) -> usize {
     guard_val(INVALID_ID, || {
         ctx_ref(c)
             .and_then(|x| x.in_ports.index_by_name(cstr(name).unwrap_or("")))
@@ -953,7 +959,10 @@ pub unsafe extern "C" fn lmflow_ctx_output_index(
     })
 }
 #[no_mangle]
-pub unsafe extern "C" fn lmflow_ctx_input_name(c: *const LmflowContext, idx: usize) -> *const c_char {
+pub unsafe extern "C" fn lmflow_ctx_input_name(
+    c: *const LmflowContext,
+    idx: usize,
+) -> *const c_char {
     guard_val(c"".as_ptr(), || {
         ctx_ref(c)
             .and_then(|x| x.in_ports.name(idx).map(|s| x.intern(s)))
@@ -961,7 +970,10 @@ pub unsafe extern "C" fn lmflow_ctx_input_name(c: *const LmflowContext, idx: usi
     })
 }
 #[no_mangle]
-pub unsafe extern "C" fn lmflow_ctx_output_name(c: *const LmflowContext, idx: usize) -> *const c_char {
+pub unsafe extern "C" fn lmflow_ctx_output_name(
+    c: *const LmflowContext,
+    idx: usize,
+) -> *const c_char {
     guard_val(c"".as_ptr(), || {
         ctx_ref(c)
             .and_then(|x| x.out_ports.name(idx).map(|s| x.intern(s)))
@@ -1099,7 +1111,11 @@ pub unsafe extern "C" fn lmflow_ctx_set_next_ts_bound(
 macro_rules! opt_scalar {
     ($name:ident, $method:ident, $ty:ty) => {
         #[no_mangle]
-        pub unsafe extern "C" fn $name(c: *const LmflowContext, key: *const c_char, def: $ty) -> $ty {
+        pub unsafe extern "C" fn $name(
+            c: *const LmflowContext,
+            key: *const c_char,
+            def: $ty,
+        ) -> $ty {
             guard_val(def, || {
                 ctx_ref(c)
                     .and_then(|x| cstr(key).and_then(|k| x.options.$method(k)))
@@ -1113,7 +1129,10 @@ opt_scalar!(lmflow_ctx_option_f64, f64, f64);
 opt_scalar!(lmflow_ctx_option_bool, bool, bool);
 
 #[no_mangle]
-pub unsafe extern "C" fn lmflow_ctx_has_option(c: *const LmflowContext, key: *const c_char) -> bool {
+pub unsafe extern "C" fn lmflow_ctx_has_option(
+    c: *const LmflowContext,
+    key: *const c_char,
+) -> bool {
     guard_val(false, || {
         ctx_ref(c).is_some_and(|x| cstr(key).is_some_and(|k| x.options.has(k)))
     })
@@ -1196,7 +1215,10 @@ pub unsafe extern "C" fn lmflow_ctx_require_option_str(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn lmflow_ctx_option_count(c: *const LmflowContext, key: *const c_char) -> usize {
+pub unsafe extern "C" fn lmflow_ctx_option_count(
+    c: *const LmflowContext,
+    key: *const c_char,
+) -> usize {
     guard_val(0, || {
         ctx_ref(c).map_or(0, |x| cstr(key).map_or(0, |k| x.options.count(k)))
     })
@@ -1342,7 +1364,10 @@ pub unsafe extern "C" fn lmflow_graph_free(g: *mut LmflowGraph) {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn lmflow_graph_init_from_yaml(g: *mut LmflowGraph, yaml: *const c_char) -> i32 {
+pub unsafe extern "C" fn lmflow_graph_init_from_yaml(
+    g: *mut LmflowGraph,
+    yaml: *const c_char,
+) -> i32 {
     guard(|| {
         let Some(slot) = slot_mut(g) else {
             return fail(Error::InvalidArg("graph 句柄为空".into()));
@@ -1603,7 +1628,10 @@ pub unsafe extern "C" fn lmflow_poller_next(p: *mut LmflowPoller, out: *mut Lmfl
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn lmflow_poller_try_next(p: *mut LmflowPoller, out: *mut LmflowPacket) -> bool {
+pub unsafe extern "C" fn lmflow_poller_try_next(
+    p: *mut LmflowPoller,
+    out: *mut LmflowPacket,
+) -> bool {
     guard_val(false, || match poller_ref(p).and_then(|x| x.try_next()) {
         Some(pkt) => {
             if !out.is_null() {
@@ -1777,7 +1805,10 @@ pub unsafe extern "C" fn lmflow_graph_total_queued_bytes(g: *mut LmflowGraph) ->
     })
 }
 #[no_mangle]
-pub unsafe extern "C" fn lmflow_graph_queue_depth(g: *mut LmflowGraph, port: *const c_char) -> usize {
+pub unsafe extern "C" fn lmflow_graph_queue_depth(
+    g: *mut LmflowGraph,
+    port: *const c_char,
+) -> usize {
     guard_val(INVALID_ID, || {
         graph_of(g)
             .and_then(|gr| cstr(port).and_then(|p| gr.inner().queue_depth_by_name(p)))
@@ -1785,7 +1816,10 @@ pub unsafe extern "C" fn lmflow_graph_queue_depth(g: *mut LmflowGraph, port: *co
     })
 }
 #[no_mangle]
-pub unsafe extern "C" fn lmflow_graph_dropped_count(g: *mut LmflowGraph, port: *const c_char) -> u64 {
+pub unsafe extern "C" fn lmflow_graph_dropped_count(
+    g: *mut LmflowGraph,
+    port: *const c_char,
+) -> u64 {
     guard_val(0, || {
         graph_of(g)
             .and_then(|gr| cstr(port).and_then(|p| gr.inner().dropped_by_name(p)))
@@ -1928,7 +1962,10 @@ pub unsafe extern "C" fn lmflow_graph_node_stats(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn lmflow_graph_counter_value(g: *mut LmflowGraph, name: *const c_char) -> i64 {
+pub unsafe extern "C" fn lmflow_graph_counter_value(
+    g: *mut LmflowGraph,
+    name: *const c_char,
+) -> i64 {
     guard_val(0, || {
         graph_of(g)
             .and_then(|gr| cstr(name).map(|n| gr.inner().shared.counter_value(n)))
@@ -1942,7 +1979,10 @@ pub unsafe extern "C" fn lmflow_graph_counter_count(g: *mut LmflowGraph) -> usiz
     })
 }
 #[no_mangle]
-pub unsafe extern "C" fn lmflow_graph_counter_name(g: *mut LmflowGraph, idx: usize) -> *const c_char {
+pub unsafe extern "C" fn lmflow_graph_counter_name(
+    g: *mut LmflowGraph,
+    idx: usize,
+) -> *const c_char {
     guard_val(c"".as_ptr(), || {
         graph_of(g)
             .and_then(|gr| {

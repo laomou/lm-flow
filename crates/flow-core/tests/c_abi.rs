@@ -134,7 +134,10 @@ fn builtin_packet_types_roundtrip() {
         assert_eq!(p.timestamp, 3);
         // 类型不符必须返回 false 而不是乱读内存
         let mut d = 0f64;
-        assert!(!lmflow_packet_as_f64(&p, &mut d), "I64 包不该被当成 F64 读出");
+        assert!(
+            !lmflow_packet_as_f64(&p, &mut d),
+            "I64 包不该被当成 F64 读出"
+        );
         lmflow_packet_drop(&mut p);
 
         // 浮点 / 布尔
@@ -294,7 +297,10 @@ fn null_pointers_do_not_crash() {
         assert_eq!(lmflow_graph_num_nodes(std::ptr::null_mut()), 0);
         assert_eq!(lmflow_ctx_num_inputs(std::ptr::null()), 0);
         assert_eq!(lmflow_ctx_input_timestamp(std::ptr::null()), i64::MIN);
-        assert!(!lmflow_packet_as_i64(std::ptr::null(), std::ptr::null_mut()));
+        assert!(!lmflow_packet_as_i64(
+            std::ptr::null(),
+            std::ptr::null_mut()
+        ));
         lmflow_packet_drop(std::ptr::null_mut());
         lmflow_graph_free(std::ptr::null_mut());
         lmflow_graph_cancel(std::ptr::null_mut());
@@ -388,7 +394,9 @@ fn introspection_through_c_abi() {
         assert_eq!(lmflow_graph_num_input_ports(g), 1);
         assert_eq!(lmflow_graph_num_output_ports(g), 1);
         assert_eq!(
-            CStr::from_ptr(lmflow_graph_node_name(g, 0)).to_str().unwrap(),
+            CStr::from_ptr(lmflow_graph_node_name(g, 0))
+                .to_str()
+                .unwrap(),
             "n1"
         );
         assert_eq!(
@@ -467,7 +475,10 @@ fn observer_receives_packets() {
         let pin = cs("in");
         let input = lmflow_graph_input(g, pin.as_ptr());
         for i in 0..3i32 {
-            assert_eq!(lmflow_input_send(input, make_int_packet(i * 10, i as i64)), 0);
+            assert_eq!(
+                lmflow_input_send(input, make_int_packet(i * 10, i as i64)),
+                0
+            );
             // 主线程执行器:需要进入引擎才会推进(见 docs/design.md §7.9)
             assert_eq!(lmflow_graph_wait_until_idle(g), 0);
         }
