@@ -118,3 +118,28 @@ output_ports: ["out"]
 ```
 
 详细设计见 [`docs/design.md`](docs/design.md)。
+
+## 原生 SDK(C / C++ / 移动端)
+
+C/C++ 或移动端宿主不走 pip —— 直接用**头文件 + 库**。每个 tag 的 GitHub Release 会附带各平台的
+`lmflow-<版本>-<平台>.tar.gz`(Linux x86_64/aarch64、macOS arm64/x86_64、iOS arm64、Android arm64):
+
+```text
+lmflow-v0.1.0-linux-x86_64/
+├── include/   flow.h · flow.hpp · flow_cv.hpp
+└── lib/       libflow_core.a(静态,完整,首选)· libflow_core.so(动态)
+```
+
+```bash
+# 链静态库(推荐,尤其移动端嵌入):
+g++ -std=c++17 -Iinclude my_host.cc lib/libflow_core.a -lpthread -ldl -lm -o my_host
+```
+
+本地自己出一份也行:
+
+```bash
+cargo build --release          # → target/release/libflow_core.{a,so}
+# 头文件就是 include/ 下那三个
+```
+
+C ABI 是唯一稳定接口(`include/flow.h`);`flow.hpp` 是可选的 C++ 算子糖层,`flow_cv.hpp` 是 OpenCV 互转。

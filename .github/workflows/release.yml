@@ -1,4 +1,7 @@
-# 打 tag(v*)即构建 manylinux + macOS wheel 与 sdist,并发布到 PyPI。
+# 打 tag(v*)时产出两条发布线:
+#   1. 原生 SDK —— 头文件 + 各平台编译好的库(.a/.so/.dylib),挂到 GitHub Release。
+#      这是 C/C++/移动端宿主的主产物(include flow.h + 链 libflow_core)。
+#   2. Python wheel + sdist —— 发布到 PyPI(pip install lm-flow)。
 #
 # 一次性准备(仓库管理员做一次):在 PyPI 上为 lm-flow 配置「可信发布者」
 # (Trusted Publisher),指向本仓库的 release.yml —— 无需在仓库里存 API token。
@@ -40,6 +43,75 @@ jobs:
       - run: pipx run build --sdist
       - uses: actions/upload-artifact@v4
         with: { name: sdist, path: ./dist/*.tar.gz }
+
+  # 原生 SDK:头文件 + 编译好的库(.a 静态 / .so|.dylib 动态)。
+  # 这才是 C/C++/移动端宿主真正要的产物 —— 直接 include flow.h、链 libflow_core。
+  native:
+    name: native ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: linux-x86_64,  os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
+          - { name: linux-aarch64, os: ubuntu-latest, target: aarch64-unknown-linux-gnu, apt: gcc-aarch64-linux-gnu g++-aarch64-linux-gnu }
+          - { name: macos-arm64,   os: macos-latest,  target: aarch64-apple-darwin }
+          - { name: macos-x86_64,  os: macos-13,      target: x86_64-apple-darwin }
+          - { name: ios-arm64,     os: macos-latest,  target: aarch64-apple-ios }
+          - { name: android-arm64, os: ubuntu-latest, target: aarch64-linux-android, ndk: true }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with: { targets: "${{ matrix.target }}" }
+      - name: 交叉工具链(按需)
+        if: matrix.apt
+        run: sudo apt-get update && sudo apt-get install -y ${{ matrix.apt }}
+      - name: 环境(linux-aarch64 链接器 / Android NDK)
+        run: |
+          if [ "${{ matrix.target }}" = "aarch64-unknown-linux-gnu" ]; then
+            echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
+          fi
+          if [ "${{ matrix.ndk }}" = "true" ]; then
+            TOOL="$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+            echo "CC_aarch64_linux_android=$TOOL/aarch64-linux-android21-clang" >> $GITHUB_ENV
+            echo "CXX_aarch64_linux_android=$TOOL/aarch64-linux-android21-clang++" >> $GITHUB_ENV
+            echo "AR_aarch64_linux_android=$TOOL/llvm-ar" >> $GITHUB_ENV
+            echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$TOOL/aarch64-linux-android21-clang" >> $GITHUB_ENV
+          fi
+      - name: 构建静态+动态库
+        run: cargo build --release --target ${{ matrix.target }}
+      - name: 打包 SDK(头文件 + 库)
+        run: |
+          VER="${{ github.ref_name }}"
+          PKG="lmflow-${VER}-${{ matrix.name }}"
+          mkdir -p "$PKG/include" "$PKG/lib"
+          cp include/*.h include/*.hpp "$PKG/include/"
+          cp LICENSE README.md "$PKG/"
+          OUT="target/${{ matrix.target }}/release"
+          cp "$OUT/libflow_core.a" "$PKG/lib/"                 # 静态库:完整,首选(移动端也用它)
+          cp "$OUT"/libflow_core.so "$PKG/lib/" 2>/dev/null || true    # 桌面 Linux/Android 动态库
+          cp "$OUT"/libflow_core.dylib "$PKG/lib/" 2>/dev/null || true # macOS 动态库
+          tar czf "$PKG.tar.gz" "$PKG"
+          ls -l "$PKG.tar.gz"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdk-${{ matrix.name }}
+          path: "*.tar.gz"
+
+  # 打 tag 时:把原生 SDK 压缩包 + sdist 挂到 GitHub Release。
+  github-release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [native, sdist]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write        # 创建/更新 Release 并上传资产
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { path: assets, merge-multiple: true }
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: assets/*
+          generate_release_notes: true
 
   publish:
     # 只有打了 tag 才真正发布;workflow_dispatch 只到构建为止(便于验证不误发)。
