@@ -298,6 +298,34 @@ output_ports: [out]
             g.wait_done(timeout=5.0)
         self.assertEqual(seen, [i * 2 for i in range(5)])
 
+    def test_max_in_flight_preserves_order(self):
+        # Python 算子在 max_in_flight>1 的线程池上:GIL 会串行化 process,
+        # 但引擎的按序重排路径仍被走到,输出必须按时间戳单调、且不崩。
+        with graph(
+            """
+executors:
+  - { name: cpu, type: ThreadPoolExecutor, num_threads: 4 }
+nodes:
+  - name: d
+    kernel: TDouble
+    executor: cpu
+    max_in_flight: 4
+    input_ports: [in]
+    output_ports: [out]
+input_ports: [in]
+output_ports: [out]
+"""
+        ) as g:
+            out = g.add_poller("out")
+            g.start()
+            inp = g.input("in")
+            for i in range(50):
+                inp.send(i, ts=i)
+            g.close_all_inputs()
+            g.wait_done(timeout=30.0)
+            got = [p.as_int() for p in out]
+            self.assertEqual(got, [i * 2 for i in range(50)], "max_in_flight 下仍须按序")
+
     def test_pause_and_resume(self):
         with graph(
             """
@@ -447,10 +475,13 @@ output_ports: [out]
             out = g.add_poller("out")
             g.start()
             inp = g.input("in")
+            # 暂停隔离 fixed_size:否则空闲节点会立刻认领第一个包(不受丢弃约束)。
+            g.pause()
             for i in range(10):
                 inp.send(i, ts=i)
             self.assertEqual(g.queue_depth("in"), 2)
             self.assertEqual(g.dropped_count("in"), 8, "丢包必须可观测")
+            g.resume()
             g.wait_until_idle(timeout=5.0)
             self.assertEqual([p.as_int() for p in iter(out.try_next, None)], [8, 9])
             g.close_all_inputs()

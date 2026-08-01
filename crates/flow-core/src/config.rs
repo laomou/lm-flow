@@ -112,9 +112,12 @@ impl GraphConfig {
             } else {
                 n.name.clone()
             };
-            if n.max_in_flight > 1 {
-                return Err(Error::Unsupported(format!(
-                    "节点 `{who}`: max_in_flight={} —— 本版本仅支持 1(并行 in-flight 属后续阶段)",
+            if n.max_in_flight > 1 && n.executor.is_empty() {
+                // max_in_flight > 1 只有配了线程池才有意义:默认执行器是宿主主线程,
+                // 单线程下并行度恒为 1。宁可报错也不让用户误以为开了并行。
+                return Err(Error::InvalidArg(format!(
+                    "节点 `{who}`: max_in_flight={} 需要同时指定 executor(线程池)—— \
+                     默认执行器是宿主主线程,没有并行可言",
                     n.max_in_flight
                 )));
             }
@@ -257,7 +260,8 @@ max_queued_packets: 500
 
     #[test]
     fn rejects_unsupported_features_loudly() {
-        // 静默忽略是最坏的结果 —— 用户会以为开了并行
+        // 静默忽略是最坏的结果 —— 用户会以为开了某个特性,实际没有
+        // max_in_flight>1 但没配 executor:单线程下并行度恒为 1,必须报错
         let err = GraphConfig::from_yaml(
             r#"
 nodes:
@@ -267,7 +271,7 @@ nodes:
 "#,
         )
         .unwrap_err();
-        assert_eq!(err.code(), crate::status::code::UNSUPPORTED);
+        assert_eq!(err.code(), crate::status::code::INVALID_ARG);
         assert!(err.to_string().contains("max_in_flight"), "{err}");
 
         // fixed_size 现已实现;仍保留「未实现的特性必须报错」这条原则的其它用例

@@ -165,6 +165,8 @@ impl Poller {
             if self.graph.pump_step() {
                 continue;
             }
+            // 在判断空闲**之前**捕获活动代数(防丢唤醒,见 GraphInner::activity_gen)。
+            let before = self.graph.activity_gen_pub();
             if self.graph.is_idle_pub() {
                 // 主线程与线程池都空了 —— 不会再有新输出
                 return Ok(self.inner.pop());
@@ -172,7 +174,7 @@ impl Poller {
             // 线程池还在跑,等它有进展
             match self.graph.remaining_for_poller(deadline) {
                 Some(d) => {
-                    self.graph.wait_for_activity_pub(d);
+                    self.graph.wait_activity_since_pub(before, d);
                 }
                 None => return Err(Error::Timeout),
             }
@@ -191,17 +193,55 @@ impl Poller {
 
 // ---------------------------------------------------------------- 节点
 
-#[derive(Debug, Default)]
+/// 节点调度状态。支持 `max_in_flight` 个并行 in-flight 调用。
+///
+/// 并行模型(docs/design.md §7.11):
+///  * 认领(try_claim)在锁下**原子地**取一个 context 槽、按对齐时间戳弹入本次输入、
+///    分配一个递增序号 `seq`。序号即消费时间戳的顺序(因为总取最小就绪时间戳)。
+///  * 调用完成后按 `seq` **重排刷新**:只有轮到 `next_flush_seq` 时才把输出投递下游,
+///    从而即使后面的时间戳先算完,下游看到的时间戳依然单调。
+///  * `in_flight` = 已认领但尚未刷新的数量 = 占用中的槽数;它归零节点才可关闭。
+///
+/// `max_in_flight == 1` 是自然特例:只有一个槽,序号恒连续,重排是恒等操作 ——
+/// 行为与串行路径一致。
+#[derive(Debug)]
 struct NodeSched {
     opened: bool,
     /// 已「认领关流」—— 在锁下置位,保证并发时只有一个线程会调算子的 Close。
     /// 必须与 `closed` 分开:`closed` 表示 Close 已跑完,终止判定看它。
     close_started: bool,
     closed: bool,
-    /// 正在执行算子回调 —— 独占令牌(docs/design.md §7.0 R3)
-    running: bool,
-    /// 运行期间又来了包,跑完必须重扫,否则丢唤醒
-    rescan: bool,
+    /// 已认领但尚未刷新的调用数(= 占用中的槽数)。归零方可关闭。
+    in_flight: usize,
+    /// 可用的 context 槽序号(初始 0..max_in_flight)。
+    free_slots: Vec<usize>,
+    /// 已认领、等待某个 worker 来执行的调用:(slot, seq)。
+    ready: VecDeque<(usize, u64)>,
+    /// 取时间戳时分配的下一个序号。
+    next_seq: u64,
+    /// 下一个可刷新的序号(保证下游时间戳单调)。
+    next_flush_seq: u64,
+    /// 完成但等待按序刷新的调用:seq -> (slot, 是否成功)。
+    pending_flush: BTreeMap<u64, (usize, bool)>,
+    /// 是否已有线程在做刷新 —— 保证刷新按序、串行(否则并发刷新会打乱下游顺序)。
+    flushing: bool,
+}
+
+impl NodeSched {
+    fn new(max_in_flight: usize) -> Self {
+        Self {
+            opened: false,
+            close_started: false,
+            closed: false,
+            in_flight: 0,
+            free_slots: (0..max_in_flight).collect(),
+            ready: VecDeque::new(),
+            next_seq: 0,
+            next_flush_seq: 0,
+            pending_flush: BTreeMap::new(),
+            flushing: false,
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -224,10 +264,14 @@ pub struct Node {
     policy: InputPolicy,
     input_types: Vec<u64>,
     kernel: KernelInstance,
+    /// 每次并行 in-flight 调用一个 context 槽(池大小 = max_in_flight)。
     /// 用 UnsafeCell 而非 Mutex:算子回调期间引擎必须交出一个 `*mut Context` 给 C 侧,
     /// 若同时持有 Mutex guard 的 `&mut`,回调里从裸指针再造 `&mut` 就构成别名 UB。
-    /// 独占性由「节点独占令牌」保证(docs/design.md §7.0 R3)。
-    ctx: Box<UnsafeCell<Context>>,
+    /// 独占性由「一个槽同一时刻只被一个调用持有」保证(槽在锁下认领/归还)。
+    /// 池在 build 后不再增长,故元素地址稳定 —— 交给 C 侧的 `*mut Context` 在
+    /// 调用期间始终有效。
+    ctxs: Vec<UnsafeCell<Context>>,
+    max_in_flight: usize,
     sched: Mutex<NodeSched>,
     stats: Mutex<NodeStats>,
     /// 每个输入口一条独立队列(见模块头注释)
@@ -237,21 +281,23 @@ pub struct Node {
     /// 这是多输入口对齐的依据 —— 只有确知某口不会再来更早的包,
     /// 才能安全地在当前最小时间戳上组一次 Process。
     input_bounds: Vec<Mutex<Timestamp>>,
-    /// 正在执行算子回调的起始时刻 —— 让「卡死」可定位
-    running_since: Mutex<Option<Instant>>,
+    /// 正在执行算子回调的计时:(并发数, 最早开始时刻)—— 让「卡死」可定位。
+    running_timing: Mutex<(usize, Option<Instant>)>,
 }
 
-// 安全性:Node 内的 UnsafeCell<Context> 只在持有该节点独占令牌时被访问,
-// 令牌由 sched.running 在互斥下置位保证(docs/design.md §7.0 R3)。
+// 安全性:Node 内每个 UnsafeCell<Context> 槽只在被「认领」(从 free_slots 取出而未归还)
+// 期间被访问,认领与归还都在 sched 锁下进行,故同一槽任一时刻只有一个访问者。
 unsafe impl Sync for Node {}
 
 impl Node {
+    /// 取某个 context 槽的可变引用。
+    ///
     /// # Safety
-    /// 调用者必须持有本节点的独占令牌(`sched.running == true`),或处于
-    /// 尚未开始调度的阶段(build/start)。
+    /// 调用者必须**独占持有该槽**(通过在锁下从 `free_slots` 取出而尚未归还),
+    /// 或处于尚未开始调度的阶段(build/start/close,此时 in_flight==0)。
     #[allow(clippy::mut_from_ref)]
-    unsafe fn ctx(&self) -> &mut Context {
-        &mut *self.ctx.get()
+    unsafe fn ctx_slot(&self, slot: usize) -> &mut Context {
+        &mut *self.ctxs[slot].get()
     }
 
     fn queue_len(&self, port: usize) -> usize {
@@ -324,10 +370,6 @@ impl Node {
                 }
             }
         }
-    }
-
-    fn is_ready(&self) -> bool {
-        self.readiness().is_some()
     }
 
     fn all_inputs_closed_and_drained(&self) -> bool {
@@ -842,15 +884,22 @@ impl GraphInner {
             let input_edges: Vec<EdgeId> = ins.names().iter().map(|x| edge_by_name[x]).collect();
             let output_edges: Vec<EdgeId> = outs.names().iter().map(|x| edge_by_name[x]).collect();
 
-            let ctx = Context::new(
-                name.clone(),
-                n.kernel.clone(),
-                ins.clone(),
-                outs.clone(),
-                Arc::new(Options::new(n.options.clone())),
-                Arc::new(BTreeMap::new()), // start 时替换为真实 side packets
-                shared.clone(),
-            );
+            // 0 视作 1。max_in_flight 个并行调用各需一个 context 槽。
+            let mif = n.max_in_flight.max(1);
+            let options = Arc::new(Options::new(n.options.clone()));
+            let make_ctx = || {
+                Context::new(
+                    name.clone(),
+                    n.kernel.clone(),
+                    ins.clone(),
+                    outs.clone(),
+                    options.clone(),
+                    Arc::new(BTreeMap::new()), // start 时替换为真实 side packets
+                    shared.clone(),
+                )
+            };
+            let ctxs: Vec<UnsafeCell<Context>> =
+                (0..mif).map(|_| UnsafeCell::new(make_ctx())).collect();
 
             let executor = if n.executor.is_empty() {
                 None
@@ -869,8 +918,9 @@ impl GraphInner {
                 policy: InputPolicy::from_config(&n.input_policy),
                 input_types: contract.input_types.clone(),
                 kernel,
-                ctx: Box::new(UnsafeCell::new(ctx)),
-                sched: Mutex::new(NodeSched::default()),
+                ctxs,
+                max_in_flight: mif,
+                sched: Mutex::new(NodeSched::new(mif)),
                 stats: Mutex::new(NodeStats::default()),
                 input_queues: (0..ins.len())
                     .map(|_| Mutex::new(VecDeque::new()))
@@ -879,7 +929,7 @@ impl GraphInner {
                 input_bounds: (0..ins.len())
                     .map(|_| Mutex::new(Timestamp::pre_stream()))
                     .collect(),
-                running_since: Mutex::new(None),
+                running_timing: Mutex::new((0, None)),
             });
             // 记录该算子声明的必需 side packet,start 时校验
             for name in &contract.required_side_packets {
@@ -1002,17 +1052,18 @@ impl GraphInner {
         let sp = Arc::new(provided.clone());
         drop(provided);
 
-        // 把 side packets 灌进各节点上下文,然后 open
+        // 把 side packets 灌进各节点的**所有** context 槽,然后 open(用槽 0,串行)。
         for (i, node) in self.nodes.iter().enumerate() {
-            {
-                let ctx = unsafe { node.ctx() };
+            for slot in 0..node.max_in_flight {
+                // 安全性:尚未开始调度,所有槽空闲,可独占写入。
+                let ctx = unsafe { node.ctx_slot(slot) };
                 ctx.side_packets = sp.clone();
                 ctx.reset();
                 ctx.input_ts = Timestamp::unstarted();
             }
-            let rc = self.call_kernel(i, KernelPhase::Open);
+            let rc = self.call_kernel(i, 0, KernelPhase::Open);
             if rc != 0 {
-                let e = unsafe { node.ctx() }.take_error(rc);
+                let e = unsafe { node.ctx_slot(0) }.take_error(rc);
                 self.shared.record_error(e.clone());
                 return Err(e);
             }
@@ -1198,15 +1249,12 @@ impl GraphInner {
     fn schedule_consumers(&self, edge: EdgeId) {
         let consumers: Vec<NodeId> = self.edges[edge].consumers.iter().map(|&(n, _)| n).collect();
         for n in consumers {
-            if self.try_claim(n) {
-                self.dispatch_task(n);
-            }
+            self.schedule_node(n);
         }
     }
 
-    /// 把已认领的节点派给它所属的执行器。
-    ///
-    /// 未指定 executor 的节点进主线程队列(默认执行器,ADR #16);指定了的进对应线程池。
+    /// 把一个已认领的调用派给节点所属的执行器。
+    /// 与 `try_claim` 1:1 配对(每次成功认领派一个任务)。
     fn dispatch_task(&self, n: NodeId) {
         match self.nodes[n].executor {
             None => {
@@ -1218,9 +1266,9 @@ impl GraphInner {
                 // 使 is_idle 误判为空闲、阻塞接口提前返回。
                 self.in_flight.fetch_add(1, Ordering::SeqCst);
                 if !self.executors[i].submit(n) {
-                    // 池已关停(正在拆图):撤销计数并释放令牌,否则 wait_done 会挂住
+                    // 池已关停(仅发生在拆图时):撤销全局计数。该次认领残留在 ready 里,
+                    // 但拆图路径不依赖精确排空(GraphInner::drop 兜底关流),不会死锁。
                     self.in_flight.fetch_sub(1, Ordering::SeqCst);
-                    self.nodes[n].sched.lock().expect("调度锁中毒").running = false;
                 }
                 self.notify_activity();
             }
@@ -1250,45 +1298,82 @@ impl GraphInner {
         cv.notify_all();
     }
 
-    /// 等待「有进展」或超时。
-    fn wait_for_activity(&self, timeout: std::time::Duration) {
+    /// 读取当前活动代数。**必须在判断 is_idle/is_done 之前读取**,再据此 `wait_activity_since`,
+    /// 否则会丢唤醒:若在「判断非空闲」与「开始等待」之间任务恰好全部完成,
+    /// 等待会一直睡到超时(那 55ms 的假慢就是这么来的)。
+    fn activity_gen(&self) -> u64 {
+        *self.activity.0.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// 等到活动代数不等于 `before`(即有新进展)或超时。
+    fn wait_activity_since(&self, before: u64, timeout: std::time::Duration) {
         let (m, cv) = &self.activity;
         let gen = m.lock().unwrap_or_else(|e| e.into_inner());
-        let before = *gen;
         let (guard, _res) = cv
             .wait_timeout_while(gen, timeout, |g| *g == before)
             .unwrap_or_else(|e| e.into_inner());
         drop(guard);
     }
 
-    /// 尝试取得节点的独占令牌。
+    /// 认领一次调用:在锁下**原子地**取一个 context 槽、按对齐时间戳弹入输入、分配序号,
+    /// 放进 `ready` 待执行。成功返回 true —— 调用方应随即 `dispatch_task` 派一个任务。
+    ///
+    /// readiness 与弹包必须在同一把锁下完成,否则两个并发认领会取到同一时间戳的包。
     fn try_claim(&self, n: NodeId) -> bool {
-        if self.shared.has_error() || self.shared.is_cancelled() {
-            return false;
-        }
-        if self.paused.load(Ordering::SeqCst) {
+        if self.shared.has_error()
+            || self.shared.is_cancelled()
+            || self.paused.load(Ordering::SeqCst)
+        {
             return false;
         }
         let node = &self.nodes[n];
         let mut s = node.sched.lock().expect("调度锁中毒");
-        if !s.opened || s.closed {
+        if !s.opened || s.close_started {
             return false;
         }
-        if s.running {
-            s.rescan = true; // 合并唤醒:跑完再重扫,否则丢唤醒
-            return false;
+        if s.in_flight >= node.max_in_flight {
+            return false; // 达容量上限;释放槽后由 finish→schedule_node 重扫
         }
-        drop(s);
-        if !node.is_ready() {
+        // 就绪判定(会短暂锁 input_queues / input_bounds,锁序 sched→queue/bound 一致)
+        let Some(ts) = node.readiness() else {
             return false;
+        };
+        let slot = s.free_slots.pop().expect("in_flight < max 时必有空槽");
+        let seq = s.next_seq;
+        s.next_seq += 1;
+        s.in_flight += 1;
+        s.ready.push_back((slot, seq));
+
+        // 仍持 sched 锁弹入输入 —— 保证 readiness+pop 原子。该槽此刻独占(刚从 free 取出)。
+        let ctx = unsafe { node.ctx_slot(slot) };
+        ctx.reset();
+        for port in 0..node.input_queues.len() {
+            // 只取时间戳恰好等于 ts 的包;某口在该时刻没有数据是合法的(算子看到空包),
+            // 这正是时间戳对齐的语义 —— 若无条件每口弹一个,就会把不同时刻的数据配到一起。
+            if node.front_ts(port) == Some(ts) {
+                if let Some(p) = node.input_queues[port]
+                    .lock()
+                    .expect("队列锁中毒")
+                    .pop_front()
+                {
+                    self.shared.on_dequeue(p.byte_size());
+                    ctx.inputs[port] = Some(p);
+                }
+            }
+            node.advance_bound(port, ts.next_allowed_in_stream());
+            ctx.inputs_done[port] =
+                node.input_closed[port].load(Ordering::SeqCst) && node.queue_len(port) == 0;
         }
-        let mut s = node.sched.lock().expect("调度锁中毒");
-        if s.running {
-            s.rescan = true;
-            return false;
-        }
-        s.running = true;
+        ctx.input_ts = ts;
         true
+    }
+
+    /// 尽力填满容量:反复认领并派任务,直到无法再认领。
+    /// `max_in_flight == 1` 时每轮至多派一个,与串行行为一致。
+    fn schedule_node(&self, n: NodeId) {
+        while self.try_claim(n) {
+            self.dispatch_task(n);
+        }
     }
 
     /// 跑一个主线程任务。返回是否真的跑了。
@@ -1314,71 +1399,90 @@ impl GraphInner {
 
     fn run_node(&self, n: NodeId) {
         let node = &self.nodes[n];
-
-        // 本次要处理的时间戳。Sync 策略下已做跨口对齐(见 Node::readiness)。
-        let Some(ts) = node.readiness() else {
-            // 认领之后条件又不成立了(并发下可能发生):释放令牌即可
+        // 取出一个待执行的调用(认领时已把输入弹进对应槽)。
+        let inv = { node.sched.lock().expect("调度锁中毒").ready.pop_front() };
+        let Some((slot, seq)) = inv else {
+            // 认领与派任务 1:1,理论上不会为空;稳妥起见走一遍收尾。
             self.finish(n);
             return;
         };
-        {
-            let ctx = unsafe { node.ctx() };
-            ctx.reset();
-            for port in 0..node.input_queues.len() {
-                // **只取时间戳恰好等于 ts 的包**。某口在该时刻没有数据是合法的
-                // (算子看到空包),这正是时间戳对齐的语义 —— 若无条件每口弹一个,
-                // 就会把不同时刻的数据配到一起(而且不报错,只是结果错)。
-                if node.front_ts(port) == Some(ts) {
-                    let pkt = node.input_queues[port]
-                        .lock()
-                        .expect("队列锁中毒")
-                        .pop_front();
-                    if let Some(p) = pkt {
-                        self.shared.on_dequeue(p.byte_size());
-                        ctx.inputs[port] = Some(p);
-                    }
-                }
-                // 取走后,该口不会再来 <= ts 的数据
-                node.advance_bound(port, ts.next_allowed_in_stream());
-                ctx.inputs_done[port] =
-                    node.input_closed[port].load(Ordering::SeqCst) && node.queue_len(port) == 0;
+
+        // 契约类型校验(在本槽上)。类型不符宁可报错,也不让算子按错误类型解读内存。
+        let ok = match self.check_input_types(n, slot) {
+            Err(e) => {
+                node.stats.lock().expect("统计锁中毒").errors += 1;
+                self.shared.record_error(e);
+                false
             }
-            ctx.input_ts = ts;
-        }
+            Ok(()) => {
+                let rc = self.call_kernel(n, slot, KernelPhase::Process);
+                if rc != 0 {
+                    let e = unsafe { node.ctx_slot(slot) }.take_error(rc);
+                    node.stats.lock().expect("统计锁中毒").errors += 1;
+                    self.shared.record_error(e);
+                    false
+                } else {
+                    node.stats.lock().expect("统计锁中毒").processed += 1;
+                    true
+                }
+            }
+        };
+        self.complete_invocation(n, slot, seq, ok);
+    }
 
-        // 契约校验:算子在 GetContract 里声明的输入类型必须匹配(0 = 接受任意)
-        if let Err(e) = self.check_input_types(n) {
-            unsafe { node.ctx() }.discard_staging();
-            node.stats.lock().expect("统计锁中毒").errors += 1;
-            self.shared.record_error(e);
-            self.finish(n);
-            return;
+    /// 调用完成:按 `seq` 顺序刷新输出并释放槽。保证下游看到的时间戳单调 ——
+    /// 即使后面的时间戳先算完,也要等前面的先刷。
+    fn complete_invocation(&self, n: NodeId, slot: usize, seq: u64, ok: bool) {
+        let node = &self.nodes[n];
+        // 登记结果;当前无人刷新则由本线程担任刷新者。
+        let be_flusher = {
+            let mut s = node.sched.lock().expect("调度锁中毒");
+            s.pending_flush.insert(seq, (slot, ok));
+            if s.flushing {
+                false
+            } else {
+                s.flushing = true;
+                true
+            }
+        };
+        if be_flusher {
+            loop {
+                // 严格按 next_flush_seq 取;取不到就在同一临界区里让出刷新者身份,避免丢刷新。
+                let item = {
+                    let mut s = node.sched.lock().expect("调度锁中毒");
+                    let next = s.next_flush_seq;
+                    match s.pending_flush.remove(&next) {
+                        Some(v) => Some(v),
+                        None => {
+                            s.flushing = false;
+                            None
+                        }
+                    }
+                };
+                let Some((fslot, fok)) = item else { break };
+                // 锁外刷新;因 flushing 独占,刷新严格单线程按序。
+                if fok {
+                    self.flush_staging(n, fslot);
+                } else {
+                    unsafe { node.ctx_slot(fslot) }.discard_staging();
+                }
+                // CoW 卫生:立刻释放本次输入的引用(否则上游 CoW 退化成全量拷贝)。
+                unsafe { node.ctx_slot(fslot) }.clear_inputs();
+                {
+                    let mut s = node.sched.lock().expect("调度锁中毒");
+                    s.next_flush_seq += 1;
+                    s.in_flight -= 1;
+                    s.free_slots.push(fslot);
+                }
+            }
         }
-
-        let rc = self.call_kernel(n, KernelPhase::Process);
-
-        if rc != 0 {
-            let e = {
-                let ctx = unsafe { node.ctx() };
-                ctx.discard_staging(); // 失败不传播半成品(§7.7)
-                ctx.take_error(rc)
-            };
-            node.stats.lock().expect("统计锁中毒").errors += 1;
-            self.shared.record_error(e);
-        } else {
-            node.stats.lock().expect("统计锁中毒").processed += 1;
-            self.flush_staging(n);
-        }
-        // 立刻释放本次输入的引用 —— 否则上游会一直持着已处理完的包,
-        // 使下游的 CoW 永远看到引用数 ≥ 2 而退化成全量拷贝(见 Context::clear_inputs)。
-        unsafe { node.ctx() }.clear_inputs();
         self.finish(n);
     }
 
     /// 契约声明的输入类型校验。类型不符宁可报错,也不让算子按错误类型解读内存。
-    fn check_input_types(&self, n: NodeId) -> Result<()> {
+    fn check_input_types(&self, n: NodeId, slot: usize) -> Result<()> {
         let node = &self.nodes[n];
-        let ctx = unsafe { node.ctx() };
+        let ctx = unsafe { node.ctx_slot(slot) };
         for (port, &want) in node.input_types.iter().enumerate() {
             if want == 0 {
                 continue; // 未声明类型 = 接受任意
@@ -1403,11 +1507,11 @@ impl GraphInner {
         Ok(())
     }
 
-    /// 把暂存区的输出分发到下游(此时不持有任何算子回调栈)。
-    fn flush_staging(&self, n: NodeId) {
+    /// 把某个槽暂存区的输出分发到下游(此时不持有任何算子回调栈)。
+    fn flush_staging(&self, n: NodeId, slot: usize) {
         let node = &self.nodes[n];
         let (input_ts, batches): (Timestamp, Vec<OutputBatch>) = {
-            let ctx = unsafe { node.ctx() };
+            let ctx = unsafe { node.ctx_slot(slot) };
             let ts = ctx.input_ts;
             let v = node
                 .outputs
@@ -1446,24 +1550,13 @@ impl GraphInner {
         let consumers: Vec<(NodeId, usize)> = self.edges[edge].consumers.clone();
         for (node, port) in consumers {
             self.nodes[node].advance_bound(port, bound);
-            if self.try_claim(node) {
-                self.dispatch_task(node);
-            }
+            self.schedule_node(node);
         }
     }
 
+    /// 一次调用完成后:尽力再填满容量(并行调度多个 in-flight),并尝试关闭。
     fn finish(&self, n: NodeId) {
-        let node = &self.nodes[n];
-        let again = {
-            let mut s = node.sched.lock().expect("调度锁中毒");
-            s.running = false;
-            let a = s.rescan;
-            s.rescan = false;
-            a
-        };
-        if (again || node.is_ready()) && self.try_claim(n) {
-            self.dispatch_task(n);
-        }
+        self.schedule_node(n);
         self.maybe_close(n);
     }
 
@@ -1474,9 +1567,10 @@ impl GraphInner {
 
         // 在锁下**认领**关流:并发时(宿主线程与工作线程可能同时到这里)
         // 只有一个线程能置位 close_started,从而保证算子的 Close 只被调用一次。
+        // in_flight != 0 表示还有并行调用在跑或等待刷新 —— 必须全部落地才能关。
         {
             let mut s = node.sched.lock().expect("调度锁中毒");
-            if s.close_started || s.running || !s.opened {
+            if s.close_started || s.in_flight != 0 || !s.opened {
                 return false;
             }
             if !force && !node.all_inputs_closed_and_drained() {
@@ -1485,22 +1579,23 @@ impl GraphInner {
             s.close_started = true;
         }
 
+        // 此刻 in_flight==0,所有槽空闲;Close 是串行的,用槽 0。
         {
-            let ctx = unsafe { node.ctx() };
+            let ctx = unsafe { node.ctx_slot(0) };
             ctx.reset();
             ctx.close_reason = self.shared.close_reason();
             ctx.input_ts = Timestamp::done();
         }
-        let rc = self.call_kernel(n, KernelPhase::Close);
+        let rc = self.call_kernel(n, 0, KernelPhase::Close);
         if rc != 0 {
-            let ctx = unsafe { node.ctx() };
+            let ctx = unsafe { node.ctx_slot(0) };
             let e = ctx.take_error(rc);
             ctx.discard_staging();
             self.shared.record_error(e);
         } else {
-            self.flush_staging(n);
+            self.flush_staging(n, 0);
         }
-        unsafe { node.ctx() }.clear_inputs();
+        unsafe { node.ctx_slot(0) }.clear_inputs();
         node.sched.lock().expect("调度锁中毒").closed = true;
 
         for &e in &node.outputs {
@@ -1520,9 +1615,7 @@ impl GraphInner {
             // 关闭即「永远不会再有数据」,边界直接到 Done,让下游不必再等这一路
             self.nodes[node].advance_bound(port, Timestamp::done());
             // 关流会改变就绪判定(空口不再阻塞对齐),必须重扫
-            if self.try_claim(node) {
-                self.dispatch_task(node);
-            }
+            self.schedule_node(node);
         }
         // 该边的 poller 在队列排空后即视为结束
         for p in e.pollers.lock().expect("poller 列表锁中毒").iter() {
@@ -1571,6 +1664,8 @@ impl GraphInner {
             if self.all_nodes_closed() {
                 break;
             }
+            // 在判断是否空闲**之前**捕获活动代数,再据此等待 —— 否则会丢唤醒。
+            let before = self.activity_gen();
             if self.is_idle() {
                 // 空闲且未全关:再推一轮关流
                 if self.try_advance_closing() {
@@ -1601,10 +1696,10 @@ impl GraphInner {
                     stuck.join(", ")
                 )));
             }
-            // 线程池还在跑:等它有进展
+            // 线程池还在跑:等它有进展(相对刚才捕获的 before)
             match self.remaining(deadline) {
                 Some(d) => {
-                    self.wait_for_activity(d);
+                    self.wait_activity_since(before, d);
                 }
                 None => return Err(Error::Timeout),
             }
@@ -1625,12 +1720,14 @@ impl GraphInner {
     fn wait_until_idle(&self, deadline: Option<std::time::Instant>) -> Result<()> {
         loop {
             while self.run_one_main_task() {}
+            // 判断空闲**之前**捕获代数,防止丢唤醒(见 activity_gen)。
+            let before = self.activity_gen();
             if self.is_idle() {
                 break;
             }
             match self.remaining(deadline) {
                 Some(d) => {
-                    self.wait_for_activity(d);
+                    self.wait_activity_since(before, d);
                 }
                 None => return Err(Error::Timeout),
             }
@@ -1658,16 +1755,23 @@ impl GraphInner {
         }
     }
 
-    /// 调用算子回调。**调用期间不持有任何引擎锁**(R1),并记录耗时以便定位卡死。
-    fn call_kernel(&self, n: NodeId, phase: KernelPhase) -> i32 {
+    /// 调用算子回调(在指定 context 槽上)。**调用期间不持有任何引擎锁**(R1),
+    /// 并记录耗时以便定位卡死。可被并发调用(不同槽),故 `process` 必须可重入。
+    fn call_kernel(&self, n: NodeId, slot: usize, phase: KernelPhase) -> i32 {
         let node = &self.nodes[n];
         // 直接交出 UnsafeCell 内部指针:不构造 Rust 引用,故与回调内
-        // 从该指针造出的 `&mut Context` 不冲突(独占性由令牌保证)。
-        let ctx_ptr = node.ctx.get() as *mut c_void;
-        *node.running_since.lock().expect("计时锁中毒") = Some(Instant::now());
+        // 从该指针造出的 `&mut Context` 不冲突(该槽此刻由本调用独占持有)。
+        let ctx_ptr = node.ctxs[slot].get() as *mut c_void;
+        {
+            let mut t = node.running_timing.lock().expect("计时锁中毒");
+            if t.0 == 0 {
+                t.1 = Some(Instant::now());
+            }
+            t.0 += 1;
+        }
         let started = Instant::now();
 
-        // 安全性:ctx_ptr 来自本节点 UnsafeCell,且此刻持有该节点的独占令牌(R3)
+        // 安全性:ctx_ptr 来自本槽的 UnsafeCell,该槽此刻独占。
         let rc = unsafe {
             match phase {
                 KernelPhase::Open => node.kernel.open(ctx_ptr),
@@ -1677,7 +1781,13 @@ impl GraphInner {
         };
 
         let us = started.elapsed().as_micros() as i64;
-        *node.running_since.lock().expect("计时锁中毒") = None;
+        {
+            let mut t = node.running_timing.lock().expect("计时锁中毒");
+            t.0 -= 1;
+            if t.0 == 0 {
+                t.1 = None;
+            }
+        }
         if matches!(phase, KernelPhase::Process) {
             let mut st = node.stats.lock().expect("统计锁中毒");
             st.total_us += us;
@@ -1709,7 +1819,8 @@ impl GraphInner {
     fn node_stats(&self, i: usize) -> Option<NodeStatsSnapshot> {
         let node = self.nodes.get(i)?;
         let st = node.stats.lock().expect("统计锁中毒");
-        let since = *node.running_since.lock().expect("计时锁中毒");
+        let (run_count, earliest) = *node.running_timing.lock().expect("计时锁中毒");
+        let since = if run_count > 0 { earliest } else { None };
         Some(NodeStatsSnapshot {
             node_name: node.name.clone(),
             kernel_name: node.kernel_name.clone(),
@@ -1879,8 +1990,11 @@ impl GraphInner {
     ) -> Option<std::time::Duration> {
         self.remaining(deadline)
     }
-    pub(crate) fn wait_for_activity_pub(&self, d: std::time::Duration) {
-        self.wait_for_activity(d);
+    pub(crate) fn wait_activity_since_pub(&self, before: u64, d: std::time::Duration) {
+        self.wait_activity_since(before, d);
+    }
+    pub(crate) fn activity_gen_pub(&self) -> u64 {
+        self.activity_gen()
     }
     pub(crate) fn is_idle_pub(&self) -> bool {
         self.is_idle()
@@ -1895,9 +2009,7 @@ impl GraphInner {
     pub fn resume(&self) {
         self.paused.store(false, Ordering::SeqCst);
         for n in 0..self.nodes.len() {
-            if self.nodes[n].is_ready() && self.try_claim(n) {
-                self.dispatch_task(n);
-            }
+            self.schedule_node(n);
         }
         self.notify_activity();
     }
@@ -1938,20 +2050,20 @@ impl Drop for GraphInner {
                 continue;
             }
             {
-                // 安全性:此刻只有 drop 这一条执行流,独占成立
-                let ctx = unsafe { self.nodes[n].ctx() };
+                // 安全性:线程池已 join,此刻只有 drop 这一条执行流,独占成立。用槽 0。
+                let ctx = unsafe { self.nodes[n].ctx_slot(0) };
                 ctx.reset();
                 ctx.close_reason = self.shared.close_reason();
                 ctx.input_ts = Timestamp::done();
             }
-            let rc = self.call_kernel(n, KernelPhase::Close);
+            let rc = self.call_kernel(n, 0, KernelPhase::Close);
             if rc != 0 {
                 runtime::log_warn(&format!(
                     "节点 `{}` 在图销毁时的 close 返回 {rc}(已忽略)",
                     self.nodes[n].name
                 ));
             }
-            unsafe { self.nodes[n].ctx() }.clear_inputs();
+            unsafe { self.nodes[n].ctx_slot(0) }.clear_inputs();
             self.nodes[n].sched.lock().expect("调度锁中毒").closed = true;
         }
     }

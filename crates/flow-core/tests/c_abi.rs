@@ -283,10 +283,11 @@ fn errors_are_reported_with_readable_text() {
 fn unsupported_config_is_rejected_not_ignored() {
     unsafe {
         let g = flow_graph_new();
-        let y = cs("nodes: [ { kernel: PassThroughKernel, max_in_flight: 8 } ]");
+        // 子图(node 的 type 字段)尚未实现 —— 必须报 UNSUPPORTED,而不是静默忽略
+        let y = cs("nodes: [ { kernel: PassThroughKernel, type: SomeSubgraph } ]");
         let rc = flow_graph_init_from_yaml(g, y.as_ptr());
         assert_eq!(rc, 10, "应为 FLOW_ERR_UNSUPPORTED,而不是静默忽略");
-        assert!(last_error().contains("max_in_flight"), "{}", last_error());
+        assert!(last_error().contains("子图"), "{}", last_error());
         flow_graph_free(g);
     }
 }

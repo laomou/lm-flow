@@ -112,7 +112,10 @@ output_ports: ["out"]
     graph.start().unwrap();
     let input = graph.input("in").unwrap();
 
-    // 一次性灌 10 个但不驱动:容量 2,应丢掉 8 个最旧的
+    // 暂停调度,隔离 fixed_size 行为 —— 否则空闲节点会立刻认领第一个包(把它从队列取走),
+    // 那 1 个「在飞」的包就不受 fixed_size 丢弃约束了。暂停下所有包都留在队列里,
+    // 于是能纯粹验证「满则丢最旧」。
+    graph.pause();
     for i in 0..10i32 {
         input.send(Packet::new(i).at(Timestamp(i as i64))).unwrap();
     }
@@ -123,6 +126,7 @@ output_ports: ["out"]
         "丢包数必须被记账(绝不静默)"
     );
 
+    graph.resume();
     graph.wait_until_idle().unwrap();
     let mut got = Vec::new();
     while let Some(p) = poller.try_next() {
