@@ -33,6 +33,10 @@ jobs:
         run: |
           g++ -std=c++17 -Wall -Wextra -Werror -Iinclude cpp/tests/flow_hpp_test.cc -o /tmp/flow_hpp_test
           /tmp/flow_hpp_test
+      - name: flow_platform_log.hpp 可编译(桌面 stderr 分支)
+        run: |
+          printf '#include "flow_platform_log.hpp"\nint main(){ lmflow::InstallPlatformLogSink(); }\n' > /tmp/plog.cc
+          g++ -std=c++17 -Wall -Wextra -Werror -Iinclude -c /tmp/plog.cc -o /tmp/plog.o
 
   rust:
     name: build · rust (fmt/clippy/test/example)
@@ -77,6 +81,30 @@ jobs:
           out=$(/tmp/cpp_host)
           expected=$(for i in $(seq 0 9); do echo "out: $i @ ts=$i"; done)
           [ "$out" = "$expected" ] || { echo "输出不符:"; echo "$out"; exit 1; }
+
+  # 用 CMake 出原生 SDK 并被消费者 find_package —— 与 cargo 并存(CMake 驱动 cargo)。
+  cmake-sdk:
+    name: build · cmake SDK (configure/build/ctest/install/find_package)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: configure + build + ctest
+        run: |
+          cmake -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build -j
+          ctest --test-dir build --output-on-failure
+      - name: install SDK + 消费者 find_package(lmflow) 编 + 跑
+        run: |
+          cmake --install build --prefix /tmp/sdk
+          mkdir -p /tmp/consumer && cd /tmp/consumer
+          printf 'cmake_minimum_required(VERSION 3.18)\nproject(c CXX)\nfind_package(lmflow REQUIRED)\nadd_executable(app main.cc)\ntarget_link_libraries(app PRIVATE lmflow::flow_core)\n' > CMakeLists.txt
+          cp "$GITHUB_WORKSPACE/examples/cpp/hello_world_host.cc" main.cc
+          cmake -B b -Dlmflow_DIR=/tmp/sdk/lib/cmake/lmflow
+          cmake --build b
+          out=$(./b/app)
+          expected=$(for i in $(seq 0 9); do echo "out: $i @ ts=$i"; done)
+          [ "$out" = "$expected" ] || { echo "consumer 输出不符:"; echo "$out"; exit 1; }
 
   # ================================ safety (memory / concurrency) ================================
 
@@ -157,7 +185,7 @@ jobs:
           # (JNI 符号由 App 的 JVM 在运行时提供,故 -shared 允许其未定义;引擎符号须从 .a 解析)
           "$TOOL/aarch64-linux-android21-clang++" -std=c++17 -Wall -Wextra -Werror \
             -shared -fPIC -Iinclude examples/android/jni/lmflow_jni.cc \
-            target/aarch64-linux-android/debug/libflow_core.a -o /tmp/liblmflow_jni.so
+            target/aarch64-linux-android/debug/libflow_core.a -llog -o /tmp/liblmflow_jni.so
           echo "Android JNI 桥交叉编+链接成功"
       # 鸿蒙/OpenHarmony 标准系统是 target_os=linux(rustc 已确认),与 Linux 走同一套代码路径,
       # 由 rust/external-host 门禁间接覆盖;其 SDK 不在 runner 上,故不单列交叉编译。

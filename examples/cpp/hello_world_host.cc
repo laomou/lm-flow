@@ -52,7 +52,7 @@ static LMFlowPacket MakeInt(int value, int64_t ts) {
 int main() {
   /* 动态链接时务必校验:header 与 .so 版本不一致会导致结构体布局错乱 */
   if (lmflow_abi_version() != LMFLOW_ABI_VERSION) {
-    fprintf(stderr, "ABI 不匹配: lib=%u header=%u\n", lmflow_abi_version(), LMFLOW_ABI_VERSION);
+    fprintf(stderr, "ABI mismatch: lib=%u header=%u\n", lmflow_abi_version(), LMFLOW_ABI_VERSION);
     return 1;
   }
 

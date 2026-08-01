@@ -12,6 +12,7 @@
 #include <string>
 
 #include "flow.h"
+#include "flow_platform_log.hpp"  // 可选:把引擎日志接到 HiLog
 
 namespace {
 
@@ -67,6 +68,7 @@ napi_value RunScale(napi_env env, napi_callback_info info) {
 }
 
 napi_value Init(napi_env env, napi_value exports) {
+  lmflow::InstallPlatformLogSink();  // core + 算子日志 → HiLog
   napi_property_descriptor desc[] = {
       {"runScale", nullptr, RunScale, nullptr, nullptr, nullptr, napi_default, nullptr},
   };

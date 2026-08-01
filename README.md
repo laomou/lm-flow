@@ -127,7 +127,7 @@ C/C++ and mobile hosts don't use pip — they use the **headers + library** dire
 
 ```text
 lmflow-v0.1.0-linux-x86_64/
-├── include/   flow.h · flow.hpp · flow_cv.hpp
+├── include/   flow.h · flow.hpp · flow_cv.hpp · flow_platform_log.hpp
 └── lib/       libflow_core.a (static, self-contained, preferred) · libflow_core.so (shared)
 ```
 
@@ -143,6 +143,26 @@ cargo build --release          # → target/release/libflow_core.{a,so}
 # the headers are the three under include/
 ```
 
-The C ABI is the only stable interface (`include/flow.h`); `flow.hpp` is the optional C++ kernel sugar, and `flow_cv.hpp` is OpenCV interop.
+### Build & consume with CMake
+
+CMake is the top-level build for the C++/native side. It **drives cargo** (which builds the Rust engine + C++ kernels into `libflow_core`), builds the C++ examples/tests, and installs a `find_package` config:
+
+```bash
+cmake -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build
+ctest --test-dir build                       # flow.hpp test; CV test if OpenCV is present
+cmake --install build --prefix /opt/lmflow   # → headers + lib + lib/cmake/lmflow
+```
+
+Consumers then just:
+
+```cmake
+find_package(lmflow REQUIRED)
+target_link_libraries(my_app PRIVATE lmflow::flow_core)   # headers + libflow_core.a + system libs
+```
+
+> Rust developers keep using `cargo build`/`cargo test`; Python keeps using pip / `python python/build.py`. CMake doesn't replace them — it orchestrates cargo for the C++/SDK path.
+
+The C ABI is the only stable interface (`include/flow.h`); `flow.hpp` is the optional C++ kernel sugar, `flow_cv.hpp` is OpenCV interop, and `flow_platform_log.hpp` bridges engine logs to the platform logger (logcat / os_log / HiLog) in one call — `lmflow::InstallPlatformLogSink()`.
 
 Mobile integration examples: [`examples/android`](examples/android) (JNI), [`examples/ios`](examples/ios) (Swift), [`examples/harmonyos`](examples/harmonyos) (NAPI).

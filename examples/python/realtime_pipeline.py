@@ -101,10 +101,10 @@ def main() -> None:
     # 校验对**丢帧鲁棒**(实时管线丢帧是特性,不是 bug):
     # 第 i 帧 = [i,i+1,i+2,i+3]×2,能量 = Σ(2x)² = 4·Σx²
     valid = {int(4 * sum(v * v for v in range(i, i + 4))) for i in range(10)}
-    assert all(e in valid for e in energies), f"每个能量都应是某帧的真实能量:{energies}"
-    assert energies == sorted(energies), "应按时间戳升序处理"
-    assert stats["frames"] == len(energies), "扇出两分支应看到相同的(丢帧后)帧集"
-    assert len(energies) + dropped == 10, "处理 + 丢弃 = 送入(不漏不重)"
+    assert all(e in valid for e in energies), f"each energy must be a real per-frame energy: {energies}"
+    assert energies == sorted(energies), "must be processed in timestamp order"
+    assert stats["frames"] == len(energies), "both fan-out branches must see the same (post-drop) frame set"
+    assert len(energies) + dropped == 10, "processed + dropped = sent (no loss, no duplication)"
     print("OK:实时管线端到端跑通(线程池 + fixed_size 丢帧 + 扇出 + poller/observer)")
 
 

@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "flow.h"
+#include "flow_platform_log.hpp"  // 可选:把引擎日志接到 logcat
 
 namespace {
 
@@ -35,6 +36,12 @@ void ThrowRuntime(JNIEnv* env, const char* what) {
 
 extern "C" {
 
+// .so 加载时把引擎日志接到 Android logcat(core + 算子日志都走这一个 sink)。
+JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM*, void*) {
+  lmflow::InstallPlatformLogSink();
+  return JNI_VERSION_1_6;
+}
+
 /* LmFlow.abiVersion():握手用,校验 header 与 .so 版本一致。 */
 JNIEXPORT jlong JNICALL
 Java_com_lmflow_demo_LmFlow_abiVersion(JNIEnv*, jclass) {
@@ -49,7 +56,7 @@ Java_com_lmflow_demo_LmFlow_runScale(JNIEnv* env, jclass, jlongArray inputs, jlo
 
   LMFlowGraph* g = lmflow_graph_new();
   if (!g) {
-    ThrowRuntime(env, "lmflow_graph_new 失败");
+    ThrowRuntime(env, "lmflow_graph_new failed");
     return nullptr;
   }
 
@@ -65,14 +72,14 @@ Java_com_lmflow_demo_LmFlow_runScale(JNIEnv* env, jclass, jlongArray inputs, jlo
       "output_ports: [\"out\"]\n";
 
   if (lmflow_graph_init_from_yaml(g, yaml.c_str()) != LMFLOW_OK) {
-    ThrowRuntime(env, "init_from_yaml 失败");
+    ThrowRuntime(env, "init_from_yaml failed");
     lmflow_graph_free(g);
     return nullptr;
   }
 
   LMFlowPoller* poller = lmflow_graph_add_poller(g, "out");
   if (!poller || lmflow_graph_start(g) != LMFLOW_OK) {
-    ThrowRuntime(env, "add_poller/start 失败");
+    ThrowRuntime(env, "add_poller/start failed");
     lmflow_poller_free(poller);
     lmflow_graph_free(g);
     return nullptr;
@@ -87,7 +94,7 @@ Java_com_lmflow_demo_LmFlow_runScale(JNIEnv* env, jclass, jlongArray inputs, jlo
   for (jsize i = 0; i < n; ++i) {
     if (lmflow_input_send(in, lmflow_packet_from_i64(src[i], i)) != LMFLOW_OK) {
       env->ReleaseLongArrayElements(inputs, src, JNI_ABORT);
-      ThrowRuntime(env, "input_send 失败");
+      ThrowRuntime(env, "input_send failed");
       lmflow_input_free(in); lmflow_poller_free(poller); lmflow_graph_free(g);
       return nullptr;
     }

@@ -130,7 +130,7 @@ C/C++ 或移动端宿主不走 pip —— 直接用**头文件 + 库**。每个 
 
 ```text
 lmflow-v0.1.0-linux-x86_64/
-├── include/   flow.h · flow.hpp · flow_cv.hpp
+├── include/   flow.h · flow.hpp · flow_cv.hpp · flow_platform_log.hpp
 └── lib/       libflow_core.a(静态,完整,首选)· libflow_core.so(动态)
 ```
 
@@ -146,6 +146,26 @@ cargo build --release          # → target/release/libflow_core.{a,so}
 # 头文件就是 include/ 下那三个
 ```
 
-C ABI 是唯一稳定接口(`include/flow.h`);`flow.hpp` 是可选的 C++ 算子糖层,`flow_cv.hpp` 是 OpenCV 互转。
+### 用 CMake 构建与消费
+
+C++/原生侧的顶层构建是 CMake。它**驱动 cargo**(由 cargo 把 Rust 引擎 + C++ 算子编成 `libflow_core`),再编 C++ 示例/测试,并安装出 `find_package` 配置:
+
+```bash
+cmake -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build
+ctest --test-dir build                       # flow.hpp 测试;装了 OpenCV 则含 CV 测试
+cmake --install build --prefix /opt/lmflow   # → headers + lib + lib/cmake/lmflow
+```
+
+消费者只需:
+
+```cmake
+find_package(lmflow REQUIRED)
+target_link_libraries(my_app PRIVATE lmflow::flow_core)   # 头 + libflow_core.a + 系统库
+```
+
+> Rust 开发者仍用 `cargo build`/`cargo test`;Python 仍走 pip / `python python/build.py`。CMake 不取代它们 —— 只是为 C++/SDK 这条路驱动 cargo。
+
+C ABI 是唯一稳定接口(`include/flow.h`);`flow.hpp` 是可选的 C++ 算子糖层,`flow_cv.hpp` 是 OpenCV 互转,`flow_platform_log.hpp` 一行把引擎日志接到平台日志系统(logcat / os_log / HiLog)—— `lmflow::InstallPlatformLogSink()`。
 
 移动端集成示例:[`examples/android`](examples/android)(JNI)、[`examples/ios`](examples/ios)(Swift)、[`examples/harmonyos`](examples/harmonyos)(NAPI)。

@@ -19,7 +19,7 @@ import lmflow
 try:
     import cv2
 except ImportError:  # pragma: no cover
-    raise SystemExit("本示例需要 opencv-python:pip install opencv-python") from None
+    raise SystemExit("this example needs opencv-python: pip install opencv-python") from None
 
 lmflow.register_builtin_kernels()
 
@@ -91,7 +91,7 @@ output_ports: ["out"]
 def main() -> None:
     cap = cv2.VideoCapture(0)
     if not cap.isOpened():
-        raise SystemExit("打不开摄像头")
+        raise SystemExit("cannot open the camera")
 
     with lmflow.Graph.from_yaml(CONFIG) as graph:
         poller = graph.add_poller("out")
