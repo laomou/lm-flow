@@ -368,7 +368,16 @@ template <typename T>
 struct KernelAdapter {
   static_assert(std::is_base_of<Kernel, T>::value, "算子必须继承 flow::Kernel");
 
-  static void* create(void*) { return new T(); }
+  static void* create(void*) {
+    // 构造函数可能抛(如打开设备失败)—— 绝不能让 C++ 异常穿越 extern "C" 回到
+    // Rust 引擎(那是 UB;Rust 的 catch_unwind 也接不住 C++ 异常)。失败返回 nullptr,
+    // 随后 open/process 会因 self==nullptr 返回错误,图随即失败(与 Python 端一致)。
+    try {
+      return new T();
+    } catch (...) {
+      return nullptr;
+    }
+  }
   static void destroy(void* self) { delete static_cast<T*>(self); }
 
   static void get_contract(void*, FlowContract* c) {
@@ -383,6 +392,7 @@ struct KernelAdapter {
   }
 
   static FlowStatus open(void* self, FlowContext* c) {
+    if (!self) return FLOW_ERR_KERNEL;  // create 失败(构造抛异常)
     try {
       Context cc(c);
       return static_cast<T*>(self)->Open(cc).code();
@@ -391,6 +401,7 @@ struct KernelAdapter {
     }
   }
   static FlowStatus process(void* self, FlowContext* c) {
+    if (!self) return FLOW_ERR_KERNEL;
     try {
       Context cc(c);
       return static_cast<T*>(self)->Process(cc).code();
@@ -399,6 +410,7 @@ struct KernelAdapter {
     }
   }
   static FlowStatus close(void* self, FlowContext* c) {
+    if (!self) return FLOW_ERR_KERNEL;
     try {
       Context cc(c);
       return static_cast<T*>(self)->Close(cc).code();

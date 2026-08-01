@@ -16,6 +16,10 @@ jobs:
           g++ -std=c++17 -Wall -Wextra -Werror -Iinclude -c cpp/kernels.cc    -o /tmp/k.o
           g++ -std=c++17 -Wall -Wextra -Werror -Iinclude -c cpp/abi_assert.cc -o /tmp/a.o
           g++ -std=c++17 -Wall -Wextra -Werror -Iinclude -c examples/cpp/hello_world_host.cc -o /tmp/h.o
+      - name: flow.hpp 糖层单元测试(异常不穿越 FFI + 构造失败安全)
+        run: |
+          g++ -std=c++17 -Wall -Wextra -Werror -Iinclude cpp/flow_hpp_test.cc -o /tmp/flow_hpp_test
+          /tmp/flow_hpp_test
 
   rust:
     runs-on: ubuntu-latest

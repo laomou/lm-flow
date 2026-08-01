@@ -927,6 +927,7 @@ lmflow/
 | **丢唤醒** —— `wait_for_activity` 在判空闲之后才捕获活动代数,任务恰在此间隙全部完成就白等到轮询上限(`max_in_flight` 真并行测试里表现为 55ms 假慢) | 并行测试的耗时断言 | 等待前必须先捕获代数,再 `wait_activity_since`;这是「捕获-判定-等待」三步的经典次序 |
 | **阻塞 `send` 在线程池图上误报 `WOULD_BLOCK`** —— 它只 `pump_step()`,而那只跑主线程任务;池图上恒为 false,一撞水位就报错而非背压 | 自我发掘 + `blocking_send_applies_backpressure_on_pool…` 回归测试 | 背压等待要区分「本线程能不能推」与「别的执行器还在不在跑」:池仍在跑就等排水,全图空转才算真卡死 |
 | **句柄悬空(use-after-free)** —— `FlowInput*/FlowPoller*` 原本由图槽持有、随 `flow_graph_free` 一起释放;Python/C++ 宿主先销毁图、后用句柄(如 `del g` 后 `inp.send`)就读已释放内存(实测挂死) | 自我发掘 + Python `del g` 复现 + `handles_stay_safe_after_graph_free` 回归 | 改为**调用方拥有**句柄:各自持一份 `Arc<GraphInner>`,`flow_input_free/flow_poller_free` 释放;图先 free 也不失效,再用只得「已结束」错误。原先的 `alive_` shared_ptr 兜底是坏的(no-op deleter,且 Python GC 看不见 C++ 引用) |
+| **C++ 算子构造抛异常穿越 FFI** —— `flow.hpp` 的 `KernelAdapter::create` 直接 `new T()`,若 T 构造函数抛异常(如打开设备失败),C++ 异常会穿越 `extern "C"` 回到 Rust(UB;catch_unwind 接不住);且引擎把 create 返回的 null 当「无状态算子」,后续 `process` 会对 null self 解引用 | 自我发掘 + `cpp/flow_hpp_test.cc`(有 bug 版实测 abort/段错误) | create 包 try/catch 失败返回 null;open/process/close 加 self 空判返回错误 —— 与 Python 端 `py_create`/`py_invoke` 的处理对齐 |
 
 ### 13.3 原策略清单
 
