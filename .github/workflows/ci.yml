@@ -1,19 +1,20 @@
 name: ci
 on: [push, pull_request]
 
-# CI 按职责分五类(job 的 name 前缀即类别,便于在 Actions 页面归组):
-#   构建   —— 头文件可包含性、Rust 全量构建/测试、外部 C++ 宿主链接 + 符号对齐
-#   安全   —— TSan(硬门禁)、ASan/Miri(辅助)
-#   绑定   —— Python 扩展真编真跑
-#   跨平台 —— Android(NDK)/ macOS / iOS 交叉编,守住平台相关代码
-#   集成   —— 可选 OpenCV(flow_cv.hpp + Python→C++ CV 算子直证)
+# CI is grouped into five categories (the job-name prefix is the category, so the
+# GitHub Actions page groups them):
+#   build          — header includability, full Rust build/test, external C++ host + symbol alignment
+#   safety         — TSan (required gate), ASan/Miri (advisory)
+#   bindings       — the Python extension really builds and runs
+#   cross-platform — Android (NDK) / macOS / iOS cross-compile, guarding platform-specific code
+#   integration    — optional OpenCV (flow_cv.hpp + Python→C++ CV-kernel proof)
 
 jobs:
-  # ================================ 构建与正确性 ================================
+  # ================================ build & correctness ================================
 
   # 头文件必须能被纯 C 与 C++ 双向包含,且零外部依赖
   headers:
-    name: 构建 · 头文件(C/C++ 可包含 + 算子编译)
+    name: build · headers (C/C++ includable + kernels)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -34,7 +35,7 @@ jobs:
           /tmp/flow_hpp_test
 
   rust:
-    name: 构建 · Rust(fmt/clippy/test/示例)
+    name: build · rust (fmt/clippy/test/example)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -54,7 +55,7 @@ jobs:
   # 这条曾抓到两个真问题:lmflow_register_builtin_kernels 漏在 header 之外、
   # 以及 C++ 示例忘了调它(一跑就「算子未注册」)。
   external-host:
-    name: 构建 · 外部 C++ 宿主 + 符号对齐
+    name: build · external C++ host + symbol alignment
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -77,13 +78,13 @@ jobs:
           expected=$(for i in $(seq 0 9); do echo "out: $i @ ts=$i"; done)
           [ "$out" = "$expected" ] || { echo "输出不符:"; echo "$out"; exit 1; }
 
-  # ================================ 内存 / 并发安全 ================================
+  # ================================ safety (memory / concurrency) ================================
 
   # 并发是本设计的核心风险 —— TSan 是硬门禁(见 docs/design.md §13)。
   # 排除 doctest:`-Zbuild-std` 下 rustdoc 会因 sanitizer ABI 不一致而编不过,
   # 那是工具链限制,与被测代码无关;`--lib --tests` 覆盖全部单元+集成测试。
   tsan:
-    name: 安全 · TSan(并发,硬门禁)
+    name: safety · tsan (concurrency, required)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -95,7 +96,7 @@ jobs:
   # ASan / Miri:辅助排查,暂不作门禁(build-std + C++ 侧易有误报,
   # Miri 也不完整支持线程与跨 FFI 的真实函数指针)。
   sanitizers-extra:
-    name: 安全 · ASan/Miri(辅助,不作门禁)
+    name: safety · asan/miri (advisory)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -108,11 +109,11 @@ jobs:
         run: cargo +nightly miri test --lib
         continue-on-error: true
 
-  # ================================ 语言绑定 ================================
+  # ================================ bindings ================================
 
   # Python 绑定:必须真的编出来并跑通,不能只查语法
   python:
-    name: 绑定 · Python(pybind11)
+    name: bindings · python (pybind11)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -133,12 +134,12 @@ jobs:
         run: PYTHONPATH=python python examples/python/realtime_pipeline.py
       - run: python -m compileall -q python examples/python
 
-  # ================================ 跨平台 / 移动端 ================================
+  # ================================ cross-platform / mobile ================================
   # 引擎是可移植 Rust + cc 编的 C++,必须真能交叉编到各目标;这能抓住平台相关代码
   # (如绑核/优先级的 cfg)在某平台编不过或漏平台。同时顺带编各端的集成示例桥。
 
   cross-android:
-    name: 跨平台 · Android(NDK)
+    name: cross-platform · android (ndk)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -162,7 +163,7 @@ jobs:
       # 由 rust/external-host 门禁间接覆盖;其 SDK 不在 runner 上,故不单列交叉编译。
 
   cross-darwin:
-    name: 跨平台 · macOS / iOS
+    name: cross-platform · macos/ios
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -188,12 +189,12 @@ jobs:
           swiftc -typecheck -I examples/ios examples/ios/Demo.swift
           echo "Demo.swift 类型检查通过"
 
-  # ================================ 可选集成(OpenCV)================================
+  # ================================ integration (OpenCV) ================================
 
   # OpenCV 互转(flow_cv.hpp)是可选头,不进 core,但要保证它真能编、转换真对;
   # 并直证「Python numpy 图 → C++ OpenCV 算子 → 读回」是同一块内存。
   opencv:
-    name: 集成 · OpenCV(flow_cv + PY→C++ CV)
+    name: integration · opencv (flow_cv + py→c++ cv)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
