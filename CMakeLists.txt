@@ -28,7 +28,7 @@ else()
   set(_cargo_dir debug)
 endif()
 
-set(FLOW_LIB "${CMAKE_SOURCE_DIR}/target/${_cargo_dir}/libflow_core.a")
+set(FLOW_LIB "${CMAKE_CURRENT_SOURCE_DIR}/target/${_cargo_dir}/libflow_core.a")
 
 find_program(CARGO cargo REQUIRED)
 find_package(Threads REQUIRED)
@@ -37,7 +37,7 @@ find_package(Threads REQUIRED)
 add_custom_command(
   OUTPUT "${FLOW_LIB}"
   COMMAND ${CARGO} build ${_cargo_flags}
-  WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+  WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
   COMMENT "cargo build ${_cargo_flags} — compiles the Rust engine + C++ kernels into libflow_core.a"
   VERBATIM USES_TERMINAL)
 add_custom_target(flow_engine DEPENDS "${FLOW_LIB}")
@@ -46,16 +46,14 @@ add_custom_target(flow_engine DEPENDS "${FLOW_LIB}")
 add_library(flow_core STATIC IMPORTED GLOBAL)
 set_target_properties(flow_core PROPERTIES IMPORTED_LOCATION "${FLOW_LIB}")
 target_include_directories(flow_core INTERFACE
-  "$<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/include>"
+  "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"
   "$<INSTALL_INTERFACE:include>")
 # 静态库内含 C++ 算子,链接方需 pthread / dl / m。
 target_link_libraries(flow_core INTERFACE Threads::Threads ${CMAKE_DL_LIBS} m)
 add_library(lmflow::flow_core ALIAS flow_core)
 
-# ---- C++ 宿主示例(只依赖 C ABI 层)----
-add_executable(hello_world_host examples/cpp/hello_world_host.cc)
-target_link_libraries(hello_world_host PRIVATE flow_core)
-add_dependencies(hello_world_host flow_engine)  # 确保 cargo 先出库再链接
+# C++ 宿主示例是**独立工程**(examples/cpp/,自带 CMakeLists,经 find_package 消费本 SDK),
+# 不在这里当 target 建 —— 保持根工程聚焦「引擎 + 测试 + 装 SDK」。
 
 # ---- 测试 ----
 if(LMFLOW_BUILD_TESTS)
@@ -65,9 +63,6 @@ if(LMFLOW_BUILD_TESTS)
   add_executable(flow_hpp_test cpp/tests/flow_hpp_test.cc)
   target_include_directories(flow_hpp_test PRIVATE include)
   add_test(NAME flow_hpp_test COMMAND flow_hpp_test)
-
-  # C++ 宿主也当成一条端到端测试。
-  add_test(NAME hello_world_host COMMAND hello_world_host)
 
   # flow_cv.hpp 转换测试:仅当装了 OpenCV 才编(引擎本身不含 CV)。
   find_package(OpenCV QUIET)

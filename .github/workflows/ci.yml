@@ -28,7 +28,7 @@ jobs:
             g++ -std=c++17 -Wall -Wextra -Werror -Iinclude -c "$f" -o "/tmp/$(basename "$f").o"
           done
           g++ -std=c++17 -Wall -Wextra -Werror -Iinclude -c cpp/abi_assert.cc -o /tmp/a.o
-          g++ -std=c++17 -Wall -Wextra -Werror -Iinclude -c examples/cpp/hello_world_host.cc -o /tmp/h.o
+          g++ -std=c++17 -Wall -Wextra -Werror -Iinclude -c examples/cpp/hello_world/hello_world_host.cc -o /tmp/h.o
       - name: flow.hpp 糖层单元测试(异常不穿越 FFI + 构造失败安全)
         run: |
           g++ -std=c++17 -Wall -Wextra -Werror -Iinclude cpp/tests/flow_hpp_test.cc -o /tmp/flow_hpp_test
@@ -76,7 +76,7 @@ jobs:
       - name: 编译并运行外部 C++ 宿主
         run: |
           g++ -std=c++17 -Wall -Wextra -Werror -Iinclude \
-              examples/cpp/hello_world_host.cc target/release/libflow_core.a \
+              examples/cpp/hello_world/hello_world_host.cc target/release/libflow_core.a \
               -lpthread -ldl -lm -o /tmp/cpp_host
           out=$(/tmp/cpp_host)
           expected=$(for i in $(seq 0 9); do echo "out: $i @ ts=$i"; done)
@@ -94,15 +94,12 @@ jobs:
           cmake -B build -DCMAKE_BUILD_TYPE=Release
           cmake --build build -j
           ctest --test-dir build --output-on-failure
-      - name: install SDK + 消费者 find_package(lmflow) 编 + 跑
+      - name: install SDK + 用 examples/cpp 的 CMakeLists 做消费者(find_package)
         run: |
           cmake --install build --prefix /tmp/sdk
-          mkdir -p /tmp/consumer && cd /tmp/consumer
-          printf 'cmake_minimum_required(VERSION 3.18)\nproject(c CXX)\nfind_package(lmflow REQUIRED)\nadd_executable(app main.cc)\ntarget_link_libraries(app PRIVATE lmflow::flow_core)\n' > CMakeLists.txt
-          cp "$GITHUB_WORKSPACE/examples/cpp/hello_world_host.cc" main.cc
-          cmake -B b -Dlmflow_DIR=/tmp/sdk/lib/cmake/lmflow
-          cmake --build b
-          out=$(./b/app)
+          cmake -S examples/cpp/hello_world -B /tmp/ex -Dlmflow_DIR=/tmp/sdk/lib/cmake/lmflow
+          cmake --build /tmp/ex
+          out=$(/tmp/ex/hello_world_host)
           expected=$(for i in $(seq 0 9); do echo "out: $i @ ts=$i"; done)
           [ "$out" = "$expected" ] || { echo "consumer 输出不符:"; echo "$out"; exit 1; }
 
