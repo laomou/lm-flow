@@ -225,6 +225,45 @@ fn cow_copies_when_shared() {
 }
 
 #[test]
+fn from_buffer_handles_non_contiguous_strides() {
+    unsafe {
+        // 源:行优先连续的 2x3 i32 = [[0,1,2],[3,4,5]]
+        let data: [i32; 6] = [0, 1, 2, 3, 4, 5];
+        let esz = 4i64;
+        // 按「转置视图」3x2 来描述它:shape=[3,2],strides=[esz, 3*esz](非连续)
+        let mut shape = [0i64; 8];
+        shape[0] = 3;
+        shape[1] = 2;
+        let mut strides = [0i64; 8];
+        strides[0] = esz;
+        strides[1] = 3 * esz;
+        let src = FlowBuffer {
+            data: data.as_ptr() as *mut c_void,
+            ndim: 2,
+            shape,
+            strides,
+            dtype: 4, // I32
+            ..Default::default()
+        };
+
+        let mut p = flow_packet_from_buffer(&src, 0);
+        assert!(!p.payload.is_null(), "{}", last_error());
+
+        // 取回:应被展平成行优先连续的 3x2 = [[0,3],[1,4],[2,5]]
+        let mut view = FlowBuffer::default();
+        assert!(flow_packet_as_buffer(&p, &mut view));
+        assert_eq!(&view.shape[..2], &[3, 2]);
+        let out = std::slice::from_raw_parts(view.data as *const i32, 6);
+        assert_eq!(
+            out,
+            &[0, 3, 1, 4, 2, 5],
+            "转置(非连续)strides 必须按元素正确展平,而不是整行错拷"
+        );
+        flow_packet_drop(&mut p);
+    }
+}
+
+#[test]
 fn make_mutable_rejects_borrowed_packet() {
     unsafe {
         // owner==NULL 的自建包不属于引擎,不能 CoW

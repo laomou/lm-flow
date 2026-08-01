@@ -530,26 +530,53 @@ pub unsafe extern "C" fn flow_packet_from_buffer(src: *const FlowBuffer, ts: i64
             last_error::set("flow_packet_from_buffer: shape/dtype 非法");
             return FlowPacket::default();
         };
-        // 逐行拷贝(源可能不连续)
+        // 拷进一份行优先连续的缓冲,支持**任意 strides** —— 转置、带步长切片、
+        // 甚至负步长的 numpy 视图都要拷对(否则静默数据损坏)。
         if !s.data.is_null() {
             let esz = packet::dtype_size(s.dtype);
-            let rows: i64 = dims.iter().take(dims.len() - 1).product::<i64>().max(1);
-            let last = *dims.last().unwrap_or(&0);
-            let row_bytes = (last as usize) * esz;
-            let src_row_stride = if s.ndim >= 2 {
-                s.strides[s.ndim as usize - 2]
-            } else {
-                row_bytes as i64
-            };
-            for r in 0..rows {
-                let so = (r * src_row_stride) as usize;
-                let dofs = (r as usize) * row_bytes;
-                if dofs + row_bytes <= b.bytes.len() {
-                    std::ptr::copy_nonoverlapping(
-                        (s.data as *const u8).add(so),
-                        b.bytes.as_mut_ptr().add(dofs),
-                        row_bytes,
-                    );
+            let ndim = dims.len();
+            if ndim >= 1 && esz > 0 {
+                let last = *dims.last().unwrap();
+                let last_stride = s.strides[ndim - 1];
+                let row_bytes = (last as usize) * esz;
+                let n_rows: i64 = dims[..ndim - 1].iter().product::<i64>().max(1);
+                let src_base = s.data as *const u8;
+                let dst_base = b.bytes.as_mut_ptr();
+                // 里程表遍历外层维度索引,按完整 strides 求每行源偏移。
+                let mut idx = vec![0i64; ndim - 1];
+                for r in 0..n_rows {
+                    let mut so: i64 = 0;
+                    for (d, &ix) in idx.iter().enumerate() {
+                        so += ix * s.strides[d];
+                    }
+                    let dofs = (r as usize) * row_bytes;
+                    if dofs + row_bytes <= b.bytes.len() {
+                        if last_stride == esz as i64 {
+                            // 最后一维连续:整行拷
+                            std::ptr::copy_nonoverlapping(
+                                src_base.offset(so as isize),
+                                dst_base.add(dofs),
+                                row_bytes,
+                            );
+                        } else {
+                            // 最后一维也跳跃(转置/步长切片/负步长):逐元素拷
+                            for k in 0..last {
+                                std::ptr::copy_nonoverlapping(
+                                    src_base.offset((so + k * last_stride) as isize),
+                                    dst_base.add(dofs + (k as usize) * esz),
+                                    esz,
+                                );
+                            }
+                        }
+                    }
+                    // 里程表 +1(最右外层维先进位)
+                    for d in (0..ndim - 1).rev() {
+                        idx[d] += 1;
+                        if idx[d] < dims[d] {
+                            break;
+                        }
+                        idx[d] = 0;
+                    }
                 }
             }
         }

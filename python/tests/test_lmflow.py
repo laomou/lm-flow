@@ -211,6 +211,26 @@ class TestNumpy(unittest.TestCase):
             g.close_all_inputs()
             g.wait_done(timeout=5.0)
 
+    def test_non_contiguous_ndarray_roundtrip(self):
+        # 转置/步长切片/负步长的 numpy 视图都是非连续的 —— 拷进引擎必须按 strides 拷对,
+        # 否则静默数据损坏(曾经就是:只认倒数第二维的 stride,整行 memcpy)。
+        a = np.arange(12, dtype=np.int32).reshape(3, 4)
+        cases = {
+            "transpose": a.T,
+            "slice_step": a[:, ::2],
+            "reversed": a[::-1],
+            "3d_transpose": np.arange(24, dtype=np.float32).reshape(2, 3, 4).transpose(1, 0, 2),
+        }
+        for name, view in cases.items():
+            with graph(one_node("PassThroughKernel")) as g:
+                out = g.add_poller("out")
+                g.start()
+                g.input("in").send(view, ts=0)
+                got = out.next(timeout=5.0).as_numpy()
+                self.assertTrue(np.array_equal(got, view), f"{name} 非连续数组必须原样拷进引擎")
+                g.close_all_inputs()
+                g.wait_done(timeout=5.0)
+
     def test_as_numpy_is_read_only(self):
         # 输入包是引用计数共享的,写它会污染别的分支 —— 必须是只读视图
         with graph(one_node("PassThroughKernel")) as g:

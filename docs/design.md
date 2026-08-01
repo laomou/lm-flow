@@ -928,6 +928,7 @@ lmflow/
 | **阻塞 `send` 在线程池图上误报 `WOULD_BLOCK`** —— 它只 `pump_step()`,而那只跑主线程任务;池图上恒为 false,一撞水位就报错而非背压 | 自我发掘 + `blocking_send_applies_backpressure_on_pool…` 回归测试 | 背压等待要区分「本线程能不能推」与「别的执行器还在不在跑」:池仍在跑就等排水,全图空转才算真卡死 |
 | **句柄悬空(use-after-free)** —— `FlowInput*/FlowPoller*` 原本由图槽持有、随 `flow_graph_free` 一起释放;Python/C++ 宿主先销毁图、后用句柄(如 `del g` 后 `inp.send`)就读已释放内存(实测挂死) | 自我发掘 + Python `del g` 复现 + `handles_stay_safe_after_graph_free` 回归 | 改为**调用方拥有**句柄:各自持一份 `Arc<GraphInner>`,`flow_input_free/flow_poller_free` 释放;图先 free 也不失效,再用只得「已结束」错误。原先的 `alive_` shared_ptr 兜底是坏的(no-op deleter,且 Python GC 看不见 C++ 引用) |
 | **C++ 算子构造抛异常穿越 FFI** —— `flow.hpp` 的 `KernelAdapter::create` 直接 `new T()`,若 T 构造函数抛异常(如打开设备失败),C++ 异常会穿越 `extern "C"` 回到 Rust(UB;catch_unwind 接不住);且引擎把 create 返回的 null 当「无状态算子」,后续 `process` 会对 null self 解引用 | 自我发掘 + `cpp/flow_hpp_test.cc`(有 bug 版实测 abort/段错误) | create 包 try/catch 失败返回 null;open/process/close 加 self 空判返回错误 —— 与 Python 端 `py_create`/`py_invoke` 的处理对齐 |
+| **非连续 numpy 数组静默损坏** —— `flow_packet_from_buffer` 号称「逐行拷贝(源可能不连续)」,实则只认倒数第二维的 stride、假定最后一维连续,于是转置 / 步长切片 / 负步长 / 3D 非连续视图全拷错 | 自我发掘 + `a.T`/`a[:,::2]` 端到端实测输出错乱 | 改为按**完整 strides** 的 N 维里程表拷贝:最后一维连续则整行拷、否则逐元素;负步长用 `.offset()` 处理。回归:`c_abi.rs from_buffer_handles_non_contiguous_strides` + Python `test_non_contiguous_ndarray_roundtrip` |
 
 ### 13.3 原策略清单
 
