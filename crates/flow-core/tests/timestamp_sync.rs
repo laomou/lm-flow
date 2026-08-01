@@ -33,7 +33,7 @@ output_ports: ["out"]
 }
 
 fn read_int(p: &Packet) -> i64 {
-    p.as_i64().expect("应是整数包")
+    p.as_i64().expect("should be an integer packet")
 }
 
 /// **核心用例**:两路速度不同,必须按时间戳配对,不能按到达顺序配对。
@@ -57,7 +57,7 @@ fn pairs_by_timestamp_not_by_arrival_order() {
     graph.wait_until_idle().unwrap();
     assert!(
         poller.try_next().is_none(),
-        "B 一个都没来,任何时刻都不该产出 —— 否则就是按到达顺序瞎配了"
+        "B never arrived, nothing should be produced at any timestamp -- otherwise it paired by arrival order"
     );
 
     // B 送 ts=1(跳过了 ts=0)
@@ -74,7 +74,7 @@ fn pairs_by_timestamp_not_by_arrival_order() {
     assert_eq!(
         got,
         vec![(1, 11)],
-        "只有两路都有数据的时刻才产出,实际 {got:?}"
+        "only timestamps where both streams have data should produce, actual {got:?}"
     );
 
     graph.close_all_inputs();
@@ -109,7 +109,7 @@ fn aligned_streams_pair_correctly() {
     assert_eq!(
         got,
         (0..5).map(|i| (i, i + i * 100)).collect::<Vec<_>>(),
-        "同一时间戳的两路必须配到一起"
+        "the two streams at the same timestamp must be paired together"
     );
 }
 
@@ -126,7 +126,10 @@ fn closing_one_input_unblocks_alignment() {
             .unwrap();
     }
     graph.wait_until_idle().unwrap();
-    assert!(poller.try_next().is_none(), "B 未关也未来数据,应保持等待");
+    assert!(
+        poller.try_next().is_none(),
+        "B not closed and no data, should keep waiting"
+    );
 
     // 关掉 B:等价于宣告「B 永远不会有数据」
     graph.close_input("y").unwrap();
@@ -134,7 +137,7 @@ fn closing_one_input_unblocks_alignment() {
     let st = graph.node_stats(0).unwrap();
     assert_eq!(
         st.processed, 3,
-        "B 关闭后,A 的三个时刻都应立即可处理(实际 {} 次)",
+        "after B closes, all three of A's timestamps should be immediately processable (actual {} times)",
         st.processed
     );
 
@@ -159,7 +162,7 @@ fn immediate_policy_skips_alignment() {
     assert_eq!(
         graph.node_stats(0).unwrap().processed,
         1,
-        "immediate 下单路即触发(sync 下则会等待)"
+        "under immediate a single input triggers (sync would wait)"
     );
 
     graph.close_all_inputs();
@@ -205,7 +208,7 @@ output_ports: ["out"]
     graph.close_all_inputs();
     graph
         .wait_done_timeout(Duration::from_secs(10))
-        .expect("被丢弃的时刻必须自动推进边界,否则这里会超时");
+        .expect("dropped timestamps must auto-advance the bound, otherwise this would time out");
 
     let mut got = Vec::new();
     while let Some(p) = poller.try_next() {
@@ -214,7 +217,7 @@ output_ports: ["out"]
     assert_eq!(
         got,
         (5..10).collect::<Vec<i64>>(),
-        "只有未被过滤掉的时刻应产出,且不得卡住"
+        "only non-filtered timestamps should produce, and must not stall"
     );
 }
 
@@ -256,9 +259,13 @@ output_ports: ["out"]
     while let Some(p) = poller.try_next() {
         got.push((p.timestamp().0, read_int(&p)));
     }
-    assert_eq!(got.len(), N as usize, "不得丢包");
+    assert_eq!(got.len(), N as usize, "must not drop packets");
     for (ts, v) in &got {
         let i = *ts;
-        assert_eq!(*v, i + i * 1000, "ts={ts} 的配对必须正确(并发下也不能错配)");
+        assert_eq!(
+            *v,
+            i + i * 1000,
+            "pairing at ts={ts} must be correct (no mispairing even under concurrency)"
+        );
     }
 }

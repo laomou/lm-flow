@@ -106,7 +106,7 @@ class Packet {
   template <typename T>
   const T& Get() const {
     const T* p = TryGet<T>();
-    assert(p && "lmflow::Packet::Get<T> 类型不匹配或空包");
+    assert(p && "lmflow::Packet::Get<T> type mismatch or null packet");
     return *p;
   }
 
@@ -366,7 +366,7 @@ struct HasGetContract<T, std::void_t<decltype(T::GetContract(std::declval<Contra
 /* ---------- 适配器:把虚类桥成 C ABI vtable,并挡住异常穿越 FFI ---------- */
 template <typename T>
 struct KernelAdapter {
-  static_assert(std::is_base_of<Kernel, T>::value, "算子必须继承 lmflow::Kernel");
+  static_assert(std::is_base_of<Kernel, T>::value, "kernel must inherit lmflow::Kernel");
 
   static void* create(void*) {
     // 构造函数可能抛(如打开设备失败)—— 绝不能让 C++ 异常穿越 extern "C" 回到

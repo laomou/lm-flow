@@ -63,17 +63,17 @@ impl Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Error::InvalidArg(m) => write!(f, "参数或配置非法: {m}"),
-            Error::NotFound(m) => write!(f, "未找到: {m}"),
-            Error::Kernel(m) => write!(f, "算子失败: {m}"),
-            Error::Panic(m) => write!(f, "内部 panic: {m}"),
-            Error::WouldBlock => f.write_str("暂时无法完成(队列满或无数据)"),
-            Error::Timeout => f.write_str("超时"),
-            Error::Cancelled => f.write_str("已取消"),
-            Error::Closed => f.write_str("已关闭"),
-            Error::Abi(m) => write!(f, "ABI 不匹配: {m}"),
-            Error::Unsupported(m) => write!(f, "本版本不支持: {m}"),
-            Error::State(m) => write!(f, "当前状态不允许该操作: {m}"),
+            Error::InvalidArg(m) => write!(f, "invalid argument or config: {m}"),
+            Error::NotFound(m) => write!(f, "not found: {m}"),
+            Error::Kernel(m) => write!(f, "kernel failed: {m}"),
+            Error::Panic(m) => write!(f, "internal panic: {m}"),
+            Error::WouldBlock => f.write_str("temporarily unavailable (queue full or no data)"),
+            Error::Timeout => f.write_str("timeout"),
+            Error::Cancelled => f.write_str("cancelled"),
+            Error::Closed => f.write_str("closed"),
+            Error::Abi(m) => write!(f, "ABI mismatch: {m}"),
+            Error::Unsupported(m) => write!(f, "unsupported in this version: {m}"),
+            Error::State(m) => write!(f, "operation not allowed in current state: {m}"),
         }
     }
 }

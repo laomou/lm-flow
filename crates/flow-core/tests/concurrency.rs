@@ -74,7 +74,7 @@ nodes: []
 "#,
     )
     .unwrap_err();
-    assert!(err.to_string().contains("重复"), "{err}");
+    assert!(err.to_string().contains("defined more than once"), "{err}");
 }
 
 /// 全部节点跑在线程池上:结果必须完整且有序。
@@ -109,9 +109,9 @@ output_ports: ["out"]
     while let Some(p) = poller.try_next() {
         got.push(*p.get::<i32>().unwrap());
     }
-    assert_eq!(got.len(), N as usize, "不得丢包");
+    assert_eq!(got.len(), N as usize, "must not drop packets");
     // 单一线性链 + 每节点 max_in_flight=1,故顺序必须保持
-    assert_eq!(got, (0..N).collect::<Vec<_>>(), "顺序必须保持");
+    assert_eq!(got, (0..N).collect::<Vec<_>>(), "order must be preserved");
 }
 
 /// 节点确实跑在**别的线程**上 —— 而不是静默退回主线程。
@@ -142,7 +142,7 @@ output_ports: ["out"]
                     .name()
                     .unwrap_or("(unnamed)")
                     .to_string();
-                rec.lock().expect("锁中毒").push(name);
+                rec.lock().expect("lock poisoned").push(name);
             })
             .unwrap();
         graph.start().unwrap();
@@ -154,11 +154,11 @@ output_ports: ["out"]
         graph.wait_done_timeout(Duration::from_secs(30)).unwrap();
     }
 
-    let names = seen.lock().expect("锁中毒").clone();
-    assert_eq!(names.len(), 20, "observer 应收到全部 20 个包");
+    let names = seen.lock().expect("lock poisoned").clone();
+    assert_eq!(names.len(), 20, "observer should receive all 20 packets");
     assert!(
         names.iter().all(|n| n.starts_with("cpu-")),
-        "指定了 executor 的算子必须真的跑在 cpu-N 池线程上,实际: {names:?}"
+        "a kernel with an assigned executor must actually run on a cpu-N pool thread, actual: {names:?}"
     );
 }
 
@@ -188,8 +188,8 @@ output_ports: ["out"]
         input.send(Packet::new(i).at(Timestamp(i as i64))).unwrap();
         let p = poller
             .next_timeout(Duration::from_secs(10))
-            .expect("不应超时")
-            .expect("应有输出");
+            .expect("should not time out")
+            .expect("should have output");
         assert_eq!(p.get::<i32>(), Some(&i));
     }
     graph.close_all_inputs();
@@ -232,8 +232,8 @@ output_ports: ["oa", "ob"]
         }
         n
     };
-    assert_eq!(count(&pa), N as usize, "分支 a 应收到全部");
-    assert_eq!(count(&pb), N as usize, "分支 b 应收到全部");
+    assert_eq!(count(&pa), N as usize, "branch a should receive all");
+    assert_eq!(count(&pb), N as usize, "branch b should receive all");
 }
 
 // ---------------------------------------------------------------- 阻塞语义
@@ -262,13 +262,13 @@ output_ports: ["out"]
     graph
         .wait_until_idle_timeout(Duration::from_secs(30))
         .unwrap();
-    assert!(graph.is_idle(), "idle 返回后必须真的空闲");
+    assert!(graph.is_idle(), "must truly be idle after idle returns");
 
     let mut n = 0;
     while poller.try_next().is_some() {
         n += 1;
     }
-    assert_eq!(n, 100, "idle 之后所有包都应已产出");
+    assert_eq!(n, 100, "all packets should be produced after idle");
     graph.close_all_inputs();
     graph.wait_done_timeout(Duration::from_secs(10)).unwrap();
 }
@@ -293,10 +293,13 @@ output_ports: ["out"]
     // 一个包都不送:池空闲 → 应立刻判定「不会再有输出」而返回 Ok(None),不是挂住
     let t0 = std::time::Instant::now();
     let r = poller.next_timeout(Duration::from_millis(300));
-    assert!(t0.elapsed() < Duration::from_secs(5), "不得永久挂住");
+    assert!(
+        t0.elapsed() < Duration::from_secs(5),
+        "must not hang forever"
+    );
     assert!(
         matches!(r, Ok(None)),
-        "空闲且无数据应返回 Ok(None),实际 {r:?}"
+        "idle with no data should return Ok(None), actual {r:?}"
     );
 }
 
@@ -326,8 +329,15 @@ output_ports: ["out"]
     }
     // 暂停期间不应产出
     std::thread::sleep(Duration::from_millis(100));
-    assert!(poller.try_next().is_none(), "暂停期间不应有产出");
-    assert_eq!(graph.queue_depth("in"), Some(10), "包应积压着");
+    assert!(
+        poller.try_next().is_none(),
+        "no output should occur while paused"
+    );
+    assert_eq!(
+        graph.queue_depth("in"),
+        Some(10),
+        "packets should be backlogged"
+    );
 
     graph.resume();
     assert!(!graph.is_paused());
@@ -338,7 +348,10 @@ output_ports: ["out"]
     while poller.try_next().is_some() {
         n += 1;
     }
-    assert_eq!(n, 10, "恢复后暂停期间积压的包必须全部被处理");
+    assert_eq!(
+        n, 10,
+        "after resume, all packets backlogged while paused must be processed"
+    );
 
     graph.close_all_inputs();
     graph.wait_done_timeout(Duration::from_secs(10)).unwrap();
@@ -376,12 +389,12 @@ input_ports: ["in"]
         assert_eq!(
             graph.counter_value("sink.closed"),
             1,
-            "第 {round} 轮:Close 必须恰好一次"
+            "round {round}: Close must be called exactly once"
         );
         assert_eq!(
             graph.counter_value("sink.packets"),
             30,
-            "第 {round} 轮:每个包都应被处理一次"
+            "round {round}: every packet should be processed once"
         );
     }
 }
@@ -419,7 +432,7 @@ output_ports: ["oa"]
     assert_eq!(
         ALIVE.load(Ordering::SeqCst),
         base,
-        "并发 + 扇出下仍不得泄漏或重复释放"
+        "must not leak or double-free under concurrency + fanout"
     );
 }
 
@@ -534,13 +547,13 @@ output_ports: ["out"]
         assert_eq!(
             delivered,
             accepted.load(Ordering::SeqCst),
-            "每个被接受的包都必须恰好投递一次(不丢不重)"
+            "every accepted packet must be delivered exactly once (no loss, no dup)"
         );
     }
     assert_eq!(
         ALIVE.load(Ordering::SeqCst),
         base,
-        "并发同口发送不得泄漏(含被非单调拒绝的包)"
+        "concurrent same-port sends must not leak (including non-monotonically-rejected packets)"
     );
 }
 
@@ -574,6 +587,6 @@ output_ports: ["out"]
     assert_eq!(
         ALIVE.load(Ordering::SeqCst),
         base,
-        "拆图时仍须释放所有在途 payload"
+        "teardown must still release all in-flight payloads"
     );
 }

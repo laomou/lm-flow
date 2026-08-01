@@ -30,7 +30,7 @@ static LOG: Mutex<LogSink> = Mutex::new(LogSink {
 });
 
 pub fn set_log_callback(cb: Option<LogFn>, user: *mut c_void) {
-    let mut sink = LOG.lock().expect("日志锁中毒");
+    let mut sink = LOG.lock().expect("log lock poisoned");
     sink.cb = cb;
     sink.user = user;
 }
@@ -39,7 +39,7 @@ pub fn set_log_callback(cb: Option<LogFn>, user: *mut c_void) {
 /// 回调可能去抢 GIL 或加宿主自己的锁,持锁调用会形成锁序环。
 pub fn log(level: i32, msg: &str) {
     let (cb, user) = {
-        let sink = LOG.lock().expect("日志锁中毒");
+        let sink = LOG.lock().expect("log lock poisoned");
         (sink.cb, sink.user)
     };
     if let Some(f) = cb {
@@ -69,7 +69,7 @@ pub struct CStrArena {
 impl CStrArena {
     /// 返回该字符串对应的、生命周期与本 arena 相同的 C 指针。
     pub fn intern(&self, s: &str) -> *const std::ffi::c_char {
-        let mut m = self.map.lock().expect("字符串池锁中毒");
+        let mut m = self.map.lock().expect("string pool lock poisoned");
         let c = m
             .entry(s.to_string())
             .or_insert_with(|| CString::new(s).unwrap_or_default());
@@ -141,7 +141,7 @@ impl GraphShared {
 
     pub fn record_error(&self, e: Error) {
         let msg = e.to_string();
-        let mut slot = self.error.lock().expect("错误锁中毒");
+        let mut slot = self.error.lock().expect("error lock poisoned");
         if slot.is_none() {
             *slot = Some(e);
             self.has_error.store(true, Ordering::SeqCst);
@@ -149,7 +149,7 @@ impl GraphShared {
             log(LOG_ERROR, &msg);
         } else {
             drop(slot);
-            log(LOG_WARN, &format!("(后续错误,已忽略) {msg}"));
+            log(LOG_WARN, &format!("(subsequent error, ignored) {msg}"));
         }
     }
 
@@ -158,7 +158,7 @@ impl GraphShared {
     }
 
     pub fn first_error(&self) -> Option<Error> {
-        self.error.lock().expect("错误锁中毒").clone()
+        self.error.lock().expect("error lock poisoned").clone()
     }
 
     /// 图级错误文本的 C 指针 —— 注意 `lmflow_last_error` 是线程局部的,
@@ -230,13 +230,13 @@ impl GraphShared {
     // ---- 计数器 ----
 
     pub fn counter_add(&self, name: &str, delta: i64) {
-        let mut m = self.counters.lock().expect("计数器锁中毒");
+        let mut m = self.counters.lock().expect("counter lock poisoned");
         *m.entry(name.to_string()).or_insert(0) += delta;
     }
     pub fn counter_value(&self, name: &str) -> i64 {
         self.counters
             .lock()
-            .expect("计数器锁中毒")
+            .expect("counter lock poisoned")
             .get(name)
             .copied()
             .unwrap_or(0)
@@ -244,7 +244,7 @@ impl GraphShared {
     pub fn counter_names(&self) -> Vec<String> {
         self.counters
             .lock()
-            .expect("计数器锁中毒")
+            .expect("counter lock poisoned")
             .keys()
             .cloned()
             .collect()
@@ -264,11 +264,11 @@ mod tests {
     fn first_error_wins() {
         let s = shared();
         assert!(!s.has_error());
-        s.record_error(Error::Kernel("第一个".into()));
-        s.record_error(Error::Kernel("第二个".into()));
+        s.record_error(Error::Kernel("first".into()));
+        s.record_error(Error::Kernel("second".into()));
         assert!(s.has_error());
         // 首因不被覆盖 —— 后续错误往往是首因的连锁反应
-        assert!(s.first_error().unwrap().to_string().contains("第一个"));
+        assert!(s.first_error().unwrap().to_string().contains("first"));
     }
 
     #[test]
@@ -278,7 +278,11 @@ mod tests {
         s.record_error(Error::Kernel("x".into()));
         assert_eq!(s.close_reason(), CLOSE_ERROR);
         s.cancel();
-        assert_eq!(s.close_reason(), CLOSE_CANCELLED, "取消优先于错误");
+        assert_eq!(
+            s.close_reason(),
+            CLOSE_CANCELLED,
+            "cancelled takes priority over error"
+        );
     }
 
     #[test]
@@ -289,7 +293,10 @@ mod tests {
         s.on_enqueue(10);
         assert!(!s.over_watermark());
         s.on_enqueue(10);
-        assert!(s.over_watermark(), "达到上限即视为超限");
+        assert!(
+            s.over_watermark(),
+            "reaching the limit counts as over watermark"
+        );
         s.on_dequeue(10);
         assert!(!s.over_watermark());
         assert_eq!(s.total_queued(), 1);
@@ -326,7 +333,7 @@ mod tests {
         assert_eq!(
             s.to_str().unwrap(),
             "first",
-            "驻留指针必须在后续插入后仍有效"
+            "interned pointer must stay valid after subsequent inserts"
         );
     }
 }

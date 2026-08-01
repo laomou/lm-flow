@@ -22,7 +22,7 @@ int main() {
     assert(m.rows == 3 && m.cols == 4 && m.channels() == 1);
     m.at<uint8_t>(1, 2) = 200;
     const cv::Mat v = lmflow::CvView(p);
-    assert(v.at<uint8_t>(1, 2) == 200 && "写进引擎缓冲的值应能从只读视图读回");
+    assert(v.at<uint8_t>(1, 2) == 200 && "value written into the engine buffer should be readable from the read-only view");
   }
 
   // 2) 连续多通道 Mat -> 包(拷贝)-> 视图,内容逐字节一致
@@ -32,7 +32,7 @@ int main() {
     lmflow::Packet p = lmflow::PacketFromMat(src);
     const cv::Mat v = lmflow::CvView(p);
     assert(v.rows == 2 && v.cols == 3 && v.channels() == 3);
-    assert(std::equal(src.data, src.data + 18, v.data) && "连续 Mat 拷贝应逐字节一致");
+    assert(std::equal(src.data, src.data + 18, v.data) && "contiguous Mat copy should be byte-for-byte identical");
   }
 
   // 3) 非连续 ROI Mat -> 包:必须按 strides 拷对(引擎侧 N 维 strided copy)
@@ -40,7 +40,7 @@ int main() {
     cv::Mat big(4, 4, CV_8UC1);
     for (int i = 0; i < 16; ++i) big.data[i] = static_cast<uint8_t>(i);
     cv::Mat roi = big(cv::Rect(1, 1, 2, 2));  // 取中间 2x2:step0=4、cols=2 → 非连续
-    assert(!roi.isContinuous() && "ROI 应是非连续的");
+    assert(!roi.isContinuous() && "ROI should be non-contiguous");
     lmflow::Packet p = lmflow::PacketFromMat(roi);
     const cv::Mat v = lmflow::CvView(p);
     // big[1..2][1..2] = 值 5,6,9,10
@@ -58,9 +58,9 @@ int main() {
     assert(st == LMFLOW_OK);
     mut.at<uint8_t>(0, 0) = 42;
     const cv::Mat v = lmflow::CvView(p);
-    assert(v.at<uint8_t>(0, 0) == 42 && "独占包的就地改写应可见");
+    assert(v.at<uint8_t>(0, 0) == 42 && "in-place edit of an exclusive packet should be visible");
   }
 
-  std::printf("flow_cv.hpp 测试全部通过\n");
+  std::printf("all flow_cv.hpp tests passed\n");
   return 0;
 }

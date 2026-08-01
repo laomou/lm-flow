@@ -16,7 +16,7 @@ class ScaleKernel : public lmflow::Kernel {
   }
   lmflow::Status Process(lmflow::Context& cc) override {
     int64_t v = 0;
-    if (!cc.Input(0).AsI64(&v)) return cc.Fail("输入不是整数包");
+    if (!cc.Input(0).AsI64(&v)) return cc.Fail("input is not an integer packet");
     cc.Emit(0, lmflow::Packet::FromI64(v * factor_));
     return lmflow::Status::Ok();
   }

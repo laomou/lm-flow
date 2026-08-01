@@ -33,7 +33,7 @@ fn guard<F: FnOnce() -> i32>(f: F) -> i32 {
     match catch_unwind(AssertUnwindSafe(f)) {
         Ok(v) => v,
         Err(_) => {
-            last_error::set("引擎内部 panic(已被 FFI 边界捕获)");
+            last_error::set("internal engine panic (caught at the FFI boundary)");
             code::PANIC
         }
     }
@@ -43,7 +43,7 @@ fn guard_val<T, F: FnOnce() -> T>(default: T, f: F) -> T {
     match catch_unwind(AssertUnwindSafe(f)) {
         Ok(v) => v,
         Err(_) => {
-            last_error::set("引擎内部 panic(已被 FFI 边界捕获)");
+            last_error::set("internal engine panic (caught at the FFI boundary)");
             default
         }
     }
@@ -245,7 +245,9 @@ pub unsafe extern "C" fn lmflow_packet_clone(pkt: *const LMFlowPacket) -> LMFlow
         let src = &*pkt;
         if src.owner.is_null() {
             // 自建包尚未进入引擎,无引用计数可增 —— 不支持克隆
-            last_error::set("lmflow_packet_clone 只能用于引擎持有的包(owner 非空)");
+            last_error::set(
+                "lmflow_packet_clone can only be used on engine-held packets (owner non-null)",
+            );
             return LMFlowPacket::default();
         }
         let arc = Arc::from_raw(src.owner as *const Payload);
@@ -291,7 +293,7 @@ pub unsafe extern "C" fn lmflow_packet_debug_string(pkt: *const LMFlowPacket) ->
 pub unsafe extern "C" fn lmflow_register_type_name(type_id: u64, name: *const c_char) -> i32 {
     guard(|| {
         let Some(n) = cstr(name) else {
-            return fail(Error::InvalidArg("类型名为空或非 UTF-8".into()));
+            return fail(Error::InvalidArg("type name is empty or not UTF-8".into()));
         };
         packet::register_type_name(type_id, n);
         code::OK
@@ -496,7 +498,7 @@ pub unsafe extern "C" fn lmflow_packet_new_buffer(
 ) -> LMFlowPacket {
     guard_val(LMFlowPacket::default(), || {
         if ndim <= 0 || shape.is_null() {
-            last_error::set("lmflow_packet_new_buffer: ndim 必须为正且 shape 非空");
+            last_error::set("lmflow_packet_new_buffer: ndim must be positive and shape non-null");
             return LMFlowPacket::default();
         }
         let dims = std::slice::from_raw_parts(shape, ndim as usize);
@@ -530,7 +532,7 @@ pub unsafe extern "C" fn lmflow_packet_from_buffer(
         let s = &*src;
         let dims = &s.shape[..s.ndim.max(0) as usize];
         let Ok(mut b) = BufferData::new(dims, s.dtype) else {
-            last_error::set("lmflow_packet_from_buffer: shape/dtype 非法");
+            last_error::set("lmflow_packet_from_buffer: invalid shape/dtype");
             return LMFlowPacket::default();
         };
         // 拷进一份行优先连续的缓冲,支持**任意 strides** —— 转置、带步长切片、
@@ -608,12 +610,12 @@ pub unsafe extern "C" fn lmflow_packet_make_mutable_buffer(
 ) -> i32 {
     guard(|| {
         if pkt.is_null() {
-            return fail(Error::InvalidArg("pkt 为空".into()));
+            return fail(Error::InvalidArg("pkt is null".into()));
         }
         let fp = &mut *pkt;
         if fp.owner.is_null() {
             return fail(Error::InvalidArg(
-                "make_mutable 需要调用方拥有的包(owner 非空);借用的输入包请先 take_input".into(),
+                "make_mutable requires a caller-owned packet (owner non-null); for a borrowed input packet, take_input first".into(),
             ));
         }
         // 取回所有权 → CoW → 再交还
@@ -625,7 +627,9 @@ pub unsafe extern "C" fn lmflow_packet_make_mutable_buffer(
                 fill_buffer(out, &snapshot, false, data);
                 code::OK
             }
-            Ok(_) => fail(Error::InvalidArg("该包不是 LMFlowBuffer".into())),
+            Ok(_) => fail(Error::InvalidArg(
+                "this packet is not an LMFlowBuffer".into(),
+            )),
             Err(e) => fail(e),
         };
         *fp = own_packet(p);
@@ -641,11 +645,13 @@ pub unsafe extern "C" fn lmflow_packet_make_mutable_bytes(
 ) -> i32 {
     guard(|| {
         if pkt.is_null() {
-            return fail(Error::InvalidArg("pkt 为空".into()));
+            return fail(Error::InvalidArg("pkt is null".into()));
         }
         let fp = &mut *pkt;
         if fp.owner.is_null() {
-            return fail(Error::InvalidArg("make_mutable 需要调用方拥有的包".into()));
+            return fail(Error::InvalidArg(
+                "make_mutable requires a caller-owned packet".into(),
+            ));
         }
         let mut p = take_packet(*fp);
         let r = match p.make_mutable_builtin() {
@@ -658,7 +664,7 @@ pub unsafe extern "C" fn lmflow_packet_make_mutable_bytes(
                 }
                 code::OK
             }
-            Ok(_) => fail(Error::InvalidArg("该包不是 BYTES".into())),
+            Ok(_) => fail(Error::InvalidArg("this packet is not BYTES".into())),
             Err(e) => fail(e),
         };
         *fp = own_packet(p);
@@ -687,10 +693,12 @@ pub unsafe extern "C" fn lmflow_register_kernel(
 ) -> i32 {
     guard(|| {
         let Some(n) = cstr(name) else {
-            return fail(Error::InvalidArg("算子名为空或非 UTF-8".into()));
+            return fail(Error::InvalidArg(
+                "kernel name is empty or not UTF-8".into(),
+            ));
         };
         if vt.is_null() {
-            return fail(Error::InvalidArg(format!("算子 `{n}` 的 vtable 为空")));
+            return fail(Error::InvalidArg(format!("kernel `{n}` vtable is null")));
         }
         let v = &*vt;
         // LMFlowKernelVTable 与 KernelVTable 布局相同,只是 ctx 参数的具体类型不同
@@ -1161,10 +1169,10 @@ macro_rules! require_scalar {
         ) -> i32 {
             guard(|| {
                 let Some(x) = ctx_ref(c) else {
-                    return fail(Error::InvalidArg("上下文为空".into()));
+                    return fail(Error::InvalidArg("context is null".into()));
                 };
                 let Some(k) = cstr(key) else {
-                    return fail(Error::InvalidArg("参数名为空".into()));
+                    return fail(Error::InvalidArg("parameter name is null".into()));
                 };
                 match x.options.$method(k) {
                     Some(v) => {
@@ -1174,7 +1182,7 @@ macro_rules! require_scalar {
                         code::OK
                     }
                     None => fail(Error::InvalidArg(format!(
-                        "节点 `{}`: 必需参数 options.{k} 缺失或类型不符",
+                        "node `{}`: required parameter options.{k} is missing or type mismatch",
                         x.node_name
                     ))),
                 }
@@ -1194,10 +1202,10 @@ pub unsafe extern "C" fn lmflow_ctx_require_option_str(
 ) -> i32 {
     guard(|| {
         let Some(x) = ctx_ref(c) else {
-            return fail(Error::InvalidArg("上下文为空".into()));
+            return fail(Error::InvalidArg("context is null".into()));
         };
         let Some(k) = cstr(key) else {
-            return fail(Error::InvalidArg("参数名为空".into()));
+            return fail(Error::InvalidArg("parameter name is null".into()));
         };
         match x.options.str_cstr(k) {
             Some(p) => {
@@ -1207,7 +1215,7 @@ pub unsafe extern "C" fn lmflow_ctx_require_option_str(
                 code::OK
             }
             None => fail(Error::InvalidArg(format!(
-                "节点 `{}`: 必需参数 options.{k} 缺失或类型不符",
+                "node `{}`: required parameter options.{k} is missing or type mismatch",
                 x.node_name
             ))),
         }
@@ -1370,13 +1378,13 @@ pub unsafe extern "C" fn lmflow_graph_init_from_yaml(
 ) -> i32 {
     guard(|| {
         let Some(slot) = slot_mut(g) else {
-            return fail(Error::InvalidArg("graph 句柄为空".into()));
+            return fail(Error::InvalidArg("graph handle is null".into()));
         };
         if slot.graph.is_some() {
-            return fail(Error::State("图已初始化".into()));
+            return fail(Error::State("graph already initialized".into()));
         }
         let Some(text) = cstr(yaml) else {
-            return fail(Error::InvalidArg("yaml 为空或非 UTF-8".into()));
+            return fail(Error::InvalidArg("yaml is empty or not UTF-8".into()));
         };
         match Graph::from_yaml(text) {
             Ok(gr) => {
@@ -1395,10 +1403,10 @@ pub unsafe extern "C" fn lmflow_graph_init_from_yaml_file(
 ) -> i32 {
     guard(|| {
         let Some(slot) = slot_mut(g) else {
-            return fail(Error::InvalidArg("graph 句柄为空".into()));
+            return fail(Error::InvalidArg("graph handle is null".into()));
         };
         let Some(p) = cstr(path) else {
-            return fail(Error::InvalidArg("path 为空".into()));
+            return fail(Error::InvalidArg("path is null".into()));
         };
         match Graph::from_yaml_file(p) {
             Ok(gr) => {
@@ -1413,7 +1421,7 @@ pub unsafe extern "C" fn lmflow_graph_init_from_yaml_file(
 unsafe fn with_graph<F: FnOnce(&Graph) -> i32>(g: *mut LMFlowGraph, f: F) -> i32 {
     match slot_mut(g).and_then(|s| s.graph.as_ref()) {
         Some(gr) => f(gr),
-        None => fail(Error::State("图尚未初始化".into())),
+        None => fail(Error::State("graph not yet initialized".into())),
     }
 }
 
@@ -1431,7 +1439,7 @@ pub unsafe extern "C" fn lmflow_graph_set_side_packet(
     guard(|| {
         let p = take_packet(pkt);
         let Some(n) = cstr(name) else {
-            return fail(Error::InvalidArg("side packet 名为空".into()));
+            return fail(Error::InvalidArg("side packet name is null".into()));
         };
         with_graph(g, |gr| to_status(gr.set_side_packet(n, p)))
     })
@@ -1444,15 +1452,15 @@ pub unsafe extern "C" fn lmflow_graph_input(
 ) -> *mut LMFlowInput {
     guard_val(std::ptr::null_mut(), || {
         let Some(slot) = slot_mut(g) else {
-            last_error::set("graph 句柄为空");
+            last_error::set("graph handle is null");
             return std::ptr::null_mut();
         };
         let Some(gr) = slot.graph.as_ref() else {
-            last_error::set("图尚未初始化");
+            last_error::set("graph not yet initialized");
             return std::ptr::null_mut();
         };
         let Some(name) = cstr(port) else {
-            last_error::set("端口名为空");
+            last_error::set("port name is null");
             return std::ptr::null_mut();
         };
         let inner = gr.inner().clone();
@@ -1462,7 +1470,7 @@ pub unsafe extern "C" fn lmflow_graph_input(
                 Box::into_raw(Box::new(InputHandle { graph: inner, edge })) as *mut LMFlowInput
             }
             None => {
-                last_error::set(&format!("图输入口 `{name}` 不存在"));
+                last_error::set(&format!("graph input port `{name}` does not exist"));
                 std::ptr::null_mut()
             }
         }
@@ -1483,7 +1491,7 @@ pub unsafe extern "C" fn lmflow_input_send(i: *mut LMFlowInput, pkt: LMFlowPacke
         let p = take_packet(pkt);
         match input_ref(i) {
             Some(h) => to_status(h.graph.send_by_edge(h.edge, p, true)),
-            None => fail(Error::InvalidArg("input 句柄为空".into())),
+            None => fail(Error::InvalidArg("input handle is null".into())),
         }
     })
 }
@@ -1494,7 +1502,7 @@ pub unsafe extern "C" fn lmflow_input_try_send(i: *mut LMFlowInput, pkt: LMFlowP
         let p = take_packet(pkt);
         match input_ref(i) {
             Some(h) => to_status(h.graph.send_by_edge(h.edge, p, false)),
-            None => fail(Error::InvalidArg("input 句柄为空".into())),
+            None => fail(Error::InvalidArg("input handle is null".into())),
         }
     })
 }
@@ -1527,13 +1535,15 @@ pub unsafe extern "C" fn lmflow_graph_add_packet(
     guard(|| {
         let p = take_packet(pkt);
         let Some(name) = cstr(port) else {
-            return fail(Error::InvalidArg("端口名为空".into()));
+            return fail(Error::InvalidArg("port name is null".into()));
         };
         with_graph(g, |gr| {
             let inner = gr.inner();
             match inner.input_edge_by_name(name) {
                 Some(e) => to_status(inner.send_by_edge(e, p, true)),
-                None => fail(Error::NotFound(format!("图输入口 `{name}` 不存在"))),
+                None => fail(Error::NotFound(format!(
+                    "graph input port `{name}` does not exist"
+                ))),
             }
         })
     })
@@ -1543,7 +1553,7 @@ pub unsafe extern "C" fn lmflow_graph_add_packet(
 pub unsafe extern "C" fn lmflow_graph_close_input(g: *mut LMFlowGraph, port: *const c_char) -> i32 {
     guard(|| {
         let Some(name) = cstr(port) else {
-            return fail(Error::InvalidArg("端口名为空".into()));
+            return fail(Error::InvalidArg("port name is null".into()));
         };
         with_graph(g, |gr| to_status(gr.close_input(name)))
     })
@@ -1575,19 +1585,19 @@ pub unsafe extern "C" fn lmflow_graph_add_poller_ex(
 ) -> *mut LMFlowPoller {
     guard_val(std::ptr::null_mut(), || {
         if observe_timestamp_bounds {
-            last_error::set("observe_timestamp_bounds 属后续阶段,本版本尚未实现");
+            last_error::set("observe_timestamp_bounds belongs to a later phase, not implemented in this version");
             return std::ptr::null_mut();
         }
         let Some(slot) = slot_mut(g) else {
-            last_error::set("graph 句柄为空");
+            last_error::set("graph handle is null");
             return std::ptr::null_mut();
         };
         let Some(gr) = slot.graph.as_ref() else {
-            last_error::set("图尚未初始化");
+            last_error::set("graph not yet initialized");
             return std::ptr::null_mut();
         };
         let Some(name) = cstr(port) else {
-            last_error::set("端口名为空");
+            last_error::set("port name is null");
             return std::ptr::null_mut();
         };
         match gr.add_poller(name) {
@@ -1651,7 +1661,7 @@ pub unsafe extern "C" fn lmflow_poller_next_timeout(
 ) -> i32 {
     guard(|| {
         let Some(poller) = poller_ref(p) else {
-            return fail(Error::InvalidArg("poller 句柄为空".into()));
+            return fail(Error::InvalidArg("poller handle is null".into()));
         };
         match poller.next_timeout(std::time::Duration::from_millis(timeout_ms.max(0) as u64)) {
             Ok(Some(pkt)) => {
@@ -1697,14 +1707,14 @@ pub unsafe extern "C" fn lmflow_graph_observe_ex(
     guard(|| {
         if observe_timestamp_bounds {
             return fail(Error::Unsupported(
-                "observe_timestamp_bounds 属后续阶段".into(),
+                "observe_timestamp_bounds belongs to a later phase".into(),
             ));
         }
         let Some(f) = cb else {
-            return fail(Error::InvalidArg("回调为空".into()));
+            return fail(Error::InvalidArg("callback is null".into()));
         };
         let Some(name) = cstr(port) else {
-            return fail(Error::InvalidArg("端口名为空".into()));
+            return fail(Error::InvalidArg("port name is null".into()));
         };
         with_graph(g, |gr| to_status(gr.inner().add_observer(name, f, user)))
     })
@@ -1899,7 +1909,7 @@ pub unsafe extern "C" fn lmflow_graph_dump(g: *mut LMFlowGraph) -> *const c_char
             static BUF: std::cell::RefCell<std::ffi::CString> =
                 std::cell::RefCell::new(std::ffi::CString::default());
         }
-        let text = graph_of(g).map_or_else(|| "(未初始化)".to_string(), |gr| gr.dump());
+        let text = graph_of(g).map_or_else(|| "(uninitialized)".to_string(), |gr| gr.dump());
         BUF.with(|b| {
             *b.borrow_mut() = std::ffi::CString::new(text).unwrap_or_default();
             b.borrow().as_ptr()
@@ -1934,7 +1944,9 @@ pub unsafe extern "C" fn lmflow_graph_node_stats(
         }
         let declared = (*out).struct_size as usize;
         if declared < std::mem::size_of::<LMFlowNodeStats>() {
-            last_error::set("LMFlowNodeStats.struct_size 太小 —— 请填 sizeof(LMFlowNodeStats)");
+            last_error::set(
+                "LMFlowNodeStats.struct_size too small -- set it to sizeof(LMFlowNodeStats)",
+            );
             return false;
         }
         let Some(gr) = graph_of(g) else { return false };

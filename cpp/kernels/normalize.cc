@@ -30,7 +30,7 @@ class NormalizeKernel : public lmflow::Kernel {
   lmflow::Status Open(lmflow::Context& cc) override {
     // 必需参数:拼错 key 或漏配会当场失败,并带上可读原因(不是静默用默认值跑歪)
     if (cc.RequireOption("scale", &scale_) != LMFLOW_OK) {
-      return cc.Fail("options.scale 缺失或类型不符(必需参数)");
+      return cc.Fail("options.scale missing or type mismatch (required option)");
     }
 
     // 数组参数:归一化均值/标准差这类配置的常见形态
@@ -55,9 +55,9 @@ class NormalizeKernel : public lmflow::Kernel {
   lmflow::Status Close(lmflow::Context& cc) override {
     // 只在正常排空时才认为结果可用;出错/被取消时不应提交
     if (cc.CloseReason() == LMFLOW_CLOSE_NORMAL) {
-      cc.LogInfo("正常结束,结果有效");
+      cc.LogInfo("finished normally, result is valid");
     } else {
-      cc.LogWarn("异常结束,丢弃结果");
+      cc.LogWarn("abnormal termination, discarding result");
     }
     return lmflow::Status::Ok();
   }

@@ -111,7 +111,7 @@ pub struct GraphConfig {
 impl GraphConfig {
     pub fn from_yaml(text: &str) -> Result<Self> {
         let cfg: GraphConfig = serde_yaml::from_str(text)
-            .map_err(|e| Error::InvalidArg(format!("YAML 解析失败: {e}")))?;
+            .map_err(|e| Error::InvalidArg(format!("YAML parse failed: {e}")))?;
         cfg.check_supported()?;
         Ok(cfg)
     }
@@ -128,14 +128,14 @@ impl GraphConfig {
                 // max_in_flight > 1 只有配了线程池才有意义:默认执行器是宿主主线程,
                 // 单线程下并行度恒为 1。宁可报错也不让用户误以为开了并行。
                 return Err(Error::InvalidArg(format!(
-                    "节点 `{who}`: max_in_flight={} 需要同时指定 executor(线程池)—— \
-                     默认执行器是宿主主线程,没有并行可言",
+                    "node `{who}`: max_in_flight={} requires an executor (thread pool) as well -- \
+                     the default executor is the host main thread, so there is no parallelism",
                     n.max_in_flight
                 )));
             }
             if !n.r#type.is_empty() {
                 return Err(Error::Unsupported(format!(
-                    "节点 `{who}`: type=`{}` —— 子图尚未实现",
+                    "node `{who}`: type=`{}` -- subgraph not yet implemented",
                     n.r#type
                 )));
             }
@@ -145,7 +145,7 @@ impl GraphConfig {
                     if n.input_policy.capacity == 0 {
                         // 容量 0 意味着「每个包都丢」,几乎肯定是漏配
                         return Err(Error::InvalidArg(format!(
-                            "节点 `{who}`: fixed_size 策略的 capacity 必须 >= 1"
+                            "node `{who}`: fixed_size policy capacity must be >= 1"
                         )));
                     }
                 }
@@ -154,13 +154,13 @@ impl GraphConfig {
                 "sync_set" => {
                     if n.input_policy.sets.is_empty() {
                         return Err(Error::InvalidArg(format!(
-                            "节点 `{who}`: sync_set 策略必须给出 sets(输入口分组)"
+                            "node `{who}`: sync_set policy must provide sets (input port groups)"
                         )));
                     }
                 }
                 other => {
                     return Err(Error::InvalidArg(format!(
-                    "节点 `{who}`: 未知 input_policy `{other}`(可选 sync / immediate / fixed_size / sync_set)"
+                    "node `{who}`: unknown input_policy `{other}` (valid: sync / immediate / fixed_size / sync_set)"
                 )))
                 }
             }
@@ -168,7 +168,7 @@ impl GraphConfig {
         for e in &self.executors {
             if e.r#type != "ThreadPoolExecutor" && !e.r#type.is_empty() {
                 return Err(Error::InvalidArg(format!(
-                    "未知 executor 类型 `{}`(当前仅 ThreadPoolExecutor)",
+                    "unknown executor type `{}` (only ThreadPoolExecutor is currently supported)",
                     e.r#type
                 )));
             }
@@ -203,7 +203,7 @@ pub fn parse_port_spec(decl: &str) -> Result<PortSpec> {
         3 => {
             let idx: usize = parts[1].parse().map_err(|_| {
                 Error::InvalidArg(format!(
-                    "端口声明 `{decl}`: index `{}` 不是非负整数",
+                    "port declaration `{decl}`: index `{}` is not a non-negative integer",
                     parts[1]
                 ))
             })?;
@@ -215,12 +215,14 @@ pub fn parse_port_spec(decl: &str) -> Result<PortSpec> {
         }
         _ => {
             return Err(Error::InvalidArg(format!(
-                "端口声明 `{decl}` 段数非法(应为 name / TAG:name / TAG:index:name)"
+                "port declaration `{decl}` has an invalid number of segments (expected name / TAG:name / TAG:index:name)"
             )))
         }
     };
     if spec.name.is_empty() {
-        return Err(Error::InvalidArg(format!("端口声明 `{decl}` 的名字为空")));
+        return Err(Error::InvalidArg(format!(
+            "port declaration `{decl}` has an empty name"
+        )));
     }
     Ok(spec)
 }
@@ -246,7 +248,7 @@ output_ports: ["b"]
         assert_eq!(cfg.nodes.len(), 1);
         assert_eq!(cfg.nodes[0].kernel, "PassThroughKernel");
         assert_eq!(cfg.input_ports, vec!["a"]);
-        assert_eq!(cfg.max_queue_size, 100, "默认队列上限");
+        assert_eq!(cfg.max_queue_size, 100, "default queue limit");
     }
 
     #[test]
@@ -290,14 +292,27 @@ nodes:
 "#,
         )
         .unwrap();
-        assert_eq!(cfg.executors[0].affinity, vec![2, 3], "绑核列表应被解析");
-        assert_eq!(cfg.executors[0].priority, 10, "实时优先级应被解析");
+        assert_eq!(
+            cfg.executors[0].affinity,
+            vec![2, 3],
+            "affinity list should be parsed"
+        );
+        assert_eq!(
+            cfg.executors[0].priority, 10,
+            "realtime priority should be parsed"
+        );
         // 不配时默认:不绑核、优先级 0(普通分时)
         let cfg2 =
             GraphConfig::from_yaml("executors:\n  - { name: c, type: ThreadPoolExecutor }\n")
                 .unwrap();
-        assert!(cfg2.executors[0].affinity.is_empty(), "默认不绑核");
-        assert_eq!(cfg2.executors[0].priority, 0, "默认普通分时");
+        assert!(
+            cfg2.executors[0].affinity.is_empty(),
+            "no CPU pinning by default"
+        );
+        assert_eq!(
+            cfg2.executors[0].priority, 0,
+            "ordinary time-sharing by default"
+        );
     }
 
     #[test]
@@ -323,7 +338,7 @@ nodes:
     fn rejects_unknown_fields_and_bad_policy() {
         assert!(
             GraphConfig::from_yaml("nodes:\n  - kernel: K\n    typo_field: 1\n").is_err(),
-            "拼错字段名必须报错而不是忽略"
+            "a misspelled field name must error rather than be silently ignored"
         );
         let err =
             GraphConfig::from_yaml("nodes:\n  - kernel: K\n    input_policy: { type: nonsense }\n")
@@ -361,9 +376,12 @@ nodes:
 
     #[test]
     fn port_spec_rejects_malformed() {
-        assert!(parse_port_spec("a:b:c:d").is_err(), "段数过多");
-        assert!(parse_port_spec("TAG:x:name").is_err(), "index 非数字");
-        assert!(parse_port_spec("").is_err(), "空名字");
-        assert!(parse_port_spec("TAG:").is_err(), "空名字");
+        assert!(parse_port_spec("a:b:c:d").is_err(), "too many segments");
+        assert!(
+            parse_port_spec("TAG:x:name").is_err(),
+            "index is not a number"
+        );
+        assert!(parse_port_spec("").is_err(), "empty name");
+        assert!(parse_port_spec("TAG:").is_err(), "empty name");
     }
 }

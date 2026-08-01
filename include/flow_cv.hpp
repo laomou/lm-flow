@@ -37,7 +37,7 @@ inline int CvDepth(int32_t dtype) {
     case LMFLOW_DTYPE_I32: return CV_32S;
     case LMFLOW_DTYPE_F32: return CV_32F;
     case LMFLOW_DTYPE_F64: return CV_64F;
-    default: throw std::invalid_argument("flow: dtype 无对应的 cv depth");
+    default: throw std::invalid_argument("flow: dtype has no corresponding cv depth");
   }
 }
 
@@ -50,7 +50,7 @@ inline int32_t DtypeFromCv(int cv_depth) {
     case CV_32S: return LMFLOW_DTYPE_I32;
     case CV_32F: return LMFLOW_DTYPE_F32;
     case CV_64F: return LMFLOW_DTYPE_F64;
-    default: throw std::invalid_argument("flow: 不支持的 cv depth");
+    default: throw std::invalid_argument("flow: unsupported cv depth");
   }
 }
 
@@ -59,7 +59,7 @@ inline int32_t DtypeFromCv(int cv_depth) {
 /// 返回的 Mat 仅在底层 Packet 存活期间有效。
 inline cv::Mat CvWrap(const LMFlowBuffer& b) {
   if (b.ndim != 2 && b.ndim != 3) {
-    throw std::invalid_argument("flow: cv::Mat 只支持 ndim 为 2 或 3 的缓冲");
+    throw std::invalid_argument("flow: cv::Mat only supports buffers with ndim 2 or 3");
   }
   const int rows = static_cast<int>(b.shape[0]);
   const int cols = static_cast<int>(b.shape[1]);
@@ -71,7 +71,7 @@ inline cv::Mat CvWrap(const LMFlowBuffer& b) {
 /// 输入包的**只读**视图(零拷贝)。非缓冲包抛异常(会被糖层蹦床转成错误码)。
 inline const cv::Mat CvView(const Packet& pkt) {
   LMFlowBuffer b{};
-  if (!pkt.AsBuffer(&b)) throw std::invalid_argument("flow: 输入不是 LMFlowBuffer 包");
+  if (!pkt.AsBuffer(&b)) throw std::invalid_argument("flow: input is not an LMFlowBuffer packet");
   return CvWrap(b);
 }
 

@@ -44,7 +44,7 @@ namespace {
 void check(LMFlowStatus st, const char* what) {
   if (st == LMFLOW_OK) return;
   const char* detail = lmflow_last_error();
-  std::string msg = std::string(what) + " 失败(code=" + std::to_string(st) + ")";
+  std::string msg = std::string(what) + " failed (code=" + std::to_string(st) + ")";
   if (detail && *detail) msg += ": " + std::string(detail);
   switch (st) {
     case LMFLOW_ERR_TIMEOUT:
@@ -72,7 +72,7 @@ int dtype_from_numpy(const py::dtype& dt) {
   // 放在 F32/F64 之后,不会误伤它们。fp16 是模型推理的主力类型,必须支持。
   if (dt.kind() == 'f' && dt.itemsize() == 2) return LMFLOW_DTYPE_F16;
   throw py::value_error(
-      "不支持的 numpy dtype;可用 "
+      "unsupported numpy dtype; supported: "
       "uint8/int8/uint16/int16/int32/int64/float16/float32/float64");
 }
 
@@ -87,7 +87,7 @@ py::dtype numpy_from_dtype(int dt) {
     case LMFLOW_DTYPE_F16: return py::dtype("float16");
     case LMFLOW_DTYPE_F32: return py::dtype::of<float>();
     case LMFLOW_DTYPE_F64: return py::dtype::of<double>();
-    default: throw py::value_error("未知 LMFLOW_DTYPE");
+    default: throw py::value_error("unknown LMFLOW_DTYPE");
   }
 }
 
@@ -183,7 +183,7 @@ class Packet {
   py::array as_numpy(const py::object& self) const {
     LMFlowBuffer b{};
     if (!lmflow_packet_as_buffer(&raw_, &b)) {
-      throw py::value_error("该包不是 LMFlowBuffer(需要用 new_buffer 或 from_numpy 构造)");
+      throw py::value_error("this packet is not an LMFlowBuffer (construct it with new_buffer or from_numpy)");
     }
     return wrap_buffer(b, self, /*writable=*/false);
   }
@@ -220,9 +220,9 @@ class Packet {
   /// 是死锁隐患。想避免这次拷贝就用 `new_buffer` 让引擎先分配、再就地写入。
   static Packet* from_numpy(const py::array& a, int64_t ts) {
     py::array arr = py::array::ensure(a);
-    if (!arr) throw py::value_error("不是有效的 numpy 数组");
+    if (!arr) throw py::value_error("not a valid numpy array");
     if (arr.ndim() < 1 || arr.ndim() > LMFLOW_MAX_DIMS) {
-      throw py::value_error("ndim 必须在 1..=8");
+      throw py::value_error("ndim must be in 1..=8");
     }
     LMFlowBuffer b{};
     b.data = const_cast<void*>(arr.data());
@@ -262,9 +262,9 @@ static LMFlowPacket to_flow_packet(const py::object& o, int64_t ts) {
     return lmflow_packet_from_str(o.cast<std::string>().c_str(), ts);
   }
   throw py::type_error(
-      "只能发送 Packet 或内建类型(int/float/bool/str/bytes/ndarray)。"
-      "Python 算子不支持把任意 Python 对象放进数据流 —— "
-      "结构化数据请用 N×K 的 ndarray 或 JSON 字符串");
+      "can only send a Packet or a built-in type (int/float/bool/str/bytes/ndarray). "
+      "Python kernels cannot put arbitrary Python objects into the dataflow; "
+      "for structured data use an N×K ndarray or a JSON string");
 }
 
 // ---------------------------------------------------------------- Contract
@@ -427,7 +427,7 @@ void* py_create(void* factory) {
   try {
     return new py::object(reg->cls());
   } catch (py::error_already_set& e) {
-    e.discard_as_unraisable("lmflow: Python 算子构造失败");
+    e.discard_as_unraisable("lmflow: Python kernel construction failed");
     return nullptr;
   }
 }
@@ -472,7 +472,7 @@ void py_get_contract(void* factory, LMFlowContract* out) {
     Contract pc(out);
     reg->cls.attr("get_contract")(py::cast(pc, py::return_value_policy::move));
   } catch (py::error_already_set& e) {
-    e.discard_as_unraisable("lmflow: get_contract 抛异常");
+    e.discard_as_unraisable("lmflow: get_contract raised an exception");
   }
 }
 
@@ -578,10 +578,10 @@ class Graph {
  public:
   Graph() {
     if (lmflow_abi_version() != LMFLOW_ABI_VERSION) {
-      throw std::runtime_error("lmflow: ABI 版本不匹配,扩展模块与引擎库版本不一致");
+      throw std::runtime_error("lmflow: ABI version mismatch; extension module and engine library versions differ");
     }
     g_ = lmflow_graph_new();
-    if (!g_) throw std::runtime_error(std::string("lmflow_graph_new 失败: ") + lmflow_last_error());
+    if (!g_) throw std::runtime_error(std::string("lmflow_graph_new failed: ") + lmflow_last_error());
   }
   ~Graph() { close(); }
 
@@ -602,7 +602,7 @@ class Graph {
 
   Poller* add_poller(const std::string& port) {
     LMFlowPoller* p = lmflow_graph_add_poller(g_, port.c_str());
-    if (!p) throw py::key_error(std::string("add_poller 失败: ") + lmflow_last_error());
+    if (!p) throw py::key_error(std::string("add_poller failed: ") + lmflow_last_error());
     return new Poller(p);
   }
 
@@ -617,7 +617,7 @@ class Graph {
 
   Input* input(const std::string& port) {
     LMFlowInput* h = lmflow_graph_input(g_, port.c_str());
-    if (!h) throw py::key_error(std::string("graph.input 失败: ") + lmflow_last_error());
+    if (!h) throw py::key_error(std::string("graph.input failed: ") + lmflow_last_error());
     return new Input(h);
   }
 
@@ -681,7 +681,7 @@ class Graph {
   py::dict node_stats(size_t i) const {
     LMFlowNodeStats st{};
     st.struct_size = sizeof(st);
-    if (!lmflow_graph_node_stats(g_, i, &st)) throw py::index_error("节点序号越界");
+    if (!lmflow_graph_node_stats(g_, i, &st)) throw py::index_error("node index out of range");
     py::dict d;
     d["node_name"] = st.node_name;
     d["kernel_name"] = st.kernel_name;
@@ -720,7 +720,7 @@ class Graph {
       auto* p = new Packet(pkt, /*owned=*/false);
       (*fn)(py::cast(p, py::return_value_policy::take_ownership));
     } catch (py::error_already_set& e) {
-      e.discard_as_unraisable("lmflow: observer 回调抛异常");
+      e.discard_as_unraisable("lmflow: observer callback raised an exception");
     }
   }
 
@@ -733,7 +733,7 @@ py::tuple Context::new_buffer(const std::vector<int64_t>& shape, const py::objec
   int dt = dtype_from_numpy(py::dtype::from_args(dtype));
   LMFlowPacket raw = lmflow_packet_new_buffer(static_cast<int32_t>(shape.size()), shape.data(), dt,
                                           LMFLOW_TS_UNSET, &b);
-  if (!raw.payload) throw std::runtime_error(std::string("new_buffer 失败: ") + lmflow_last_error());
+  if (!raw.payload) throw std::runtime_error(std::string("new_buffer failed: ") + lmflow_last_error());
   auto* p = new Packet(raw, true);
   py::object owner = py::cast(p, py::return_value_policy::take_ownership);
   return py::make_tuple(owner, wrap_buffer(b, owner, /*writable=*/true));
@@ -744,7 +744,7 @@ py::tuple Graph::new_buffer(const std::vector<int64_t>& shape, const py::object&
   int dt = dtype_from_numpy(py::dtype::from_args(dtype));
   LMFlowPacket raw = lmflow_packet_new_buffer(static_cast<int32_t>(shape.size()), shape.data(), dt,
                                           LMFLOW_TS_UNSET, &b);
-  if (!raw.payload) throw std::runtime_error(std::string("new_buffer 失败: ") + lmflow_last_error());
+  if (!raw.payload) throw std::runtime_error(std::string("new_buffer failed: ") + lmflow_last_error());
   auto* p = new Packet(raw, true);
   py::object owner = py::cast(p, py::return_value_policy::take_ownership);
   return py::make_tuple(owner, wrap_buffer(b, owner, /*writable=*/true));
@@ -770,7 +770,7 @@ void log_trampoline(void* /*user*/, LMFlowLogLevel level, const char* msg) {
   try {
     g_log_cb(static_cast<int>(level), std::string(msg ? msg : ""));
   } catch (py::error_already_set& e) {
-    e.discard_as_unraisable("lmflow: 日志回调抛异常");
+    e.discard_as_unraisable("lmflow: log callback raised an exception");
   }
 }
 }  // namespace

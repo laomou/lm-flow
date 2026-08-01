@@ -17,7 +17,7 @@ import lmflow
 
 @unittest.skipUnless(
     lmflow.has_cv_test_kernels(),
-    "扩展未带 --with-cv-test 构建(无 CvInvertTest;生产扩展零 OpenCV)",
+    "extension not built with --with-cv-test (no CvInvertTest; production extension has zero OpenCV)",
 )
 class TestPythonNumpyThroughCppCvKernel(unittest.TestCase):
     YAML = """
@@ -41,7 +41,7 @@ output_ports: [out]
             # 与 C++ 读到的 cv::Mat 是同一块内存、同一 pattern(直接证明)。
             self.assertEqual(res.shape, img.shape)
             self.assertEqual(res.dtype, np.uint8)
-            self.assertTrue(np.array_equal(res, 255 - img), f"期望 {255 - img},得到 {res}")
+            self.assertTrue(np.array_equal(res, 255 - img), f"expected {255 - img}, got {res}")
 
             g.close_all_inputs()
             g.wait_done(timeout=5.0)

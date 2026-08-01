@@ -49,19 +49,22 @@ output_ports: ["out"]
     let mut got = Vec::new();
     for i in 0..10i32 {
         input.send(Packet::new(i).at(Timestamp(i as i64))).unwrap();
-        let p = poller.next().expect("应有输出");
+        let p = poller.next().expect("should have output");
         got.push((*p.get::<i32>().unwrap(), p.timestamp().0));
     }
     assert_eq!(
         got,
         (0..10).map(|i| (i, i as i64)).collect::<Vec<_>>(),
-        "值与时间戳都应原样穿过两级直通"
+        "value and timestamp should pass through both passthrough stages unchanged"
     );
 
     graph.close_all_inputs();
     graph.wait_done().unwrap();
     assert_eq!(graph.state(), State::Terminated);
-    assert!(poller.next().is_none(), "图结束后 poller 应返回 None");
+    assert!(
+        poller.next().is_none(),
+        "poller should return None after the graph finishes"
+    );
 }
 
 /// C++ 算子读 options 并产出新包 —— 跨语言按类型传值的完整链路。
@@ -95,12 +98,12 @@ output_ports: ["out"]
     graph.close_all_inputs();
     graph.wait_done().unwrap();
 
-    let out = poller.try_next().expect("应有输出");
+    let out = poller.try_next().expect("should have output");
     // 捆绑算子一律用内建类型 —— 因此 C++/Rust/Python 三侧都能直接读
     assert_eq!(
         out.type_id(),
         flow_core::packet::type_id::I64,
-        "产出应是内建整数类型"
+        "output should be the builtin integer type"
     );
     assert_eq!(out.as_i64(), Some(42), "6 * factor(7) = 42");
 }
@@ -128,8 +131,11 @@ output_ports: ["out"]
     graph.close_all_inputs();
     let err = graph.wait_done().unwrap_err();
     let msg = err.to_string();
-    assert!(msg.contains("类型不符"), "{msg}");
-    assert!(msg.contains("输入口"), "报错应指出是哪个口: {msg}");
+    assert!(msg.contains("type mismatch"), "{msg}");
+    assert!(
+        msg.contains("input port"),
+        "the error should indicate which port: {msg}"
+    );
 }
 
 /// 有状态算子:Sum 在 Close 时吐出总和。
@@ -165,7 +171,7 @@ output_ports: ["mid"]
     while poller.try_next().is_some() {
         n += 1;
     }
-    assert_eq!(n, 3, "三个包都应到达图输出");
+    assert_eq!(n, 3, "all three packets should reach the graph output");
 }
 
 /// 扇出:Split 一进多出,两条分支各自收到每个包(共享 payload,不拷贝)。
@@ -200,8 +206,8 @@ output_ports: ["oa", "ob"]
     graph.close_all_inputs();
     graph.wait_done().unwrap();
 
-    let a = pa.try_next().expect("分支 a 应收到");
-    let b = pb.try_next().expect("分支 b 应收到");
+    let a = pa.try_next().expect("branch a should receive");
+    let b = pb.try_next().expect("branch b should receive");
     assert_eq!(a.get::<i32>(), Some(&42));
     assert_eq!(b.get::<i32>(), Some(&42));
 }
@@ -229,8 +235,11 @@ output_ports: ["out"]
         .unwrap();
     graph.close_all_inputs();
     graph.wait_done().unwrap();
-    assert!(p1.try_next().is_some(), "poller 1 应收到");
-    assert!(p2.try_next().is_some(), "poller 2 也应独立收到一份");
+    assert!(p1.try_next().is_some(), "poller 1 should receive");
+    assert!(
+        p2.try_next().is_some(),
+        "poller 2 should also independently receive a copy"
+    );
 }
 
 // ---------------------------------------------------------------- 校验与错误路径
@@ -246,7 +255,7 @@ nodes:
 "#,
     )
     .unwrap_err();
-    assert!(err.to_string().contains("成环"), "{err}");
+    assert!(err.to_string().contains("cycle"), "{err}");
 }
 
 /// 退化图不该崩:空图(0 节点)能建/启/关/终结。
@@ -257,7 +266,11 @@ fn empty_graph_terminates_cleanly() {
     graph.start().unwrap();
     graph.close_all_inputs();
     graph.wait_done().unwrap();
-    assert_eq!(graph.state(), State::Terminated, "空图也应能干净终结");
+    assert_eq!(
+        graph.state(),
+        State::Terminated,
+        "an empty graph should also terminate cleanly"
+    );
 }
 
 /// 节点输出无人消费、也不是图输出口(悬空输出):合法,包被丢弃,不崩不泄漏。
@@ -282,7 +295,7 @@ input_ports: ["in"]
     assert_eq!(
         graph.node_stats(0).unwrap().processed,
         5,
-        "算子仍应处理每个包"
+        "the kernel should still process every packet"
     );
 }
 
@@ -299,7 +312,7 @@ output_ports: ["out"]
 "#,
     )
     .unwrap_err();
-    assert!(err.to_string().contains("没有任何节点产出"), "{err}");
+    assert!(err.to_string().contains("no node produces"), "{err}");
 }
 
 /// MuxKernel:控制口(输入 0)的 I64 值选择转发哪个数据口(输入 1..)。默认 sync 全对齐。
@@ -338,7 +351,7 @@ output_ports: ["out"]
     assert_eq!(
         got,
         vec![100, 201],
-        "ts0 选数据口 0(a=100),ts1 选数据口 1(b=201)"
+        "ts0 selects data port 0 (a=100), ts1 selects data port 1 (b=201)"
     );
 }
 
@@ -370,7 +383,7 @@ output_ports: ["out"]
         .unwrap();
     graph.close_all_inputs();
     let err = graph.wait_done().unwrap_err();
-    assert!(err.to_string().contains("越界"), "{err}");
+    assert!(err.to_string().contains("out of range"), "{err}");
 }
 
 #[test]
@@ -385,7 +398,7 @@ input_ports: ["in"]
 "#,
     )
     .unwrap_err();
-    assert!(err.to_string().contains("多个生产者"), "{err}");
+    assert!(err.to_string().contains("multiple producers"), "{err}");
 }
 
 #[test]
@@ -398,7 +411,7 @@ nodes:
 "#,
     )
     .unwrap_err();
-    assert!(err.to_string().contains("找不到生产者"), "{err}");
+    assert!(err.to_string().contains("no producer"), "{err}");
 }
 
 #[test]
@@ -412,7 +425,7 @@ input_ports: ["in"]
 "#,
     )
     .unwrap_err();
-    assert!(err.to_string().contains("名字冲突"), "{err}");
+    assert!(err.to_string().contains("name conflict"), "{err}");
 }
 
 #[test]
@@ -425,7 +438,7 @@ nodes:
 "#,
     )
     .unwrap_err();
-    assert!(err.to_string().contains("没有输入口"), "{err}");
+    assert!(err.to_string().contains("no input ports"), "{err}");
 }
 
 #[test]
@@ -439,7 +452,7 @@ input_ports: ["in"]
 "#,
     )
     .unwrap_err();
-    assert!(err.to_string().contains("未定义的 executor"), "{err}");
+    assert!(err.to_string().contains("undefined executor"), "{err}");
 }
 
 #[test]
@@ -454,10 +467,10 @@ input_ports: ["in"]
     )
     .unwrap_err();
     let msg = err.to_string();
-    assert!(msg.contains("未注册"), "{msg}");
+    assert!(msg.contains("not registered"), "{msg}");
     assert!(
         msg.contains("PassThroughKernel"),
-        "报错应列出可用算子以指导用户: {msg}"
+        "the error should list available kernels to guide the user: {msg}"
     );
 }
 
@@ -514,7 +527,7 @@ fn unset_timestamp_on_graph_input_is_rejected() {
         .unwrap()
         .send(Packet::new(1i32)) // 未调 .at()
         .unwrap_err();
-    assert!(err.to_string().contains("时间戳"), "{err}");
+    assert!(err.to_string().contains("timestamp"), "{err}");
 }
 
 #[test]
@@ -526,9 +539,9 @@ fn timestamps_must_be_strictly_increasing() {
     input.send(Packet::new(1i32).at(Timestamp(5))).unwrap();
     // 同一时间戳或回退都应被拒 —— 乱序会让下游行为诡异
     let err = input.send(Packet::new(2i32).at(Timestamp(5))).unwrap_err();
-    assert!(err.to_string().contains("递增"), "{err}");
+    assert!(err.to_string().contains("increasing"), "{err}");
     let err = input.send(Packet::new(3i32).at(Timestamp(4))).unwrap_err();
-    assert!(err.to_string().contains("递增"), "{err}");
+    assert!(err.to_string().contains("increasing"), "{err}");
 }
 
 #[test]
@@ -566,7 +579,10 @@ fn introspection_reports_topology() {
     assert_eq!(graph.input_port_names(), vec!["in"]);
     assert_eq!(graph.output_port_names(), vec!["out"]);
     assert_eq!(graph.queue_depth("in"), Some(0));
-    assert!(graph.dump().contains("node"), "dump 应含节点表");
+    assert!(
+        graph.dump().contains("node"),
+        "dump should contain the node table"
+    );
 }
 
 #[test]
@@ -585,7 +601,10 @@ fn node_stats_track_processing() {
     assert_eq!(st.kernel_name, "PassThroughKernel");
     assert_eq!(st.processed, 3);
     assert_eq!(st.errors, 0);
-    assert!(!st.running, "回调已结束,不应显示 running");
+    assert!(
+        !st.running,
+        "callback has finished, should not show running"
+    );
 }
 
 #[test]
@@ -615,7 +634,10 @@ max_queued_packets: 2
         }
         sent += 1;
     }
-    assert!(sent < 10, "全局水位必须能拦住无限增长,实际送进 {sent} 个");
+    assert!(
+        sent < 10,
+        "the global watermark must stop unbounded growth, actually sent {sent}"
+    );
 }
 
 /// 背压正确性:**线程池图**上,阻塞 `send` 命中全局水位时必须**等池排水**,
@@ -647,7 +669,7 @@ mod slow_sink_kernel {
             let rc = unsafe {
                 flow_core::ffi::lmflow_register_kernel(name.as_ptr(), vt, std::ptr::null_mut())
             };
-            assert_eq!(rc, 0, "注册 SlowSink 失败");
+            assert_eq!(rc, 0, "failed to register SlowSink");
         });
     }
 }
@@ -676,7 +698,7 @@ max_queued_packets: 4
     for i in 0..30i32 {
         input
             .send(Packet::new(i).at(Timestamp(i as i64)))
-            .unwrap_or_else(|e| panic!("阻塞 send 第 {i} 个不应失败(应转为背压等待),却得到 {e}"));
+            .unwrap_or_else(|e| panic!("blocking send #{i} should not fail (should become backpressure waiting), but got {e}"));
     }
     graph.close_all_inputs();
     graph
@@ -686,7 +708,7 @@ max_queued_packets: 4
     assert_eq!(
         graph.node_stats(0).unwrap().processed,
         30,
-        "背压下 30 个都要处理完,不丢不错"
+        "under backpressure all 30 must be processed, no loss no error"
     );
 }
 
@@ -736,7 +758,7 @@ watchdog_ms: 1
     let msgs = MSGS.lock().unwrap_or_else(|e| e.into_inner());
     assert!(
         msgs.iter().any(|m| m.contains("watchdog")),
-        "3ms 的算子在 watchdog_ms=1 下必须打 WARN,实际日志: {:?}",
+        "a 3ms kernel under watchdog_ms=1 must emit a WARN, actual logs: {:?}",
         *msgs
     );
 }
@@ -786,13 +808,21 @@ fn multiple_observers_and_poller_all_receive() {
     graph.wait_done().unwrap();
 
     let want: Vec<i32> = (0..5).collect();
-    assert_eq!(*seen_a.lock().unwrap(), want, "observer A 应收到全部");
-    assert_eq!(*seen_b.lock().unwrap(), want, "observer B 应独立收到全部");
+    assert_eq!(
+        *seen_a.lock().unwrap(),
+        want,
+        "observer A should receive all"
+    );
+    assert_eq!(
+        *seen_b.lock().unwrap(),
+        want,
+        "observer B should independently receive all"
+    );
     let mut got = Vec::new();
     while let Some(p) = poller.try_next() {
         got.push(*p.get::<i32>().unwrap());
     }
-    assert_eq!(got, want, "poller 也应独立收到全部");
+    assert_eq!(got, want, "poller should also independently receive all");
 }
 
 // ---------------------------------------------------------------- 兜底关流与 side packet
@@ -820,7 +850,11 @@ input_ports: ["in"]
         .unwrap()
         .send(Packet::new(1i32).at(Timestamp(0)))
         .unwrap();
-    assert_eq!(graph.counter_value("sink.closed"), 0, "此刻还未关闭");
+    assert_eq!(
+        graph.counter_value("sink.closed"),
+        0,
+        "not closed yet at this point"
+    );
 
     // 故意不 close/wait,直接丢弃图句柄
     let shared = graph.shared_for_inspection();
@@ -829,7 +863,7 @@ input_ports: ["in"]
     assert_eq!(
         shared.counter_value("sink.closed"),
         1,
-        "图销毁时必须补调算子的 Close"
+        "graph destruction must still call the kernel's Close"
     );
 }
 
@@ -852,8 +886,14 @@ output_ports: ["out"]
     .unwrap();
     let err = graph.start().unwrap_err();
     let msg = err.to_string();
-    assert!(msg.contains("calibration"), "应指出缺哪个: {msg}");
-    assert!(msg.contains("norm"), "应指出是哪个节点要它: {msg}");
+    assert!(
+        msg.contains("calibration"),
+        "should indicate which one is missing: {msg}"
+    );
+    assert!(
+        msg.contains("norm"),
+        "should indicate which node requires it: {msg}"
+    );
 }
 
 /// 注入之后即可正常启动,且算子能读到。
@@ -905,8 +945,11 @@ output_ports: ["out"]
     // options.scale 未配 —— NormalizeKernel 用 RequireOption 读它
     let err = graph.start().unwrap_err();
     let msg = err.to_string();
-    assert!(msg.contains("scale"), "应指出是哪个参数: {msg}");
-    assert!(msg.contains("norm"), "应带节点名: {msg}");
+    assert!(
+        msg.contains("scale"),
+        "should indicate which parameter: {msg}"
+    );
+    assert!(msg.contains("norm"), "should carry the node name: {msg}");
 }
 
 /// 时间戳单调性必须**独立记录参照值**:队列排空后回退的时间戳同样要被拒。
@@ -922,19 +965,23 @@ fn timestamp_monotonicity_survives_queue_drain() {
     input.send(Packet::new(1i32).at(Timestamp(100))).unwrap();
     // 把队列彻底排空 —— 此后若参照值来自队列,就没有参照可比了
     assert!(poller.next().is_some());
-    assert_eq!(graph.queue_depth("in"), Some(0), "队列应已排空");
+    assert_eq!(
+        graph.queue_depth("in"),
+        Some(0),
+        "the queue should be drained"
+    );
 
     let err = input.send(Packet::new(2i32).at(Timestamp(50))).unwrap_err();
     assert!(
-        err.to_string().contains("递增"),
-        "排空后仍须拒绝回退: {err}"
+        err.to_string().contains("increasing"),
+        "must still reject going backward after drain: {err}"
     );
     let err = input
         .send(Packet::new(3i32).at(Timestamp(100)))
         .unwrap_err();
     assert!(
-        err.to_string().contains("递增"),
-        "排空后仍须拒绝重复: {err}"
+        err.to_string().contains("increasing"),
+        "must still reject duplicates after drain: {err}"
     );
     // 更大的时间戳仍可继续
     input.send(Packet::new(4i32).at(Timestamp(101))).unwrap();
@@ -952,13 +999,13 @@ fn warns_about_unconsumed_ports() {
             let s = unsafe { CStr::from_ptr(msg) }
                 .to_string_lossy()
                 .into_owned();
-            WARNINGS.lock().expect("锁中毒").push(s);
+            WARNINGS.lock().expect("lock poisoned").push(s);
         }
     }
 
     init();
     let _log = log_guard();
-    WARNINGS.lock().expect("锁中毒").clear();
+    WARNINGS.lock().expect("lock poisoned").clear();
     flow_core::ffi::lmflow_set_log_callback(Some(sink), std::ptr::null_mut());
     let _graph = Graph::from_yaml(
         r#"
@@ -970,7 +1017,13 @@ input_ports: ["in", "unused"]
     .unwrap();
     flow_core::ffi::lmflow_set_log_callback(None, std::ptr::null_mut());
 
-    let w = WARNINGS.lock().expect("锁中毒").join("\n");
-    assert!(w.contains("unused"), "未被消费的图输入口应告警: {w}");
-    assert!(w.contains("nowhere"), "产出无人接收的输出口应告警: {w}");
+    let w = WARNINGS.lock().expect("lock poisoned").join("\n");
+    assert!(
+        w.contains("unused"),
+        "an unconsumed graph input port should warn: {w}"
+    );
+    assert!(
+        w.contains("nowhere"),
+        "an output port with no receiver should warn: {w}"
+    );
 }

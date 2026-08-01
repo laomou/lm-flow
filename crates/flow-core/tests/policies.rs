@@ -37,7 +37,10 @@ output_ports: ["out"]
         .send(Packet::from_i64(1i32 as i64).at(Timestamp(0)))
         .unwrap();
     graph.wait_until_idle().unwrap();
-    assert!(poller.try_next().is_none(), "缺一路输入时 sync 不该触发");
+    assert!(
+        poller.try_next().is_none(),
+        "sync should not fire when one input is missing"
+    );
 
     // 补上 B 口:应产出 1+2=3
     graph
@@ -46,7 +49,9 @@ output_ports: ["out"]
         .send(Packet::from_i64(2i32 as i64).at(Timestamp(0)))
         .unwrap();
     graph.wait_until_idle().unwrap();
-    let out = poller.try_next().expect("齐备后应产出");
+    let out = poller
+        .try_next()
+        .expect("should produce once all inputs present");
     assert_eq!(out.as_i64(), Some(3), "1 + 2 = 3");
 
     graph.close_all_inputs();
@@ -84,7 +89,7 @@ output_ports: ["out"]
     let st = graph.node_stats(0).unwrap();
     assert_eq!(
         st.processed, 1,
-        "immediate 策略下单路数据也应触发 Process(sync 则不会)"
+        "under immediate policy a single input should still trigger Process (sync would not)"
     );
 
     graph.close_all_inputs();
@@ -119,11 +124,15 @@ output_ports: ["out"]
     for i in 0..10i32 {
         input.send(Packet::new(i).at(Timestamp(i as i64))).unwrap();
     }
-    assert_eq!(graph.queue_depth("in"), Some(2), "队列不得超过 capacity");
+    assert_eq!(
+        graph.queue_depth("in"),
+        Some(2),
+        "queue must not exceed capacity"
+    );
     assert_eq!(
         graph.dropped_count("in"),
         Some(8),
-        "丢包数必须被记账(绝不静默)"
+        "dropped count must be accounted for (never silent)"
     );
 
     graph.resume();
@@ -133,7 +142,11 @@ output_ports: ["out"]
         got.push(*p.get::<i32>().unwrap());
     }
     // 丢的是**最旧**的,留下的是最新两个
-    assert_eq!(got, vec![8, 9], "应保留最新的包,丢弃最旧的");
+    assert_eq!(
+        got,
+        vec![8, 9],
+        "should keep the newest packets, drop the oldest"
+    );
 
     graph.close_all_inputs();
     let _ = graph.wait_done();
@@ -169,7 +182,7 @@ output_ports: ["out"]
     // 无论消费快慢,队列都不会超过 capacity —— 这正是它存在的意义
     assert!(
         graph.queue_depth("in").unwrap() <= 4,
-        "fixed_size 必须把队列钉在 capacity 以内"
+        "fixed_size must pin the queue within capacity"
     );
 
     graph.close_all_inputs();
@@ -208,7 +221,11 @@ output_ports: ["out"]
     while let Some(p) = poller.try_next() {
         got.push(*p.get::<i32>().unwrap());
     }
-    assert_eq!(got, (0..20).collect::<Vec<_>>(), "绑核不得改变处理结果");
+    assert_eq!(
+        got,
+        (0..20).collect::<Vec<_>>(),
+        "CPU pinning must not change the processing result"
+    );
 }
 
 /// `fixed_size` + **多输入**:每口队列各自有界。丢包会在某口留下时间戳缺口,
@@ -247,11 +264,11 @@ output_ports: ["out"]
     // 必须能终结(不死锁);30s 兜底超时会把死锁暴露成失败而非永久挂住
     graph
         .wait_done_timeout(Duration::from_secs(30))
-        .expect("fixed_size 多输入必须能正常终结,不得死锁");
+        .expect("fixed_size multi-input must terminate normally, no deadlock");
     assert_eq!(
         graph.dropped_count("x"),
         Some(8),
-        "x 口应丢弃最旧的 8 个,可观测"
+        "port x should drop the oldest 8, observably"
     );
 }
 
@@ -283,7 +300,7 @@ input_ports: ["in"]
 "#,
     )
     .unwrap_err();
-    assert!(err.to_string().contains("未知 input_policy"), "{err}");
+    assert!(err.to_string().contains("unknown input_policy"), "{err}");
 }
 
 /// 测试用算子:每次触发时,把「哪些输入口非空」编码成位掩码(bit i = 输入口 i 有包)发出。
@@ -319,7 +336,7 @@ mod port_probe {
             let vt: &'static _ = Box::leak(Box::new(vt));
             let name = std::ffi::CString::new("PortProbe").unwrap();
             let rc = unsafe { lmflow_register_kernel(name.as_ptr(), vt, std::ptr::null_mut()) };
-            assert_eq!(rc, 0, "注册 PortProbe 失败");
+            assert_eq!(rc, 0, "failed to register PortProbe");
         });
     }
 }
@@ -354,22 +371,27 @@ output_ports: ["out"]
     // 只喂 x:{x,y} 组不齐,不该触发
     x.send(Packet::from_i64(1).at(Timestamp(0))).unwrap();
     graph.wait_until_idle().unwrap();
-    assert!(out.try_next().is_none(), "{{x,y}} 组缺 y 时不该触发");
+    assert!(
+        out.try_next().is_none(),
+        "{{x,y}} group should not fire while missing y"
+    );
 
     // 补上 y@0:{x,y} 组齐 → 触发一次,掩码含 x、y(bit0|bit1=3),不含 z
     y.send(Packet::from_i64(2).at(Timestamp(0))).unwrap();
     graph.wait_until_idle().unwrap();
-    let p = out.try_next().expect("{{x,y}} 齐备后应触发");
+    let p = out.try_next().expect("{{x,y}} should fire once complete");
     assert_eq!(p.timestamp().0, 0);
-    assert_eq!(p.as_i64(), Some(0b011), "只应带 x、y 两口,不带 z");
-    assert!(out.try_next().is_none(), "不该有多余输出");
+    assert_eq!(p.as_i64(), Some(0b011), "should carry only x and y, not z");
+    assert!(out.try_next().is_none(), "should have no extra output");
 
     // 喂 z@5:{z} 组独立触发 → 掩码只含 z(bit2=4)
     z.send(Packet::from_i64(9).at(Timestamp(5))).unwrap();
     graph.wait_until_idle().unwrap();
-    let p = out.try_next().expect("{{z}} 组应独立触发");
+    let p = out
+        .try_next()
+        .expect("{{z}} group should fire independently");
     assert_eq!(p.timestamp().0, 5);
-    assert_eq!(p.as_i64(), Some(0b100), "只应带 z 一口");
+    assert_eq!(p.as_i64(), Some(0b100), "should carry only z");
 
     graph.close_all_inputs();
     let _ = graph.wait_done();
@@ -393,7 +415,7 @@ output_ports: ["out"]
 "#,
     )
     .unwrap_err();
-    assert!(err.to_string().contains("覆盖全部输入口"), "{err}");
+    assert!(err.to_string().contains("cover all input ports"), "{err}");
 }
 
 /// SyncSet 配置校验:引用不存在的端口名 → 报错。
@@ -414,5 +436,5 @@ output_ports: ["out"]
 "#,
     )
     .unwrap_err();
-    assert!(err.to_string().contains("不存在的输入口"), "{err}");
+    assert!(err.to_string().contains("nonexistent input port"), "{err}");
 }

@@ -63,15 +63,23 @@ fn foreign_payloads_are_released_exactly_once() {
 
         for i in 0..20i32 {
             input.send(tracked_packet(i, i as i64)).unwrap();
-            let p = poller.next().expect("应有输出");
+            let p = poller.next().expect("should have output");
             drop(p); // 宿主用完即释放
         }
-        assert_eq!(ALIVE.load(Ordering::SeqCst), base, "取走并释放后不应有残留");
+        assert_eq!(
+            ALIVE.load(Ordering::SeqCst),
+            base,
+            "no residue after taking and releasing"
+        );
 
         graph.close_all_inputs();
         graph.wait_done().unwrap();
     }
-    assert_eq!(ALIVE.load(Ordering::SeqCst), base, "图销毁后必须全部归还");
+    assert_eq!(
+        ALIVE.load(Ordering::SeqCst),
+        base,
+        "all must be returned after the graph is destroyed"
+    );
 }
 
 #[test]
@@ -86,14 +94,14 @@ fn packets_left_in_queues_are_released_on_graph_drop() {
         }
         assert!(
             ALIVE.load(Ordering::SeqCst) > base,
-            "此刻应有在途包(否则本测试没测到东西)"
+            "there should be in-flight packets now (otherwise this test checks nothing)"
         );
         // 直接丢弃图,不排空 —— 这是最容易漏释放的路径
     }
     assert_eq!(
         ALIVE.load(Ordering::SeqCst),
         base,
-        "未排空就销毁图,在途包也必须释放"
+        "destroying the graph without draining must still release in-flight packets"
     );
 }
 
@@ -119,12 +127,12 @@ output_ports: ["out"]
             .send(tracked_packet(1, 0))
             .unwrap();
         graph.close_all_inputs();
-        assert!(graph.wait_done().is_err(), "类型不符应报错");
+        assert!(graph.wait_done().is_err(), "type mismatch should error");
     }
     assert_eq!(
         ALIVE.load(Ordering::SeqCst),
         base,
-        "失败路径同样不得泄漏(staging 被丢弃时包必须释放)"
+        "the failure path must not leak either (packets must be released when staging is discarded)"
     );
 }
 
@@ -141,7 +149,11 @@ fn cancel_path_releases_everything() {
         graph.cancel();
         let _ = graph.wait_done();
     }
-    assert_eq!(ALIVE.load(Ordering::SeqCst), base, "取消后也必须全部归还");
+    assert_eq!(
+        ALIVE.load(Ordering::SeqCst),
+        base,
+        "all must be returned after cancellation as well"
+    );
 }
 
 /// **被拒的 send 也必须释放 payload**。send 把包按值收下,任何错误路径(口已关、
@@ -158,26 +170,26 @@ fn rejected_send_releases_the_packet() {
         // (1) 时间戳非单调:先送 ts=5(收下),再送 ts=3(必拒)。
         input.send(tracked_packet(0, 5)).unwrap();
         let after_accept = ALIVE.load(Ordering::SeqCst);
-        assert!(after_accept > base, "第一个包应在途");
+        assert!(after_accept > base, "the first packet should be in flight");
         let r = input.send(tracked_packet(1, 3));
-        assert!(r.is_err(), "时间戳回退必被拒");
+        assert!(r.is_err(), "a backward timestamp must be rejected");
         assert_eq!(
             ALIVE.load(Ordering::SeqCst),
             after_accept,
-            "被拒的包必须立刻释放,不能叠加到在途计数上"
+            "a rejected packet must be released immediately, not added to the in-flight count"
         );
 
         // (2) 往已关闭的输入口发送:必拒,且释放。
         input.close();
         let r = input.send(tracked_packet(2, 6));
-        assert!(r.is_err(), "往已关闭的口发送必被拒");
+        assert!(r.is_err(), "sending to a closed port must be rejected");
 
         let _ = graph.wait_done();
     }
     assert_eq!(
         ALIVE.load(Ordering::SeqCst),
         base,
-        "所有包(含被拒的)最终都必须归还"
+        "all packets (including rejected ones) must ultimately be returned"
     );
 }
 
@@ -216,7 +228,7 @@ fn cancel_with_pool_max_in_flight_releases_all() {
     assert_eq!(
         ALIVE.load(Ordering::SeqCst),
         base,
-        "并行 in-flight 下取消,所有槽的输入都必须归还"
+        "on cancel with parallel in-flight, every slot's input must be returned"
     );
 }
 
@@ -236,7 +248,7 @@ fn drop_undrained_pool_max_in_flight_releases_all() {
     assert_eq!(
         ALIVE.load(Ordering::SeqCst),
         base,
-        "并行 in-flight 下直接销毁图,所有槽的输入都必须归还"
+        "on destroying the graph with parallel in-flight, every slot's input must be returned"
     );
 }
 
@@ -257,17 +269,17 @@ fn steady_state_pool_max_in_flight_no_accumulation() {
     while poller.try_next().is_some() {
         n += 1;
     }
-    assert_eq!(n, 300, "并行下仍须无丢无重");
+    assert_eq!(n, 300, "still no loss and no duplication under parallelism");
     assert_eq!(
         graph.inner().shared.total_queued(),
         0,
-        "稳态下不应有残留在途包"
+        "no residual in-flight packets in steady state"
     );
     drop(graph);
     assert_eq!(
         ALIVE.load(Ordering::SeqCst),
         base,
-        "并行 300 帧之后不应残留任何 payload"
+        "no payload should remain after 300 parallel frames"
     );
 }
 
@@ -284,7 +296,7 @@ fn side_packet_payload_released_exactly_once() {
             .unwrap();
         assert!(
             ALIVE.load(Ordering::SeqCst) > base,
-            "注入后 side packet 应在途"
+            "the side packet should be in flight after injection"
         );
         graph.start().unwrap(); // 这里把它 clone 进各 context
         graph.close_all_inputs();
@@ -293,7 +305,7 @@ fn side_packet_payload_released_exactly_once() {
     assert_eq!(
         ALIVE.load(Ordering::SeqCst),
         base,
-        "side packet 的 payload 必须恰好释放一次(不漏不重)"
+        "the side packet payload must be released exactly once (no leak, no double-free)"
     );
 }
 
@@ -311,7 +323,7 @@ fn buffer_packet(len: usize, ts: i64) -> (Packet, usize) {
 fn buffer_addr(p: &Packet) -> usize {
     match p.as_builtin() {
         Some(Builtin::Buffer(b)) => b.bytes.as_ptr() as usize,
-        _ => panic!("不是缓冲包"),
+        _ => panic!("not a buffer packet"),
     }
 }
 
@@ -341,18 +353,18 @@ output_ports: ["out"]
 
     let (pkt, addr_in) = buffer_packet(8, 0);
     graph.input("in").unwrap().send(pkt).unwrap();
-    let out = poller.next().expect("应有输出");
+    let out = poller.next().expect("should have output");
 
     assert_eq!(
         buffer_addr(&out),
         addr_in,
-        "线性管线上 InvertKernel 的就地改写不应发生任何拷贝 —— \
-         若此断言失败,通常意味着引擎在投递后多留了一份引用(见 docs/design.md §3.4)"
+        "in-place mutation by InvertKernel on a linear pipeline should incur no copy -- \
+         if this assertion fails, it usually means the engine kept an extra reference after dispatch (see docs/design.md §3.4)"
     );
     // 内容确实被改写了(0x00 取反 = 0xFF)
     match out.as_builtin() {
-        Some(Builtin::Buffer(b)) => assert_eq!(b.bytes[0], 0xFF, "应已就地取反"),
-        _ => panic!("不是缓冲包"),
+        Some(Builtin::Buffer(b)) => assert_eq!(b.bytes[0], 0xFF, "should be inverted in place"),
+        _ => panic!("not a buffer packet"),
     }
 
     graph.close_all_inputs();
@@ -383,25 +395,25 @@ output_ports: ["oa", "ob"]
     graph.close_all_inputs();
     graph.wait_done().unwrap();
 
-    let inverted = pa.try_next().expect("分支 a");
-    let untouched = pb.try_next().expect("分支 b");
+    let inverted = pa.try_next().expect("branch a");
+    let untouched = pb.try_next().expect("branch b");
 
     assert_ne!(
         buffer_addr(&inverted),
         addr_in,
-        "被共享时就地改写必须先复制"
+        "in-place mutation while shared must copy first"
     );
     assert_eq!(
         buffer_addr(&untouched),
         addr_in,
-        "未改写的分支应仍指向原缓冲(零拷贝)"
+        "the unmodified branch should still point to the original buffer (zero-copy)"
     );
     match (inverted.as_builtin(), untouched.as_builtin()) {
         (Some(Builtin::Buffer(x)), Some(Builtin::Buffer(y))) => {
-            assert_eq!(x.bytes[0], 0xFF, "a 分支应已取反");
-            assert_eq!(y.bytes[0], 0x00, "b 分支不得被污染");
+            assert_eq!(x.bytes[0], 0xFF, "branch a should be inverted");
+            assert_eq!(y.bytes[0], 0x00, "branch b must not be polluted");
         }
-        _ => panic!("不是缓冲包"),
+        _ => panic!("not a buffer packet"),
     }
 }
 
@@ -417,13 +429,13 @@ fn steady_state_has_no_accumulation() {
 
     for i in 0..200i32 {
         input.send(tracked_packet(i, i as i64)).unwrap();
-        drop(poller.next().expect("应有输出"));
+        drop(poller.next().expect("should have output"));
     }
     // 稳态下在途包数应回到 0,而不是随轮次线性增长
     assert_eq!(
         graph.inner().shared.total_queued(),
         0,
-        "稳态下不应有残留在途包"
+        "no residual in-flight packets in steady state"
     );
     graph.close_all_inputs();
     graph.wait_done().unwrap();
@@ -431,6 +443,6 @@ fn steady_state_has_no_accumulation() {
     assert_eq!(
         ALIVE.load(Ordering::SeqCst),
         base,
-        "200 轮之后不应残留任何 payload"
+        "no payload should remain after 200 rounds"
     );
 }

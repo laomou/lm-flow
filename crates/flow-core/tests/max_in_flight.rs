@@ -64,7 +64,7 @@ mod reverse_sleep_kernel {
             let rc = unsafe {
                 flow_core::ffi::lmflow_register_kernel(name.as_ptr(), vt, std::ptr::null_mut())
             };
-            assert_eq!(rc, 0, "注册 ReverseSleep 失败");
+            assert_eq!(rc, 0, "failed to register ReverseSleep");
         });
     }
 }
@@ -114,7 +114,7 @@ output_ports: ["out"]
     assert_eq!(
         got,
         (0..6).map(|i| (i as i64, i)).collect::<Vec<_>>(),
-        "即使后面的时间戳先算完,下游也必须按时间戳单调"
+        "even if later timestamps finish first, downstream must stay timestamp-monotonic"
     );
 }
 
@@ -161,7 +161,7 @@ output_ports: ["out"]
     let peak = reverse_sleep_kernel::MAX_CONCURRENCY.load(Ordering::SeqCst);
     assert!(
         peak >= 2,
-        "必须观察到并发执行(≥2 个调用同时在 process),峰值并发={peak}"
+        "must observe concurrent execution (>=2 calls in process at once), peak concurrency={peak}"
     );
 
     graph.close_all_inputs();
@@ -200,7 +200,7 @@ output_ports: ["out"]
     assert_eq!(
         reverse_sleep_kernel::MAX_CONCURRENCY.load(Ordering::SeqCst),
         1,
-        "默认 max_in_flight=1 时同一节点绝不并发"
+        "with default max_in_flight=1 the same node never runs concurrently"
     );
 }
 
@@ -256,7 +256,7 @@ mod reverse_sleep2_kernel {
             let rc = unsafe {
                 flow_core::ffi::lmflow_register_kernel(name.as_ptr(), vt, std::ptr::null_mut())
             };
-            assert_eq!(rc, 0, "注册 ReverseSleep2 失败");
+            assert_eq!(rc, 0, "failed to register ReverseSleep2");
         });
     }
 }
@@ -307,6 +307,6 @@ output_ports: ["out"]
     assert_eq!(
         got,
         (0..6).map(|i| (i as i64, i)).collect::<Vec<_>>(),
-        "多输入并行下:须按时间戳配对、每时刻一个、且单调"
+        "multi-input under parallelism: must pair by timestamp, one per timestamp, and monotonic"
     );
 }

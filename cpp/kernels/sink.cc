@@ -12,7 +12,7 @@ class SinkKernel : public lmflow::Kernel {
   lmflow::Status Process(lmflow::Context& cc) override {
     // 走引擎日志而非 printf:库不该抢占宿主的 stdout
     char buf[64];
-    snprintf(buf, sizeof(buf), "收到包 @ ts=%lld",
+    snprintf(buf, sizeof(buf), "received packet @ ts=%lld",
              static_cast<long long>(cc.InputTimestamp()));
     cc.Log(LMFLOW_LOG_DEBUG, buf);
     cc.CounterAdd("sink.packets");
@@ -21,7 +21,7 @@ class SinkKernel : public lmflow::Kernel {
   }
   lmflow::Status Close(lmflow::Context& cc) override {
     char buf[64];
-    snprintf(buf, sizeof(buf), "共处理 %lld 个包", static_cast<long long>(count_));
+    snprintf(buf, sizeof(buf), "processed %lld packets in total", static_cast<long long>(count_));
     cc.LogInfo(buf);
     // 计数器是**按图**的,比全局日志更适合被测试断言
     cc.CounterAdd("sink.closed");

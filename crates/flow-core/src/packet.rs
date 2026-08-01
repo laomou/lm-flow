@@ -92,7 +92,7 @@ pub fn register_type_name(id: u64, name: &str) {
 /// 类型标识的可读名字 —— 让「类型不符」的报错能指出是什么类型,而不是两个数字。
 pub fn type_name(id: u64) -> String {
     match id {
-        type_id::NONE => "任意/未声明".to_string(),
+        type_id::NONE => "any/undeclared".to_string(),
         type_id::BYTES => "Bytes".to_string(),
         type_id::I64 => "I64".to_string(),
         type_id::F64 => "F64".to_string(),
@@ -124,26 +124,26 @@ impl BufferData {
     pub fn new(shape: &[i64], dt: i32) -> Result<Self> {
         if shape.is_empty() || shape.len() > MAX_DIMS {
             return Err(Error::InvalidArg(format!(
-                "ndim 必须在 1..={MAX_DIMS},实际 {}",
+                "ndim must be in 1..={MAX_DIMS}, got {}",
                 shape.len()
             )));
         }
         let esz = dtype_size(dt);
         if esz == 0 {
-            return Err(Error::InvalidArg(format!("未知 dtype {dt}")));
+            return Err(Error::InvalidArg(format!("unknown dtype {dt}")));
         }
         let mut count: i64 = 1;
         for &d in shape {
             if d < 0 {
-                return Err(Error::InvalidArg("shape 不得为负".into()));
+                return Err(Error::InvalidArg("shape must not be negative".into()));
             }
             count = count
                 .checked_mul(d)
-                .ok_or_else(|| Error::InvalidArg("shape 相乘溢出".into()))?;
+                .ok_or_else(|| Error::InvalidArg("shape product overflow".into()))?;
         }
         let total = (count as usize)
             .checked_mul(esz)
-            .ok_or_else(|| Error::InvalidArg("缓冲字节数溢出".into()))?;
+            .ok_or_else(|| Error::InvalidArg("buffer byte count overflow".into()))?;
 
         let mut s = [0i64; MAX_DIMS];
         let mut st = [0i64; MAX_DIMS];
@@ -476,10 +476,9 @@ impl Packet {
     /// 独占(引用数 1)→ 原地返回,**零拷贝**;被共享 → 复制一份后返回副本的可写引用。
     /// 仅支持内建 payload:`Native`/`Foreign` 引擎无从复制。
     pub fn make_mutable_builtin(&mut self) -> Result<&mut Builtin> {
-        let arc = self
-            .data
-            .as_mut()
-            .ok_or_else(|| Error::InvalidArg("空包无法取可写视图".into()))?;
+        let arc = self.data.as_mut().ok_or_else(|| {
+            Error::InvalidArg("cannot get a writable view of an empty packet".into())
+        })?;
 
         if Arc::get_mut(arc).is_none() {
             // 被共享:只有内建 payload 能复制
@@ -487,16 +486,18 @@ impl Packet {
                 Payload::Builtin(b) => Payload::Builtin(b.clone()),
                 _ => {
                     return Err(Error::InvalidArg(
-                        "自定义 payload 无法由引擎复制(仅内建类型支持 CoW)".into(),
+                        "custom payload cannot be copied by the engine (only builtin types support CoW)".into(),
                     ))
                 }
             };
             *arc = Arc::new(copy);
         }
         // 此处必然独占
-        match Arc::get_mut(arc).expect("刚刚保证了独占") {
+        match Arc::get_mut(arc).expect("just guaranteed exclusive") {
             Payload::Builtin(b) => Ok(b),
-            _ => Err(Error::InvalidArg("该包不是内建 payload,不支持 CoW".into())),
+            _ => Err(Error::InvalidArg(
+                "this packet is not a builtin payload; CoW not supported".into(),
+            )),
         }
     }
 
@@ -541,7 +542,11 @@ mod tests {
     fn native_roundtrip() {
         let p = Packet::new(42i32).at(Timestamp(7));
         assert_eq!(p.get::<i32>(), Some(&42));
-        assert_eq!(p.get::<i64>(), None, "类型不符必须返回 None,不得 UB");
+        assert_eq!(
+            p.get::<i64>(),
+            None,
+            "type mismatch must return None, not UB"
+        );
         assert_eq!(p.timestamp(), Timestamp(7));
         assert!(!p.is_empty());
     }
@@ -575,7 +580,10 @@ mod tests {
         let before = p.payload().unwrap() as *const Payload;
         p.make_mutable_builtin().unwrap();
         let after = p.payload().unwrap() as *const Payload;
-        assert!(std::ptr::eq(before, after), "独占时不应发生复制");
+        assert!(
+            std::ptr::eq(before, after),
+            "no copy should happen when exclusive"
+        );
     }
 
     #[test]
@@ -589,7 +597,7 @@ mod tests {
             _ => unreachable!(),
         }
         // b 改到了副本上;a 不受影响 —— 这正是「扇出后就地改写不污染其它分支」
-        assert_eq!(a.ref_count(), 1, "复制后 a 应重回独占");
+        assert_eq!(a.ref_count(), 1, "a should be exclusive again after copy");
         match a.as_builtin().unwrap() {
             Builtin::Buffer(buf) => assert_eq!(buf.bytes[0], 0),
             _ => unreachable!(),
@@ -605,7 +613,7 @@ mod tests {
         let mut p = Packet::new(1u8);
         assert!(
             p.make_mutable_builtin().is_err(),
-            "自定义 payload 无从复制,必须报错而不是悄悄失败"
+            "custom payload cannot be copied; must error rather than silently fail"
         );
     }
 
@@ -621,18 +629,21 @@ mod tests {
 
     #[test]
     fn buffer_rejects_bad_args() {
-        assert!(BufferData::new(&[], dtype::U8).is_err(), "ndim 0 非法");
+        assert!(
+            BufferData::new(&[], dtype::U8).is_err(),
+            "ndim 0 is invalid"
+        );
         assert!(
             BufferData::new(&[1, 2, 3, 4, 5, 6, 7, 8, 9], dtype::U8).is_err(),
-            "超过 MAX_DIMS 必须拒绝"
+            "must reject exceeding MAX_DIMS"
         );
         assert!(
             BufferData::new(&[2, 2], 999).is_err(),
-            "未知 dtype 必须拒绝"
+            "must reject unknown dtype"
         );
         assert!(
             BufferData::new(&[-1], dtype::U8).is_err(),
-            "负 shape 必须拒绝"
+            "must reject negative shape"
         );
     }
 
@@ -642,7 +653,7 @@ mod tests {
         assert_eq!(dtype_size(dtype::F16), 2);
         assert_eq!(dtype_size(dtype::F32), 4);
         assert_eq!(dtype_size(dtype::F64), 8);
-        assert_eq!(dtype_size(12345), 0, "未知 dtype 返回 0");
+        assert_eq!(dtype_size(12345), 0, "unknown dtype returns 0");
     }
 
     #[test]
@@ -658,9 +669,17 @@ mod tests {
             let p = unsafe { Packet::from_foreign(raw, 99, Some(drop_it)) };
             let q = p.clone();
             assert_eq!(q.type_id(), 99);
-            assert_eq!(CALLS.load(Ordering::SeqCst), 0, "还有引用时不得释放");
+            assert_eq!(
+                CALLS.load(Ordering::SeqCst),
+                0,
+                "must not free while references remain"
+            );
         }
-        assert_eq!(CALLS.load(Ordering::SeqCst), 1, "引用归零时恰好释放一次");
+        assert_eq!(
+            CALLS.load(Ordering::SeqCst),
+            1,
+            "must free exactly once when refcount hits zero"
+        );
     }
 
     #[test]
@@ -669,7 +688,10 @@ mod tests {
         // 这两个期望值取自实际编译 flow.hpp 后的输出(见提交说明)。
         assert_eq!(fnv1a_type_id("i"), 12638195996648667684);
         assert_eq!(fnv1a_type_id("d"), 12638183902020757363);
-        assert!(fnv1a_type_id("") >= 16, "空名字也必须避开内建区");
+        assert!(
+            fnv1a_type_id("") >= 16,
+            "empty name must also avoid the builtin range"
+        );
     }
 
     #[test]
@@ -678,7 +700,7 @@ mod tests {
         let p = Packet::new_interop(7i32, tid);
         assert_eq!(p.type_id(), tid);
         // 以 Foreign 形态承载,故指针可读、C 布局兼容
-        let ptr = p.foreign_ptr().expect("应可取到数据指针");
+        let ptr = p.foreign_ptr().expect("should get a data pointer");
         assert_eq!(unsafe { *(ptr as *const i32) }, 7);
     }
 
@@ -700,7 +722,7 @@ mod tests {
         ))
         .at(Timestamp(42));
         let s = p.debug_string();
-        assert!(s.contains("3x224x224"), "应含形状: {s}");
-        assert!(s.contains("42"), "应含时间戳: {s}");
+        assert!(s.contains("3x224x224"), "should contain shape: {s}");
+        assert!(s.contains("42"), "should contain timestamp: {s}");
     }
 }

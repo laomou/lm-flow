@@ -52,7 +52,7 @@ fn abi_version_and_handshake() {
     assert_eq!(
         lmflow_abi_version(),
         1,
-        "与 include/flow.h 的 LMFLOW_ABI_VERSION 一致"
+        "matches LMFLOW_ABI_VERSION in include/flow.h"
     );
 }
 
@@ -68,26 +68,26 @@ fn full_pipeline_through_c_abi() {
         assert_eq!(
             lmflow_graph_init_from_yaml(g, yaml.as_ptr()),
             0,
-            "init 失败: {}",
+            "init failed: {}",
             last_error()
         );
 
         let port_out = cs("out");
         let poller = lmflow_graph_add_poller(g, port_out.as_ptr());
-        assert!(!poller.is_null(), "add_poller 失败: {}", last_error());
+        assert!(!poller.is_null(), "add_poller failed: {}", last_error());
 
-        assert_eq!(lmflow_graph_start(g), 0, "start 失败: {}", last_error());
-        assert_eq!(lmflow_graph_state(g), 2, "start 后应为 Running(2)");
+        assert_eq!(lmflow_graph_start(g), 0, "start failed: {}", last_error());
+        assert_eq!(lmflow_graph_state(g), 2, "should be Running(2) after start");
 
         let port_in = cs("in");
         let input = lmflow_graph_input(g, port_in.as_ptr());
-        assert!(!input.is_null(), "graph_input 失败: {}", last_error());
+        assert!(!input.is_null(), "graph_input failed: {}", last_error());
 
         for i in 0..5i32 {
             assert_eq!(
                 lmflow_input_send(input, make_int_packet(i, i as i64)),
                 0,
-                "send 失败: {}",
+                "send failed: {}",
                 last_error()
             );
             let mut out = LMFlowPacket {
@@ -97,13 +97,20 @@ fn full_pipeline_through_c_abi() {
                 owner: std::ptr::null_mut(),
                 drop_fn: None,
             };
-            assert!(lmflow_poller_next(poller, &mut out), "第 {i} 个包应能取到");
+            assert!(
+                lmflow_poller_next(poller, &mut out),
+                "packet #{i} should be retrievable"
+            );
             assert!(!out.payload.is_null());
-            assert_eq!(*(out.payload as *const i32), i, "值应原样穿过管线");
+            assert_eq!(
+                *(out.payload as *const i32),
+                i,
+                "value should pass through the pipeline unchanged"
+            );
             assert_eq!(out.timestamp, i as i64);
             // 语义 3:poller 移交所有权,调用方必须释放
             lmflow_packet_drop(&mut out);
-            assert!(out.payload.is_null(), "drop 后字段应被清零");
+            assert!(out.payload.is_null(), "fields should be zeroed after drop");
             lmflow_packet_drop(&mut out); // 重复调用必须安全
         }
 
@@ -111,10 +118,14 @@ fn full_pipeline_through_c_abi() {
         assert_eq!(
             lmflow_graph_wait_done(g),
             0,
-            "wait_done 失败: {}",
+            "wait_done failed: {}",
             last_error()
         );
-        assert_eq!(lmflow_graph_state(g), 4, "结束后应为 Terminated(4)");
+        assert_eq!(
+            lmflow_graph_state(g),
+            4,
+            "should be Terminated(4) after finishing"
+        );
 
         lmflow_input_free(input);
         lmflow_poller_free(poller);
@@ -136,7 +147,7 @@ fn builtin_packet_types_roundtrip() {
         let mut d = 0f64;
         assert!(
             !lmflow_packet_as_f64(&p, &mut d),
-            "I64 包不该被当成 F64 读出"
+            "an I64 packet should not be read as F64"
         );
         lmflow_packet_drop(&mut p);
 
@@ -175,7 +186,7 @@ fn buffer_alloc_view_and_cow() {
         let shape = [2i64, 3, 4];
         let mut buf = LMFlowBuffer::default();
         let mut p = lmflow_packet_new_buffer(3, shape.as_ptr(), 7 /*F32*/, 0, &mut buf);
-        assert!(!p.payload.is_null(), "分配失败: {}", last_error());
+        assert!(!p.payload.is_null(), "allocation failed: {}", last_error());
         assert_eq!(p.type_id, 6, "LMFLOW_TYPE_BUFFER");
         assert_eq!(buf.ndim, 3);
         assert_eq!(&buf.shape[..3], &[2, 3, 4]);
@@ -190,13 +201,17 @@ fn buffer_alloc_view_and_cow() {
         let mut view = LMFlowBuffer::default();
         assert!(lmflow_packet_as_buffer(&p, &mut view));
         assert_eq!(*(view.data as *const f32), 1.25);
-        assert_eq!(view.flags & 1, 1, "as_buffer 取得的视图应标记 READONLY");
+        assert_eq!(
+            view.flags & 1,
+            1,
+            "the view from as_buffer should be marked READONLY"
+        );
 
         // CoW:独占时零拷贝(指针不变)
         let before = buf.data;
         let mut m = LMFlowBuffer::default();
         assert_eq!(lmflow_packet_make_mutable_buffer(&mut p, &mut m), 0);
-        assert_eq!(m.data, before, "独占时 CoW 不应复制");
+        assert_eq!(m.data, before, "CoW should not copy when exclusive");
 
         lmflow_packet_drop(&mut p);
     }
@@ -213,14 +228,21 @@ fn cow_copies_when_shared() {
         // 显式再持一份引用 → 共享
         let mut p2 = lmflow_packet_clone(&p1);
         assert!(!p2.owner.is_null());
-        assert_eq!(p2.payload, p1.payload, "clone 只增引用,不复制数据");
+        assert_eq!(
+            p2.payload, p1.payload,
+            "clone only bumps the refcount, does not copy data"
+        );
 
         // 此时 make_mutable 必须复制,且不污染另一份
         let mut m = LMFlowBuffer::default();
         assert_eq!(lmflow_packet_make_mutable_buffer(&mut p2, &mut m), 0);
-        assert_ne!(m.data, b.data, "被共享时 CoW 必须复制");
+        assert_ne!(m.data, b.data, "CoW must copy when shared");
         *(m.data as *mut u8) = 0x22;
-        assert_eq!(*(b.data as *const u8), 0x11, "原分支不得被污染");
+        assert_eq!(
+            *(b.data as *const u8),
+            0x11,
+            "the original branch must not be polluted"
+        );
 
         lmflow_packet_drop(&mut p1);
         lmflow_packet_drop(&mut p2);
@@ -260,7 +282,7 @@ fn from_buffer_handles_non_contiguous_strides() {
         assert_eq!(
             out,
             &[0, 3, 1, 4, 2, 5],
-            "转置(非连续)strides 必须按元素正确展平,而不是整行错拷"
+            "transposed (non-contiguous) strides must be flattened element-by-element correctly, not mis-copied row by row"
         );
         lmflow_packet_drop(&mut p);
     }
@@ -275,7 +297,7 @@ fn make_mutable_rejects_borrowed_packet() {
         assert_ne!(
             lmflow_packet_make_mutable_buffer(&mut p, &mut m),
             0,
-            "自建包应被拒绝并给出可读原因"
+            "a self-built packet should be rejected with a readable reason"
         );
         assert!(last_error().contains("owner"), "{}", last_error());
         lmflow_packet_drop(&mut p);
@@ -331,7 +353,10 @@ fn handles_stay_safe_after_graph_free() {
 
         // 往已结束的图发送:必须安全地返回错误(而不是崩溃/挂死)
         let rc = lmflow_input_send(input, make_int_packet(1, 0));
-        assert_ne!(rc, 0, "图已结束,send 应报错而不是 UAF");
+        assert_ne!(
+            rc, 0,
+            "graph has finished, send should error rather than UAF"
+        );
 
         // poller 取包也安全:图已结束,返回 false
         let mut out = LMFlowPacket {
@@ -343,7 +368,7 @@ fn handles_stay_safe_after_graph_free() {
         };
         assert!(
             !lmflow_poller_next(poller, &mut out),
-            "已结束的图 poller 应返回 false"
+            "a finished graph's poller should return false"
         );
 
         // 归还句柄(此刻才真正释放引擎)
@@ -358,12 +383,12 @@ fn errors_are_reported_with_readable_text() {
         let g = lmflow_graph_new();
         // 未 init 就 start
         assert_ne!(lmflow_graph_start(g), 0);
-        assert!(last_error().contains("初始化"), "{}", last_error());
+        assert!(last_error().contains("initialized"), "{}", last_error());
 
         // 坏 YAML
         let bad = cs("nodes: [ { kernel: X, typo: 1 } ]");
         assert_ne!(lmflow_graph_init_from_yaml(g, bad.as_ptr()), 0);
-        assert!(!last_error().is_empty(), "必须给出可读原因");
+        assert!(!last_error().is_empty(), "must give a readable reason");
 
         lmflow_graph_free(g);
     }
@@ -376,8 +401,11 @@ fn unsupported_config_is_rejected_not_ignored() {
         // 子图(node 的 type 字段)尚未实现 —— 必须报 UNSUPPORTED,而不是静默忽略
         let y = cs("nodes: [ { kernel: PassThroughKernel, type: SomeSubgraph } ]");
         let rc = lmflow_graph_init_from_yaml(g, y.as_ptr());
-        assert_eq!(rc, 10, "应为 LMFLOW_ERR_UNSUPPORTED,而不是静默忽略");
-        assert!(last_error().contains("子图"), "{}", last_error());
+        assert_eq!(
+            rc, 10,
+            "should be LMFLOW_ERR_UNSUPPORTED, not silently ignored"
+        );
+        assert!(last_error().contains("subgraph"), "{}", last_error());
         lmflow_graph_free(g);
     }
 }
@@ -434,7 +462,7 @@ fn introspection_through_c_abi() {
         };
         assert!(
             !lmflow_graph_node_stats(g, 0, &mut st),
-            "struct_size 过小应被拒"
+            "struct_size too small should be rejected"
         );
         st.struct_size = std::mem::size_of::<LMFlowNodeStats>() as u32;
         assert!(lmflow_graph_node_stats(g, 0, &mut st));
@@ -456,7 +484,7 @@ fn observer_receives_packets() {
     unsafe extern "C" fn on_packet(_user: *mut c_void, pkt: LMFlowPacket) {
         if !pkt.payload.is_null() {
             let v = unsafe { *(pkt.payload as *const i32) };
-            SEEN.lock().expect("锁中毒").push(v);
+            SEEN.lock().expect("lock poisoned").push(v);
         }
     }
 
@@ -485,9 +513,9 @@ fn observer_receives_packets() {
         lmflow_graph_close_all_inputs(g);
         assert_eq!(lmflow_graph_wait_done(g), 0);
         assert_eq!(
-            *SEEN.lock().expect("锁中毒"),
+            *SEEN.lock().expect("lock poisoned"),
             vec![0, 10, 20],
-            "observer 应按序收到每个包"
+            "observer should receive each packet in order"
         );
         lmflow_input_free(input);
         lmflow_graph_free(g);
@@ -522,12 +550,15 @@ output_ports: ["out"]
         bad.type_id = 999;
         let _ = lmflow_input_send(input, bad);
         let _ = lmflow_graph_wait_until_idle(g);
-        assert!(COUNT.load(Ordering::SeqCst) > 0, "错误应经日志回调透出");
+        assert!(
+            COUNT.load(Ordering::SeqCst) > 0,
+            "errors should surface through the log callback"
+        );
         // 图级错误文本必须能拿到(lmflow_last_error 是线程局部的,拿不到工作线程的)
         let ge = CStr::from_ptr(lmflow_graph_last_error(g))
             .to_string_lossy()
             .into_owned();
-        assert!(ge.contains("类型不符"), "图级错误: {ge}");
+        assert!(ge.contains("type mismatch"), "graph-level error: {ge}");
         lmflow_input_free(input);
         lmflow_graph_free(g);
         lmflow_set_log_callback(None, std::ptr::null_mut());

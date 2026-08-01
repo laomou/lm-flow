@@ -50,7 +50,7 @@ try:
     from . import _lmflow as _native
 except ImportError as exc:  # pragma: no cover
     raise ImportError(
-        "lmflow 的原生扩展未构建。请运行 `python python/build.py`(或 pip install -e .)。"
+        "lmflow native extension is not built. Run `python python/build.py` (or pip install -e .)."
     ) from exc
 
 __all__ = [
@@ -138,7 +138,7 @@ class Kernel:
     def process(self, cc: Context) -> None:
         """每个数据包调用一次。必须实现。"""
         raise NotImplementedError(
-            f"{type(self).__name__} 必须实现 process(self, cc)"
+            f"{type(self).__name__} must implement process(self, cc)"
         )
 
     def close(self, cc: Context) -> None:
@@ -154,7 +154,7 @@ def kernel(name: str) -> Callable[[type], type]:
 
     def decorator(cls: type) -> type:
         if not issubclass(cls, Kernel):
-            raise TypeError(f"{cls.__name__} 必须继承 lmflow.Kernel")
+            raise TypeError(f"{cls.__name__} must subclass lmflow.Kernel")
         _native.register_kernel(name, cls)
         return cls
 
@@ -184,7 +184,7 @@ def register_cv_test_kernels() -> None:
     """测试专用:注册 CV 算子 ``CvInvertTest``。仅当扩展带 ``--with-cv-test`` 构建时可用。"""
     fn = getattr(_native, "register_cv_test_kernels", None)
     if fn is None:
-        raise RuntimeError("扩展未带 CV 测试算子构建。请用:python python/build.py --with-cv-test")
+        raise RuntimeError("extension was not built with CV test kernels. Use: python python/build.py --with-cv-test")
     fn()
 
 
@@ -369,4 +369,4 @@ ABI_VERSION = _native.ABI_VERSION
 __version__ = "0.1.0"
 
 if sys.version_info < (3, 8):  # pragma: no cover
-    raise RuntimeError("lmflow 需要 Python 3.8+")
+    raise RuntimeError("lmflow requires Python 3.8+")

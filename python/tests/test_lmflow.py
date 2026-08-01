@@ -69,7 +69,7 @@ class TSlow(lmflow.Kernel):
 @lmflow.kernel("TBoom")
 class TBoom(lmflow.Kernel):
     def process(self, cc):
-        raise ValueError("算子内部故意抛异常")
+        raise ValueError("kernel deliberately raised an exception")
 
 
 @lmflow.kernel("TNeedsOption")
@@ -176,8 +176,8 @@ output_ports: [out]
 
     def test_registered_kernels_includes_both_languages(self):
         names = lmflow.registered_kernels()
-        self.assertIn("PassThroughKernel", names, "C++ 内置算子")
-        self.assertIn("TDouble", names, "Python 算子")
+        self.assertIn("PassThroughKernel", names, "C++ built-in kernel")
+        self.assertIn("TDouble", names, "Python kernel")
 
 
 # ---------------------------------------------------------------- numpy
@@ -206,7 +206,7 @@ class TestNumpy(unittest.TestCase):
             buf[:] = [1.5, 2.0, -3.25, 0.0]
             g.input("in").send(pkt, ts=0)
             arr = out.next(timeout=5.0).as_numpy()
-            self.assertEqual(arr.dtype, np.float16, "dtype 必须原样保持 float16")
+            self.assertEqual(arr.dtype, np.float16, "dtype must be preserved as float16")
             self.assertEqual(arr.tolist(), [1.5, 2.0, -3.25, 0.0])
             g.close_all_inputs()
             g.wait_done(timeout=5.0)
@@ -227,7 +227,7 @@ class TestNumpy(unittest.TestCase):
                 g.start()
                 g.input("in").send(view, ts=0)
                 got = out.next(timeout=5.0).as_numpy()
-                self.assertTrue(np.array_equal(got, view), f"{name} 非连续数组必须原样拷进引擎")
+                self.assertTrue(np.array_equal(got, view), f"{name} non-contiguous array must be copied into the engine as-is")
                 g.close_all_inputs()
                 g.wait_done(timeout=5.0)
 
@@ -240,7 +240,7 @@ class TestNumpy(unittest.TestCase):
             buf[:] = [1, 2, 3, 4]
             g.input("in").send(pkt, ts=0)
             arr = out.next(timeout=5.0).as_numpy()
-            self.assertFalse(arr.flags.writeable, "as_numpy 必须只读")
+            self.assertFalse(arr.flags.writeable, "as_numpy must be read-only")
             with self.assertRaises(ValueError):
                 arr[0] = 9
             g.close_all_inputs()
@@ -268,7 +268,7 @@ output_ports: [out]
             self.assertEqual(arr.tolist() , [255, 254, 253, 252])
             self.assertEqual(
                 arr.__array_interface__["data"][0], addr,
-                "线性管线上就地改写不应发生拷贝",
+                "in-place modification on a linear pipeline should not copy",
             )
             g.close_all_inputs()
             g.wait_done(timeout=5.0)
@@ -285,7 +285,7 @@ output_ports: [out]
             self.assertNotEqual(
                 arr.__array_interface__["data"][0],
                 src.__array_interface__["data"][0],
-                "应是拷贝,引擎不得持有 ndarray(否则工作线程释放它要抢 GIL)",
+                "should be a copy; the engine must not hold the ndarray (otherwise the worker thread would need the GIL to free it)",
             )
             g.close_all_inputs()
             g.wait_done(timeout=5.0)
@@ -359,7 +359,7 @@ output_ports: [out]
             g.close_all_inputs()
             g.wait_done(timeout=30.0)
             got = [p.as_int() for p in out]
-            self.assertEqual(got, [i * 2 for i in range(50)], "max_in_flight 下仍须按序")
+            self.assertEqual(got, [i * 2 for i in range(50)], "must still be in order under max_in_flight")
 
     def test_pause_and_resume(self):
         with graph(
@@ -379,7 +379,7 @@ output_ports: [out]
             for i in range(5):
                 inp.send(i, ts=i)
             time.sleep(0.05)
-            self.assertIsNone(out.try_next(), "暂停期间不应产出")
+            self.assertIsNone(out.try_next(), "should not produce output while paused")
             g.resume()
             g.wait_until_idle(timeout=10.0)
             self.assertEqual(sum(1 for _ in iter(out.try_next, None)), 5)
@@ -400,7 +400,7 @@ class TestErrors(unittest.TestCase):
             with self.assertRaises(Exception):
                 g.wait_done(timeout=5.0)
             # 异常文本必须能拿到 —— 否则算子失败无从诊断
-            self.assertIn("故意抛异常", g.last_error())
+            self.assertIn("deliberately raised an exception", g.last_error())
 
     def test_missing_required_option_fails_at_start(self):
         with graph(one_node("TNeedsOption")) as g:
@@ -425,7 +425,7 @@ class TestErrors(unittest.TestCase):
     def test_bad_yaml_reports_readable_reason(self):
         with self.assertRaises(Exception) as ctx:
             graph("nodes: [ { kernel: X, typo_field: 1 } ]")
-        self.assertTrue(str(ctx.exception), "必须给出可读原因")
+        self.assertTrue(str(ctx.exception), "must provide a readable reason")
 
     def test_unsupported_config_is_rejected_not_ignored(self):
         with self.assertRaises(ValueError) as ctx:
@@ -435,7 +435,7 @@ class TestErrors(unittest.TestCase):
     def test_unknown_kernel_lists_available(self):
         with self.assertRaises(Exception) as ctx:
             graph(one_node("NoSuchKernel"))
-        self.assertIn("PassThroughKernel", str(ctx.exception), "报错应列出可用算子")
+        self.assertIn("PassThroughKernel", str(ctx.exception), "error should list available kernels")
 
     def test_rejects_non_builtin_payload(self):
         with graph(one_node("PassThroughKernel")) as g:
@@ -476,7 +476,7 @@ output_ports: [out]
         g.close()  # 显式关图;句柄仍在手上
         with self.assertRaises(Exception):
             inp.send(1, ts=0)  # 必须安全报「已关闭」,而不是崩溃/挂死
-        self.assertIsNone(poller.try_next(), "已结束的图 poller 安全返回 None")
+        self.assertIsNone(poller.try_next(), "poller on a terminated graph safely returns None")
 
 
 class TestIntrospection(unittest.TestCase):
@@ -496,7 +496,7 @@ input_ports: [in]
             g.wait_done(timeout=5.0)
 
             self.assertEqual(g.counter_value("collected"), 7)
-            self.assertEqual(g.counter_value("closed_normally"), 1, "close 恰好一次且为正常结束")
+            self.assertEqual(g.counter_value("closed_normally"), 1, "close called exactly once and with normal termination")
             st = g.node_stats(0)
             self.assertEqual(st["node_name"], "c")
             self.assertEqual(st["kernel_name"], "TCollect")
@@ -527,7 +527,7 @@ output_ports: [out]
             for i in range(10):
                 inp.send(i, ts=i)
             self.assertEqual(g.queue_depth("in"), 2)
-            self.assertEqual(g.dropped_count("in"), 8, "丢包必须可观测")
+            self.assertEqual(g.dropped_count("in"), 8, "dropped packets must be observable")
             g.resume()
             g.wait_until_idle(timeout=5.0)
             self.assertEqual([p.as_int() for p in iter(out.try_next, None)], [8, 9])
@@ -612,7 +612,7 @@ output_ports: [out]
                 g.input("b").send(bv, ts=ts)
             g.close_all_inputs()
             g.wait_done(timeout=10.0)
-            self.assertEqual([p.as_int() for p in out], [100, 201], "ts0 选 a,ts1 选 b")
+            self.assertEqual([p.as_int() for p in out], [100, 201], "ts0 selects a, ts1 selects b")
 
 
 if __name__ == "__main__":

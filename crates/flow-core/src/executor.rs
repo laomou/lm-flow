@@ -176,7 +176,7 @@ impl ThreadPool {
                     }
                     worker(shared, weak)
                 })
-                .expect("无法创建工作线程");
+                .expect("failed to create worker thread");
             handles.push(h);
         }
     }
@@ -238,21 +238,28 @@ mod tests {
     #[test]
     fn zero_threads_becomes_one() {
         let p = ThreadPool::new("t", 0, vec![], 0);
-        assert_eq!(p.num_threads(), 1, "配了池却零线程肯定不是本意");
+        assert_eq!(
+            p.num_threads(),
+            1,
+            "a pool configured with zero threads is surely not intended"
+        );
     }
 
     #[test]
     fn submit_before_start_is_queued() {
         let p = ThreadPool::new("t", 2, vec![], 0);
         assert!(p.submit(1));
-        assert_eq!(p.pending(), 1, "未启动时任务应先排队");
+        assert_eq!(p.pending(), 1, "tasks should be queued before start");
     }
 
     #[test]
     fn submit_after_shutdown_is_rejected() {
         let p = ThreadPool::new("t", 1, vec![], 0);
         p.shutdown();
-        assert!(!p.submit(1), "关停后必须明确拒绝,让调用方能释放令牌");
+        assert!(
+            !p.submit(1),
+            "after shutdown, submit must explicitly reject so the caller can release the token"
+        );
     }
 
     #[test]
@@ -286,7 +293,7 @@ mod tests {
             let mut mask = [0u64; 16];
             let rc =
                 unsafe { sched_getaffinity(0, std::mem::size_of_val(&mask), mask.as_mut_ptr()) };
-            assert_eq!(rc, 0, "sched_getaffinity 失败");
+            assert_eq!(rc, 0, "sched_getaffinity failed");
             tx.send(mask).unwrap();
         });
         let mask = rx.recv().unwrap();
@@ -295,7 +302,7 @@ mod tests {
         assert_eq!(
             mask[0],
             1u64 << 1,
-            "worker 必须被恰好绑到 1 号核,实际掩码 {:#b}",
+            "worker must be pinned to exactly CPU 1, actual mask {:#b}",
             mask[0]
         );
     }
@@ -317,7 +324,7 @@ mod tests {
         // 有权限:应为 SCHED_FIFO;无权限:仍是原策略(通常 0=SCHED_OTHER)。都算通过。
         assert!(
             policy == SCHED_FIFO || policy >= 0,
-            "设优先级不得使线程处于非法调度状态,实际 policy={policy}"
+            "setting priority must not leave the thread in an invalid scheduling state, actual policy={policy}"
         );
     }
 }

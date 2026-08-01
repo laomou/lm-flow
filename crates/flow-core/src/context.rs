@@ -241,7 +241,7 @@ impl Context {
     pub fn emit(&mut self, out_idx: usize, mut pkt: Packet) -> Result<()> {
         if out_idx >= self.staging.len() {
             return Err(Error::InvalidArg(format!(
-                "节点 `{}`: emit 的输出口序号 {out_idx} 越界(共 {} 个)",
+                "node `{}`: emit output port index {out_idx} out of range (of {} total)",
                 self.node_name,
                 self.staging.len()
             )));
@@ -262,7 +262,7 @@ impl Context {
             .and_then(|s| s.clone())
             .ok_or_else(|| {
                 Error::InvalidArg(format!(
-                    "节点 `{}`: forward 的输入口 {in_idx} 为空或越界",
+                    "node `{}`: forward input port {in_idx} is empty or out of range",
                     self.node_name
                 ))
             })?;
@@ -288,7 +288,7 @@ impl Context {
         let detail = self
             .error_msg
             .take()
-            .unwrap_or_else(|| format!("返回状态码 {code}"));
+            .unwrap_or_else(|| format!("returned status code {code}"));
         Error::Kernel(format!("[{}] {}", self.node_name, detail))
     }
 }
@@ -325,7 +325,7 @@ mod tests {
         assert_eq!(c.options.i64("n"), Some(7));
         assert_eq!(c.options.bool("flag"), Some(true));
         assert_eq!(c.options.str("name"), Some("hi"));
-        assert_eq!(c.options.i64("roi.x"), Some(8), "点号路径读嵌套");
+        assert_eq!(c.options.i64("roi.x"), Some(8), "dotted path reads nested");
         assert_eq!(c.options.i64("roi.y"), Some(9));
         assert_eq!(c.options.i64("nope"), None);
         assert_eq!(c.options.i64("roi.nope"), None);
@@ -370,7 +370,11 @@ mod tests {
     #[test]
     fn empty_options_json_is_object() {
         let c = ctx("~"); // YAML null
-        assert_eq!(c.options.json(), "{}", "无 options 时应为 {{}} 而非 null");
+        assert_eq!(
+            c.options.json(),
+            "{}",
+            "empty options should be {{}} not null"
+        );
     }
 
     #[test]
@@ -388,7 +392,7 @@ mod tests {
     fn emit_out_of_range_is_error() {
         let mut c = ctx("{}");
         let err = c.emit(9, Packet::new(1i32)).unwrap_err();
-        assert!(err.to_string().contains("越界"), "{err}");
+        assert!(err.to_string().contains("out of range"), "{err}");
     }
 
     #[test]
@@ -405,7 +409,10 @@ mod tests {
     #[test]
     fn forward_from_empty_slot_is_error() {
         let mut c = ctx("{}");
-        assert!(c.forward(0, 0).is_err(), "空槽 forward 必须报错");
+        assert!(
+            c.forward(0, 0).is_err(),
+            "forward from empty slot must error"
+        );
     }
 
     #[test]
@@ -413,8 +420,12 @@ mod tests {
         let mut c = ctx("{}");
         c.inputs[0] = Some(Packet::new(5i32));
         let p = c.take_input(0);
-        assert!(c.inputs[0].is_none(), "取走后槽位必须为空");
-        assert_eq!(p.ref_count(), 1, "取走后应独占,CoW 才能零拷贝");
+        assert!(c.inputs[0].is_none(), "slot must be empty after take");
+        assert_eq!(
+            p.ref_count(),
+            1,
+            "must be exclusive after take so CoW is zero-copy"
+        );
         // 重复取走返回空包而不是 panic
         assert!(c.take_input(0).is_empty());
     }
@@ -425,23 +436,29 @@ mod tests {
         c.emit(0, Packet::new(1i32)).unwrap();
         c.set_next_bound(1, Timestamp(3));
         c.discard_staging();
-        assert!(c.staging[0].is_empty(), "失败时不得传播半成品输出");
+        assert!(
+            c.staging[0].is_empty(),
+            "must not propagate half-finished output on failure"
+        );
         assert!(c.next_bounds[1].is_none());
     }
 
     #[test]
     fn error_carries_node_name() {
         let mut c = ctx("{}");
-        c.set_error("模型加载失败");
+        c.set_error("model load failed");
         let e = c.take_error(3);
-        assert!(e.to_string().contains("[n]"), "错误应带节点名: {e}");
-        assert!(e.to_string().contains("模型加载失败"), "{e}");
+        assert!(
+            e.to_string().contains("[n]"),
+            "error should carry the node name: {e}"
+        );
+        assert!(e.to_string().contains("model load failed"), "{e}");
     }
 
     #[test]
     fn error_without_message_still_useful() {
         let mut c = ctx("{}");
         let e = c.take_error(3);
-        assert!(e.to_string().contains("状态码 3"), "{e}");
+        assert!(e.to_string().contains("status code 3"), "{e}");
     }
 }

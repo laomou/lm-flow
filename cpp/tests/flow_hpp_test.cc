@@ -37,7 +37,7 @@ int main() {
   {
     const LMFlowKernelVTable* vt = lmflow::KernelAdapter<ThrowingCtorKernel>::vtable();
     void* self = vt->create(nullptr);
-    assert(self == nullptr && "构造抛异常时 create 必须返回 nullptr");
+    assert(self == nullptr && "create must return nullptr when the constructor throws");
   }
 
   // 2) create 失败后 self==nullptr:open/process/close 必须安全返回错误(不 null 解引用)。
@@ -66,6 +66,6 @@ int main() {
     vt->destroy(self);
   }
 
-  std::printf("flow.hpp 单元测试全部通过\n");
+  std::printf("all flow.hpp unit tests passed\n");
   return 0;
 }

@@ -38,29 +38,35 @@ static REGISTRY: LazyLock<Mutex<BTreeMap<String, KernelReg>>> =
 
 pub fn register(name: &str, vtable: KernelVTable, factory: *mut c_void) -> Result<()> {
     if name.is_empty() {
-        return Err(Error::InvalidArg("算子名不得为空".into()));
+        return Err(Error::InvalidArg("kernel name must not be empty".into()));
     }
     if vtable.process.is_none() {
         return Err(Error::InvalidArg(format!(
-            "算子 `{name}` 的 vtable 缺少 process(唯一必需的回调)"
+            "kernel `{name}` vtable is missing process (the only required callback)"
         )));
     }
-    let mut reg = REGISTRY.lock().expect("注册表锁中毒");
+    let mut reg = REGISTRY.lock().expect("registry lock poisoned");
     if reg.contains_key(name) {
-        return Err(Error::InvalidArg(format!("算子 `{name}` 已注册")));
+        return Err(Error::InvalidArg(format!(
+            "kernel `{name}` already registered"
+        )));
     }
     reg.insert(name.to_string(), KernelReg { vtable, factory });
     Ok(())
 }
 
 pub fn lookup(name: &str) -> Option<KernelReg> {
-    REGISTRY.lock().expect("注册表锁中毒").get(name).copied()
+    REGISTRY
+        .lock()
+        .expect("registry lock poisoned")
+        .get(name)
+        .copied()
 }
 
 pub fn registered_names() -> Vec<String> {
     REGISTRY
         .lock()
-        .expect("注册表锁中毒")
+        .expect("registry lock poisoned")
         .keys()
         .cloned()
         .collect()
@@ -70,7 +76,7 @@ pub fn registered_names() -> Vec<String> {
 /// (常见原因是忘了调 register_builtin_kernels,或算子名拼错)。
 fn not_registered(name: &str) -> Error {
     Error::NotFound(format!(
-        "算子 `{name}` 未注册。已注册的有: [{}]",
+        "kernel `{name}` not registered. registered: [{}]",
         registered_names().join(", ")
     ))
 }
@@ -198,13 +204,13 @@ impl PortTable {
             let key = (spec.tag.clone(), idx);
             if t.by_tag.contains_key(&key) {
                 return Err(Error::InvalidArg(format!(
-                    "{what}: 端口 `{decl}` 的 (tag=`{}`, index={idx}) 重复",
+                    "{what}: port `{decl}` (tag=`{}`, index={idx}) is a duplicate",
                     spec.tag
                 )));
             }
             if t.by_name.contains_key(&spec.name) {
                 return Err(Error::InvalidArg(format!(
-                    "{what}: 端口名 `{}` 在同一算子内重复",
+                    "{what}: port name `{}` is duplicated within the same kernel",
                     spec.name
                 )));
             }
@@ -228,7 +234,7 @@ impl PortTable {
             for (expect, got) in idxs.iter().enumerate() {
                 if expect != *got {
                     return Err(Error::InvalidArg(format!(
-                        "{what}: tag `{tag}` 的 index 必须从 0 连续,实际为 {idxs:?}"
+                        "{what}: tag `{tag}` index must be contiguous from 0, got {idxs:?}"
                     )));
                 }
             }
@@ -327,14 +333,17 @@ mod tests {
     fn rejects_duplicate_and_discontinuous() {
         assert!(
             PortTable::build(&decls(&["A:0:x", "A:0:y"]), "t").is_err(),
-            "同 tag 同 index 重复"
+            "same tag and index duplicated"
         );
         assert!(
             PortTable::build(&decls(&["a", "a"]), "t").is_err(),
-            "同名端口重复"
+            "duplicate port name"
         );
         let err = PortTable::build(&decls(&["A:1:x"]), "t").unwrap_err();
-        assert!(err.to_string().contains("连续"), "index 有空洞: {err}");
+        assert!(
+            err.to_string().contains("contiguous"),
+            "index has a gap: {err}"
+        );
     }
 
     #[test]
@@ -355,6 +364,6 @@ mod tests {
     fn lookup_missing_kernel_lists_available() {
         let err = KernelInstance::create("__definitely_missing__").unwrap_err();
         // 报错要能指导用户 —— 列出可用名字
-        assert!(err.to_string().contains("已注册的有"), "{err}");
+        assert!(err.to_string().contains("registered"), "{err}");
     }
 }

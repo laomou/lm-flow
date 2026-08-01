@@ -56,23 +56,25 @@ impl InputPolicy {
             "sync_set" => {
                 if c.sets.is_empty() {
                     return Err(Error::InvalidArg(
-                        "sync_set 策略必须给出 sets(输入口分组)".into(),
+                        "sync_set policy must provide sets (input port groups)".into(),
                     ));
                 }
                 let mut resolved: Vec<Vec<usize>> = Vec::new();
                 let mut seen = vec![false; ins.len()];
                 for set in &c.sets {
                     if set.is_empty() {
-                        return Err(Error::InvalidArg("sync_set 的分组不得为空".into()));
+                        return Err(Error::InvalidArg("sync_set group must not be empty".into()));
                     }
                     let mut group = Vec::with_capacity(set.len());
                     for name in set {
                         let idx = ins.index_by_name(name).ok_or_else(|| {
-                            Error::InvalidArg(format!("sync_set 引用了不存在的输入口 `{name}`"))
+                            Error::InvalidArg(format!(
+                                "sync_set references nonexistent input port `{name}`"
+                            ))
                         })?;
                         if seen[idx] {
                             return Err(Error::InvalidArg(format!(
-                                "sync_set 的输入口 `{name}` 出现在多个组里(分组须互斥)"
+                                "sync_set input port `{name}` appears in multiple groups (groups must be disjoint)"
                             )));
                         }
                         seen[idx] = true;
@@ -82,7 +84,7 @@ impl InputPolicy {
                 }
                 if let Some(miss) = (0..ins.len()).find(|&i| !seen[i]) {
                     return Err(Error::InvalidArg(format!(
-                        "sync_set 必须覆盖全部输入口;至少漏了 `{}`(要独立就让它单独成组)",
+                        "sync_set must cover all input ports; at least `{}` is missing (put it in its own group to keep it independent)",
                         ins.name(miss).unwrap_or("?")
                     )));
                 }
@@ -176,13 +178,16 @@ pub struct PollerInner {
 
 impl PollerInner {
     fn push(&self, p: Packet) {
-        self.queue.lock().expect("poller 锁中毒").push_back(p);
+        self.queue
+            .lock()
+            .expect("poller lock poisoned")
+            .push_back(p);
     }
     fn pop(&self) -> Option<Packet> {
-        self.queue.lock().expect("poller 锁中毒").pop_front()
+        self.queue.lock().expect("poller lock poisoned").pop_front()
     }
     fn is_empty(&self) -> bool {
-        self.queue.lock().expect("poller 锁中毒").is_empty()
+        self.queue.lock().expect("poller lock poisoned").is_empty()
     }
 }
 
@@ -353,15 +358,18 @@ impl Node {
     }
 
     fn queue_len(&self, port: usize) -> usize {
-        self.input_queues[port].lock().expect("队列锁中毒").len()
+        self.input_queues[port]
+            .lock()
+            .expect("queue lock poisoned")
+            .len()
     }
     fn bound(&self, port: usize) -> Timestamp {
-        *self.input_bounds[port].lock().expect("边界锁中毒")
+        *self.input_bounds[port].lock().expect("bound lock poisoned")
     }
 
     /// 把某口的时间戳边界向前推进(只增不减)。
     fn advance_bound(&self, port: usize, to: Timestamp) {
-        let mut b = self.input_bounds[port].lock().expect("边界锁中毒");
+        let mut b = self.input_bounds[port].lock().expect("bound lock poisoned");
         if to > *b {
             *b = to;
         }
@@ -370,7 +378,7 @@ impl Node {
     fn front_ts(&self, port: usize) -> Option<Timestamp> {
         self.input_queues[port]
             .lock()
-            .expect("队列锁中毒")
+            .expect("queue lock poisoned")
             .front()
             .map(|p| p.timestamp())
     }
@@ -489,7 +497,7 @@ impl Graph {
 
     pub fn from_yaml_file(path: &str) -> Result<Self> {
         let text = std::fs::read_to_string(path)
-            .map_err(|e| Error::InvalidArg(format!("读取 `{path}` 失败: {e}")))?;
+            .map_err(|e| Error::InvalidArg(format!("failed to read `{path}`: {e}")))?;
         Self::from_yaml(&text)
     }
 
@@ -501,7 +509,7 @@ impl Graph {
     }
 
     pub fn state(&self) -> State {
-        *self.inner.state.lock().expect("状态锁中毒")
+        *self.inner.state.lock().expect("state lock poisoned")
     }
 
     pub fn inner(&self) -> &Arc<GraphInner> {
@@ -511,12 +519,14 @@ impl Graph {
     /// 注入常量输入。必须在 `start` 之前。
     pub fn set_side_packet(&self, name: &str, pkt: Packet) -> Result<()> {
         if self.state() != State::Initialized {
-            return Err(Error::State("side packet 必须在 start 之前注入".into()));
+            return Err(Error::State(
+                "side packets must be injected before start".into(),
+            ));
         }
         self.inner
             .side_packets
             .lock()
-            .expect("side packet 锁中毒")
+            .expect("side packet lock poisoned")
             .insert(name.to_string(), pkt);
         Ok(())
     }
@@ -525,14 +535,13 @@ impl Graph {
         let st = self.state();
         if st != State::Initialized {
             return Err(Error::State(format!(
-                "add_poller 必须在 start 之前调用(当前状态 {st:?})"
+                "add_poller must be called before start (current state {st:?})"
             )));
         }
-        let edge = *self
-            .inner
-            .output_by_name
-            .get(port)
-            .ok_or_else(|| Error::NotFound(format!("图输出口 `{port}` 不存在")))?;
+        let edge =
+            *self.inner.output_by_name.get(port).ok_or_else(|| {
+                Error::NotFound(format!("graph output port `{port}` does not exist"))
+            })?;
         let inner = Arc::new(PollerInner {
             edge,
             queue: Mutex::new(VecDeque::new()),
@@ -541,7 +550,7 @@ impl Graph {
         self.inner.edges[edge]
             .pollers
             .lock()
-            .expect("poller 列表锁中毒")
+            .expect("poller list lock poisoned")
             .push(inner.clone());
         Ok(Poller {
             graph: self.inner.clone(),
@@ -554,11 +563,10 @@ impl Graph {
     }
 
     pub fn input(&self, port: &str) -> Result<Input> {
-        let edge = *self
-            .inner
-            .input_by_name
-            .get(port)
-            .ok_or_else(|| Error::NotFound(format!("图输入口 `{port}` 不存在")))?;
+        let edge =
+            *self.inner.input_by_name.get(port).ok_or_else(|| {
+                Error::NotFound(format!("graph input port `{port}` does not exist"))
+            })?;
         Ok(Input {
             graph: self.inner.clone(),
             edge,
@@ -566,11 +574,10 @@ impl Graph {
     }
 
     pub fn close_input(&self, port: &str) -> Result<()> {
-        let edge = *self
-            .inner
-            .input_by_name
-            .get(port)
-            .ok_or_else(|| Error::NotFound(format!("图输入口 `{port}` 不存在")))?;
+        let edge =
+            *self.inner.input_by_name.get(port).ok_or_else(|| {
+                Error::NotFound(format!("graph input port `{port}` does not exist"))
+            })?;
         self.inner.close_edge(edge);
         self.inner.set_state_draining_if_all_inputs_closed();
         Ok(())
@@ -636,7 +643,7 @@ impl Graph {
     {
         if self.state() != State::Initialized {
             return Err(Error::State(
-                "observe 必须在 start 之前调用,否则会漏掉已产出的包".into(),
+                "observe must be called before start, otherwise already-produced packets are missed".into(),
             ));
         }
         self.inner.add_observer_fn(port, Arc::new(f))
@@ -798,7 +805,7 @@ impl GraphInner {
             let spec = crate::config::parse_port_spec(decl)?;
             if input_by_name.contains_key(&spec.name) {
                 return Err(Error::InvalidArg(format!(
-                    "图输入口 `{}` 重复声明",
+                    "graph input port `{}` declared more than once",
                     spec.name
                 )));
             }
@@ -814,22 +821,22 @@ impl GraphInner {
             let who = node_label(n, idx);
             let ins = Arc::new(PortTable::build(
                 &n.input_ports,
-                &format!("节点 `{who}` 的输入口"),
+                &format!("node `{who}` input ports"),
             )?);
             let outs = Arc::new(PortTable::build(
                 &n.output_ports,
-                &format!("节点 `{who}` 的输出口"),
+                &format!("node `{who}` output ports"),
             )?);
             for name in outs.names() {
                 let id = get_or_create(name, &mut edges);
                 if edges[id].is_graph_input {
                     return Err(Error::InvalidArg(format!(
-                        "端口名 `{name}` 既是图输入口又是节点 `{who}` 的输出口 —— 名字冲突"
+                        "port name `{name}` is both a graph input port and node `{who}`'s output port -- name conflict"
                     )));
                 }
                 if let Some(prev) = edges[id].producer {
                     return Err(Error::InvalidArg(format!(
-                        "端口 `{name}` 有多个生产者:节点 `{}` 与 `{who}`",
+                        "port `{name}` has multiple producers: node `{}` and `{who}`",
                         node_label(&cfg.nodes[prev], prev)
                     )));
                 }
@@ -845,18 +852,18 @@ impl GraphInner {
             if ins.is_empty() {
                 // 零输入节点在 B 阶段的就绪规则下恒就绪,会被无限调度成自旋
                 return Err(Error::Unsupported(format!(
-                    "节点 `{who}` 没有输入口 —— source 节点尚未支持(见 docs/design.md §7.4)"
+                    "node `{who}` has no input ports -- source nodes are not yet supported (see docs/design.md §7.4)"
                 )));
             }
             for (port, name) in ins.names().iter().enumerate() {
                 let id = *edge_by_name.get(name).ok_or_else(|| {
                     Error::InvalidArg(format!(
-                        "节点 `{who}` 的输入口 `{name}` 找不到生产者:既非图输入口,也无节点输出它"
+                        "node `{who}` input port `{name}` has no producer: neither a graph input port nor produced by any node"
                     ))
                 })?;
                 if edges[id].producer.is_none() && !edges[id].is_graph_input {
                     return Err(Error::InvalidArg(format!(
-                        "端口 `{name}` 无生产者(节点 `{who}` 在消费它)"
+                        "port `{name}` has no producer (node `{who}` consumes it)"
                     )));
                 }
                 edges[id].consumers.push((idx, port));
@@ -869,7 +876,10 @@ impl GraphInner {
         for decl in &cfg.output_ports {
             let spec = crate::config::parse_port_spec(decl)?;
             let id = *edge_by_name.get(&spec.name).ok_or_else(|| {
-                Error::InvalidArg(format!("图输出口 `{}` 没有任何节点产出它", spec.name))
+                Error::InvalidArg(format!(
+                    "graph output port `{}`: no node produces it",
+                    spec.name
+                ))
             })?;
             edges[id].is_graph_output = true;
             graph_outputs.push(id);
@@ -883,12 +893,12 @@ impl GraphInner {
             }
             if e.is_graph_input {
                 runtime::log_warn(&format!(
-                    "图输入口 `{}` 没有任何节点消费它 —— 送进来的包会被直接丢弃",
+                    "graph input port `{}` is consumed by no node -- packets sent in will be dropped",
                     e.name
                 ));
             } else if let Some(p) = e.producer {
                 runtime::log_warn(&format!(
-                    "节点 `{}` 的输出口 `{}` 既无下游消费者、也不是图输出口 —— 产出会被直接丢弃",
+                    "node `{}` output port `{}` has no downstream consumer and is not a graph output port -- output will be dropped",
                     node_label(&cfg.nodes[p], p),
                     e.name
                 ));
@@ -903,11 +913,14 @@ impl GraphInner {
         for e in &cfg.executors {
             if e.name.is_empty() {
                 return Err(Error::InvalidArg(
-                    "executors 条目必须有 name,节点通过它来选择线程池".into(),
+                    "executors entry must have a name; nodes select a thread pool by it".into(),
                 ));
             }
             if executors.iter().any(|p| p.name() == e.name) {
-                return Err(Error::InvalidArg(format!("executor `{}` 重复定义", e.name)));
+                return Err(Error::InvalidArg(format!(
+                    "executor `{}` defined more than once",
+                    e.name
+                )));
             }
             executors.push(ThreadPool::new(
                 &e.name,
@@ -920,7 +933,7 @@ impl GraphInner {
         for (idx, n) in cfg.nodes.iter().enumerate() {
             if !n.executor.is_empty() && !known.contains(&n.executor.as_str()) {
                 return Err(Error::InvalidArg(format!(
-                    "节点 `{}` 引用了未定义的 executor `{}`(已定义: [{}])",
+                    "node `{}` references undefined executor `{}` (defined: [{}])",
                     node_label(n, idx),
                     n.executor,
                     known.join(", ")
@@ -931,7 +944,7 @@ impl GraphInner {
         for p in &executors {
             if !cfg.nodes.iter().any(|n| n.executor == p.name()) {
                 runtime::log_warn(&format!(
-                    "executor `{}` 已定义但没有任何节点使用它({} 个线程会空转待命)",
+                    "executor `{}` is defined but not used by any node ({} threads will idle)",
                     p.name(),
                     p.num_threads()
                 ));
@@ -1009,7 +1022,10 @@ impl GraphInner {
             });
             // 记录该算子声明的必需 side packet,start 时校验
             for name in &contract.required_side_packets {
-                required.push((name.clone(), nodes.last().expect("刚插入").name.clone()));
+                required.push((
+                    name.clone(),
+                    nodes.last().expect("just inserted").name.clone(),
+                ));
             }
         }
 
@@ -1077,7 +1093,7 @@ fn check_acyclic(cfg: &GraphConfig, edges: &[Edge]) -> Result<()> {
                 match mark[next] {
                     ON_STACK => {
                         return Err(Error::InvalidArg(format!(
-                            "拓扑成环:节点 `{}` → … → `{}`(本版本不支持 back-edge,成环会死锁)",
+                            "topology cycle: node `{}` -> ... -> `{}` (back-edges are not supported in this version; a cycle would deadlock)",
                             node_label(&cfg.nodes[next], next),
                             node_label(&cfg.nodes[node], node)
                         )));
@@ -1101,27 +1117,27 @@ fn check_acyclic(cfg: &GraphConfig, edges: &[Edge]) -> Result<()> {
 
 impl GraphInner {
     fn state(&self) -> State {
-        *self.state.lock().expect("状态锁中毒")
+        *self.state.lock().expect("state lock poisoned")
     }
     fn set_state(&self, s: State) {
-        *self.state.lock().expect("状态锁中毒") = s;
+        *self.state.lock().expect("state lock poisoned") = s;
     }
 
     fn start(self: &Arc<Self>) -> Result<()> {
         let st = self.state();
         if st != State::Initialized {
             return Err(Error::State(format!(
-                "start 只能在 Initialized 调用(当前 {st:?})"
+                "start can only be called in Initialized (current {st:?})"
             )));
         }
 
         // 校验算子声明的必需 side packet
-        let provided = self.side_packets.lock().expect("side packet 锁中毒");
+        let provided = self.side_packets.lock().expect("side packet lock poisoned");
         for (need, who) in &self.required_side_packets {
             if !provided.contains_key(need) {
                 return Err(Error::InvalidArg(format!(
-                    "缺少必需的 side packet `{need}` —— 节点 `{who}` 在 GetContract 中声明了它;\
-                     请在 start 之前用 set_side_packet 注入"
+                    "missing required side packet `{need}` -- node `{who}` declared it in GetContract; \
+                     inject it with set_side_packet before start"
                 )));
             }
         }
@@ -1143,7 +1159,7 @@ impl GraphInner {
                 self.shared.record_error(e.clone());
                 return Err(e);
             }
-            node.sched.lock().expect("调度锁中毒").opened = true;
+            node.sched.lock().expect("scheduler lock poisoned").opened = true;
         }
 
         self.set_state(State::Running);
@@ -1162,7 +1178,7 @@ impl GraphInner {
             State::Draining | State::Terminated => return Err(Error::Closed),
             s => {
                 return Err(Error::State(format!(
-                    "send 需要图处于 Running(当前 {s:?});请先调用 start"
+                    "send requires the graph to be Running (current {s:?}); call start first"
                 )))
             }
         }
@@ -1178,7 +1194,8 @@ impl GraphInner {
         // 图输入口上必须有明确时间戳
         if pkt.timestamp() == Timestamp::unset() {
             return Err(Error::InvalidArg(
-                "图输入口上的包必须带明确时间戳(UNSET 非法)".into(),
+                "packets on a graph input port must carry an explicit timestamp (UNSET is invalid)"
+                    .into(),
             ));
         }
 
@@ -1222,10 +1239,10 @@ impl GraphInner {
     /// 回退甚至重复的时间戳就能悄悄混进来,下游行为随之变得难以解释。
     fn check_input_monotonic(&self, edge: EdgeId, pkt: &Packet) -> Result<()> {
         let e = &self.edges[edge];
-        let mut last = e.last_sent.lock().expect("时间戳锁中毒");
+        let mut last = e.last_sent.lock().expect("timestamp lock poisoned");
         if *last != Timestamp::unset() && pkt.timestamp() <= *last {
             return Err(Error::InvalidArg(format!(
-                "图输入口 `{}` 的时间戳必须严格递增:上一个 {},本次 {}",
+                "graph input port `{}` timestamps must be strictly increasing: previous {}, this one {}",
                 e.name,
                 *last,
                 pkt.timestamp()
@@ -1241,7 +1258,7 @@ impl GraphInner {
 
         // 订阅者(poller / observer)各自独立一份
         {
-            let pollers = edge.pollers.lock().expect("poller 列表锁中毒");
+            let pollers = edge.pollers.lock().expect("poller list lock poisoned");
             let mut any = false;
             for p in pollers.iter() {
                 for pkt in &packets {
@@ -1258,7 +1275,7 @@ impl GraphInner {
             // 持锁调用会造成争用甚至重入死锁(observer 若又触达同一条边的 observers 锁)。
             // observer 只增不删,快照是安全的。
             let observers: Vec<Observer> = {
-                let guard = edge.observers.lock().expect("observer 列表锁中毒");
+                let guard = edge.observers.lock().expect("observer list lock poisoned");
                 if guard.is_empty() {
                     Vec::new()
                 } else {
@@ -1287,7 +1304,7 @@ impl GraphInner {
             let mut dropped = 0u64;
             let mut q = self.nodes[node].input_queues[port]
                 .lock()
-                .expect("队列锁中毒");
+                .expect("queue lock poisoned");
             for pkt in &packets {
                 // fixed_size:满则丢最旧的。这是**有意的有损**策略,且不阻塞上游,
                 // 故与「内部边不背压」不冲突,而是其配套的内存约束手段。
@@ -1324,7 +1341,7 @@ impl GraphInner {
         let after = before + n;
         if before == 0 || after.is_power_of_two() {
             runtime::log_warn(&format!(
-                "边 `{}` 因 fixed_size 策略累计丢弃 {} 个包(消费端跟不上;可用 dropped_count 观测)",
+                "edge `{}` has dropped {} packets total due to the fixed_size policy (consumer can't keep up; observe with dropped_count)",
                 e.name, after
             ));
         }
@@ -1340,7 +1357,7 @@ impl GraphInner {
         let ratio = depth / limit;
         if ratio.is_power_of_two() {
             runtime::log_warn(&format!(
-                "边 `{}` 积压 {} 个包(软水位 {}),消费端可能跟不上",
+                "edge `{}` has {} packets backlogged (soft limit {}); consumer may not be keeping up",
                 self.edges[edge_id].name, depth, limit
             ));
         }
@@ -1358,7 +1375,10 @@ impl GraphInner {
     fn dispatch_task(&self, n: NodeId) {
         match self.nodes[n].executor {
             None => {
-                self.main_queue.lock().expect("主队列锁中毒").push_back(n);
+                self.main_queue
+                    .lock()
+                    .expect("main queue lock poisoned")
+                    .push_back(n);
                 self.notify_activity();
             }
             Some(i) => {
@@ -1385,7 +1405,11 @@ impl GraphInner {
     /// 空闲 = 主线程队列为空 **且** 线程池里没有在飞任务。
     fn is_idle(&self) -> bool {
         self.in_flight.load(Ordering::SeqCst) == 0
-            && self.main_queue.lock().expect("主队列锁中毒").is_empty()
+            && self
+                .main_queue
+                .lock()
+                .expect("main queue lock poisoned")
+                .is_empty()
     }
 
     /// 任何进展都要通知:取到输出、节点关闭、出错、任务入队/完成。
@@ -1427,7 +1451,7 @@ impl GraphInner {
             return false;
         }
         let node = &self.nodes[n];
-        let mut s = node.sched.lock().expect("调度锁中毒");
+        let mut s = node.sched.lock().expect("scheduler lock poisoned");
         if !s.opened || s.close_started {
             return false;
         }
@@ -1439,7 +1463,10 @@ impl GraphInner {
             return false;
         };
         let ts = ready.ts;
-        let slot = s.free_slots.pop().expect("in_flight < max 时必有空槽");
+        let slot = s
+            .free_slots
+            .pop()
+            .expect("a free slot must exist when in_flight < max");
         let seq = s.next_seq;
         s.next_seq += 1;
         s.in_flight += 1;
@@ -1460,7 +1487,7 @@ impl GraphInner {
             if node.front_ts(port) == Some(ts) {
                 if let Some(p) = node.input_queues[port]
                     .lock()
-                    .expect("队列锁中毒")
+                    .expect("queue lock poisoned")
                     .pop_front()
                 {
                     self.shared.on_dequeue(p.byte_size());
@@ -1489,7 +1516,11 @@ impl GraphInner {
     /// 临时值(此处是 MutexGuard)会存活到整个 if-let 块结束 —— 那样 `run_node`
     /// 内部再去 `main_queue.lock()` 就自锁死。这也是 R2 锁序规则的实例。
     fn run_one_main_task(&self) -> bool {
-        let next = self.main_queue.lock().expect("主队列锁中毒").pop_front();
+        let next = self
+            .main_queue
+            .lock()
+            .expect("main queue lock poisoned")
+            .pop_front();
         match next {
             Some(n) => {
                 self.run_node(n);
@@ -1507,7 +1538,13 @@ impl GraphInner {
     fn run_node(&self, n: NodeId) {
         let node = &self.nodes[n];
         // 取出一个待执行的调用(认领时已把输入弹进对应槽)。
-        let inv = { node.sched.lock().expect("调度锁中毒").ready.pop_front() };
+        let inv = {
+            node.sched
+                .lock()
+                .expect("scheduler lock poisoned")
+                .ready
+                .pop_front()
+        };
         let Some((slot, seq)) = inv else {
             // 认领与派任务 1:1,理论上不会为空;稳妥起见走一遍收尾。
             self.finish(n);
@@ -1517,7 +1554,7 @@ impl GraphInner {
         // 契约类型校验(在本槽上)。类型不符宁可报错,也不让算子按错误类型解读内存。
         let ok = match self.check_input_types(n, slot) {
             Err(e) => {
-                node.stats.lock().expect("统计锁中毒").errors += 1;
+                node.stats.lock().expect("stats lock poisoned").errors += 1;
                 self.shared.record_error(e);
                 false
             }
@@ -1525,11 +1562,11 @@ impl GraphInner {
                 let rc = self.call_kernel(n, slot, KernelPhase::Process);
                 if rc != 0 {
                     let e = unsafe { node.ctx_slot(slot) }.take_error(rc);
-                    node.stats.lock().expect("统计锁中毒").errors += 1;
+                    node.stats.lock().expect("stats lock poisoned").errors += 1;
                     self.shared.record_error(e);
                     false
                 } else {
-                    node.stats.lock().expect("统计锁中毒").processed += 1;
+                    node.stats.lock().expect("stats lock poisoned").processed += 1;
                     true
                 }
             }
@@ -1543,7 +1580,7 @@ impl GraphInner {
         let node = &self.nodes[n];
         // 登记结果;当前无人刷新则由本线程担任刷新者。
         let be_flusher = {
-            let mut s = node.sched.lock().expect("调度锁中毒");
+            let mut s = node.sched.lock().expect("scheduler lock poisoned");
             s.pending_flush.insert(seq, (slot, ok));
             if s.flushing {
                 false
@@ -1556,7 +1593,7 @@ impl GraphInner {
             loop {
                 // 严格按 next_flush_seq 取;取不到就在同一临界区里让出刷新者身份,避免丢刷新。
                 let item = {
-                    let mut s = node.sched.lock().expect("调度锁中毒");
+                    let mut s = node.sched.lock().expect("scheduler lock poisoned");
                     let next = s.next_flush_seq;
                     match s.pending_flush.remove(&next) {
                         Some(v) => Some(v),
@@ -1576,7 +1613,7 @@ impl GraphInner {
                 // CoW 卫生:立刻释放本次输入的引用(否则上游 CoW 退化成全量拷贝)。
                 unsafe { node.ctx_slot(fslot) }.clear_inputs();
                 {
-                    let mut s = node.sched.lock().expect("调度锁中毒");
+                    let mut s = node.sched.lock().expect("scheduler lock poisoned");
                     s.next_flush_seq += 1;
                     s.in_flight -= 1;
                     s.free_slots.push(fslot);
@@ -1603,7 +1640,7 @@ impl GraphInner {
             let got = pkt.type_id();
             if got != want {
                 return Err(Error::Kernel(format!(
-                    "[{}] 输入口 `{}` 类型不符:契约声明 {}, 实际 {}",
+                    "[{}] input port `{}` type mismatch: contract declares {}, actual {}",
                     node.name,
                     node.in_ports.name(port).unwrap_or("?"),
                     crate::packet::type_name(want),
@@ -1676,7 +1713,7 @@ impl GraphInner {
         // 只有一个线程能置位 close_started,从而保证算子的 Close 只被调用一次。
         // in_flight != 0 表示还有并行调用在跑或等待刷新 —— 必须全部落地才能关。
         {
-            let mut s = node.sched.lock().expect("调度锁中毒");
+            let mut s = node.sched.lock().expect("scheduler lock poisoned");
             if s.close_started || s.in_flight != 0 || !s.opened {
                 return false;
             }
@@ -1703,7 +1740,7 @@ impl GraphInner {
             self.flush_staging(n, 0);
         }
         unsafe { node.ctx_slot(0) }.clear_inputs();
-        node.sched.lock().expect("调度锁中毒").closed = true;
+        node.sched.lock().expect("scheduler lock poisoned").closed = true;
 
         for &e in &node.outputs {
             self.close_edge(e);
@@ -1725,7 +1762,7 @@ impl GraphInner {
             self.schedule_node(node);
         }
         // 该边的 poller 在队列排空后即视为结束
-        for p in e.pollers.lock().expect("poller 列表锁中毒").iter() {
+        for p in e.pollers.lock().expect("poller list lock poisoned").iter() {
             p.closed.store(true, Ordering::SeqCst);
         }
     }
@@ -1733,7 +1770,7 @@ impl GraphInner {
     fn set_state_draining_if_all_inputs_closed(&self) {
         let all = self.graph_inputs.iter().all(|&e| self.edges[e].is_closed());
         if all {
-            let mut st = self.state.lock().expect("状态锁中毒");
+            let mut st = self.state.lock().expect("state lock poisoned");
             if *st == State::Running {
                 *st = State::Draining;
             }
@@ -1757,7 +1794,7 @@ impl GraphInner {
     fn all_nodes_closed(&self) -> bool {
         self.nodes
             .iter()
-            .all(|n| n.sched.lock().expect("调度锁中毒").closed)
+            .all(|n| n.sched.lock().expect("scheduler lock poisoned").closed)
     }
 
     /// 等待图跑完。`deadline` 为 `None` 表示不限时。
@@ -1795,18 +1832,24 @@ impl GraphInner {
                     .collect();
                 if !inputs_open.is_empty() {
                     return Err(Error::State(format!(
-                        "wait_done:图输入口 [{}] 仍未关闭,图不会自行结束 —— \
-                         请先 close_input/close_all_inputs",
+                        "wait_done: graph input ports [{}] still open, the graph won't finish on its own -- \
+                         call close_input/close_all_inputs first",
                         inputs_open.join(", ")
                     )));
                 }
                 let stuck: Vec<&str> = (0..self.nodes.len())
-                    .filter(|&n| !self.nodes[n].sched.lock().expect("调度锁中毒").closed)
+                    .filter(|&n| {
+                        !self.nodes[n]
+                            .sched
+                            .lock()
+                            .expect("scheduler lock poisoned")
+                            .closed
+                    })
                     .map(|n| self.nodes[n].name.as_str())
                     .collect();
                 return Err(Error::Kernel(format!(
-                    "wait_done:输入已全部关闭但图仍静止,未能关闭的节点: [{}]。\
-                     通常是某个算子的产出/关流条件不满足(可用 dump 查看队列积压)",
+                    "wait_done: all inputs closed but the graph is still idle, nodes not closed: [{}]. \
+                     usually some kernel's output/close condition is unmet (use dump to inspect queue backlog)",
                     stuck.join(", ")
                 )));
             }
@@ -1877,7 +1920,7 @@ impl GraphInner {
         // 从该指针造出的 `&mut Context` 不冲突(该槽此刻由本调用独占持有)。
         let ctx_ptr = node.ctxs[slot].get() as *mut c_void;
         {
-            let mut t = node.running_timing.lock().expect("计时锁中毒");
+            let mut t = node.running_timing.lock().expect("timing lock poisoned");
             if t.0 == 0 {
                 t.1 = Some(Instant::now());
             }
@@ -1896,14 +1939,14 @@ impl GraphInner {
 
         let us = started.elapsed().as_micros() as i64;
         {
-            let mut t = node.running_timing.lock().expect("计时锁中毒");
+            let mut t = node.running_timing.lock().expect("timing lock poisoned");
             t.0 -= 1;
             if t.0 == 0 {
                 t.1 = None;
             }
         }
         if matches!(phase, KernelPhase::Process) {
-            let mut st = node.stats.lock().expect("统计锁中毒");
+            let mut st = node.stats.lock().expect("stats lock poisoned");
             st.total_us += us;
             if us > st.max_us {
                 st.max_us = us;
@@ -1912,7 +1955,7 @@ impl GraphInner {
         let wd = self.shared.config.watchdog_ms;
         if wd > 0 && us as u64 > wd * 1000 {
             runtime::log_warn(&format!(
-                "节点 `{}` 单次 {:?} 耗时 {} ms,超过 watchdog {} ms",
+                "node `{}`: one {:?} took {} ms, exceeding watchdog {} ms",
                 node.name,
                 phase,
                 us / 1000,
@@ -1932,8 +1975,8 @@ impl GraphInner {
 
     fn node_stats(&self, i: usize) -> Option<NodeStatsSnapshot> {
         let node = self.nodes.get(i)?;
-        let st = node.stats.lock().expect("统计锁中毒");
-        let (run_count, earliest) = *node.running_timing.lock().expect("计时锁中毒");
+        let st = node.stats.lock().expect("stats lock poisoned");
+        let (run_count, earliest) = *node.running_timing.lock().expect("timing lock poisoned");
         let since = if run_count > 0 { earliest } else { None };
         Some(NodeStatsSnapshot {
             node_name: node.name.clone(),
@@ -1962,8 +2005,8 @@ impl GraphInner {
         ));
         s.push_str("node              state        queued  processed  errors  avg_us  max_us\n");
         for i in 0..self.nodes.len() {
-            let st = self.node_stats(i).expect("节点存在");
-            let sched = self.nodes[i].sched.lock().expect("调度锁中毒");
+            let st = self.node_stats(i).expect("node exists");
+            let sched = self.nodes[i].sched.lock().expect("scheduler lock poisoned");
             let state = if st.running {
                 format!("RUNNING {}ms", st.running_for_us / 1000)
             } else if sched.closed {
@@ -2003,11 +2046,11 @@ impl GraphInner {
         let edge = *self
             .output_by_name
             .get(port)
-            .ok_or_else(|| Error::NotFound(format!("图输出口 `{port}` 不存在")))?;
+            .ok_or_else(|| Error::NotFound(format!("graph output port `{port}` does not exist")))?;
         self.edges[edge]
             .observers
             .lock()
-            .expect("observer 列表锁中毒")
+            .expect("observer list lock poisoned")
             .push(Observer::C { cb, user });
         Ok(())
     }
@@ -2018,11 +2061,11 @@ impl GraphInner {
         let edge = *self
             .output_by_name
             .get(port)
-            .ok_or_else(|| Error::NotFound(format!("图输出口 `{port}` 不存在")))?;
+            .ok_or_else(|| Error::NotFound(format!("graph output port `{port}` does not exist")))?;
         self.edges[edge]
             .observers
             .lock()
-            .expect("observer 列表锁中毒")
+            .expect("observer list lock poisoned")
             .push(Observer::Rust(f));
         Ok(())
     }
@@ -2157,7 +2200,7 @@ impl Drop for GraphInner {
 
         for n in 0..self.nodes.len() {
             let need_close = {
-                let s = self.nodes[n].sched.lock().expect("调度锁中毒");
+                let s = self.nodes[n].sched.lock().expect("scheduler lock poisoned");
                 s.opened && !s.close_started
             };
             if !need_close {
@@ -2173,12 +2216,16 @@ impl Drop for GraphInner {
             let rc = self.call_kernel(n, 0, KernelPhase::Close);
             if rc != 0 {
                 runtime::log_warn(&format!(
-                    "节点 `{}` 在图销毁时的 close 返回 {rc}(已忽略)",
+                    "node `{}`: close returned {rc} during graph destruction (ignored)",
                     self.nodes[n].name
                 ));
             }
             unsafe { self.nodes[n].ctx_slot(0) }.clear_inputs();
-            self.nodes[n].sched.lock().expect("调度锁中毒").closed = true;
+            self.nodes[n]
+                .sched
+                .lock()
+                .expect("scheduler lock poisoned")
+                .closed = true;
         }
     }
 }

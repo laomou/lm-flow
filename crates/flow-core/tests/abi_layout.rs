@@ -15,8 +15,8 @@ use flow_core::ffi::{LMFlowBuffer, LMFlowNodeStats, LMFlowPacket};
 
 #[test]
 fn lmflow_packet_layout() {
-    assert_eq!(size_of::<LMFlowPacket>(), 40, "LMFlowPacket 大小");
-    assert_eq!(align_of::<LMFlowPacket>(), 8, "LMFlowPacket 对齐");
+    assert_eq!(size_of::<LMFlowPacket>(), 40, "LMFlowPacket size");
+    assert_eq!(align_of::<LMFlowPacket>(), 8, "LMFlowPacket alignment");
     assert_eq!(offset_of!(LMFlowPacket, payload), 0);
     assert_eq!(offset_of!(LMFlowPacket, type_id), 8);
     assert_eq!(offset_of!(LMFlowPacket, timestamp), 16);
@@ -27,8 +27,8 @@ fn lmflow_packet_layout() {
 #[test]
 fn flow_buffer_layout() {
     // data(8) + shape[8](64) + strides[8](64) + ndim(4) + dtype(4) + flags(4) + device(4) + reserved[2](16)
-    assert_eq!(size_of::<LMFlowBuffer>(), 168, "LMFlowBuffer 大小");
-    assert_eq!(align_of::<LMFlowBuffer>(), 8, "LMFlowBuffer 对齐");
+    assert_eq!(size_of::<LMFlowBuffer>(), 168, "LMFlowBuffer size");
+    assert_eq!(align_of::<LMFlowBuffer>(), 8, "LMFlowBuffer alignment");
     assert_eq!(offset_of!(LMFlowBuffer, data), 0);
     assert_eq!(offset_of!(LMFlowBuffer, shape), 8);
     assert_eq!(offset_of!(LMFlowBuffer, strides), 72);
