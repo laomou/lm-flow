@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """OpenCV 管线示例 —— 演示**零拷贝**的正确写法。
 
-拓扑:frames ─► resize(Python + cv2) ─► small ─► invert(C++ 算子) ─► out
+拓扑:frames ─► resize(Python + cv2) ─► blur(Python,CoW 原地) ─► invert(C++ 算子) ─► out
 
 关键点(容易写错的地方):
   1. 不要 `send(cv2.imread(...))`。那样要么整帧拷贝,要么引擎持有 PyObject 引用 ——
@@ -74,10 +74,14 @@ nodes:
     input_ports: ["frames"]
     output_ports: ["small"]
     options: { width: 320, height: 240 }
+  - name: "blur"
+    kernel: "PyBlurInPlaceKernel"   # Python 算子:take_input + make_mutable 的 CoW 原地改写
+    input_ports: ["small"]
+    output_ports: ["blurred"]
   - name: "invert"
     kernel: "InvertKernel"          # C++ 内置算子,走 CoW 原地改写
     executor: "cpu"                 # 显式 opt-in 并发
-    input_ports: ["small"]
+    input_ports: ["blurred"]
     output_ports: ["out"]
 input_ports: ["frames"]
 output_ports: ["out"]

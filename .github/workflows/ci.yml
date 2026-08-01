@@ -135,6 +135,12 @@ jobs:
             examples/ios/bridge_smoke.c \
             target/aarch64-apple-ios/release/libflow_core.a -lc++ -o /tmp/ios_smoke
           echo "iOS 桥接编译+链接成功"
+      - name: Swift 示例类型检查(Demo.swift 对着 C 模块 LmFlowC)
+        run: |
+          # 经 module.modulemap 把 flow.h 暴露成 Swift 模块,typecheck 证明 Demo.swift 的
+          # C 互操作(OpaquePointer、LMFlowPacket、状态码比较等)真的对得上 C ABI。
+          swiftc -typecheck -I examples/ios examples/ios/Demo.swift
+          echo "Demo.swift 类型检查通过"
 
   cross-android:
     runs-on: ubuntu-latest
