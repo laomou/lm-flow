@@ -566,5 +566,54 @@ output_ports: [out]
             self.assertEqual(got, [(i, i + i * 100) for i in range(5)])
 
 
+class TestPolicyExtras(unittest.TestCase):
+    def test_sync_set_partial_alignment(self):
+        # 分组 {x,y} 与 {z}:各组独立按时间戳对齐、独立触发,每次只带该组的口。
+        @lmflow.kernel("Probe3")
+        class Probe3(lmflow.Kernel):
+            def process(self, cc):
+                # 位掩码:bit i = 输入口 i 本次非空
+                mask = sum(1 << i for i in range(3) if not cc.input(i).is_empty)
+                cc.emit(0, mask)
+
+        with graph(
+            """
+nodes:
+  - { name: n, kernel: Probe3, input_ports: [x, y, z], output_ports: [out],
+      input_policy: { type: sync_set, sets: [[x, y], [z]] } }
+input_ports: [x, y, z]
+output_ports: [out]
+"""
+        ) as g:
+            out = g.add_poller("out")
+            g.start()
+            g.input("x").send(1, ts=0)
+            g.input("y").send(2, ts=0)  # {x,y} 组齐 → 掩码 0b011
+            g.input("z").send(3, ts=1)  # {z} 组 → 掩码 0b100
+            g.close_all_inputs()
+            g.wait_done(timeout=10.0)
+            self.assertEqual([p.as_int() for p in out], [0b011, 0b100])
+
+    def test_mux_kernel_selects_data_port(self):
+        # MuxKernel:输入 0=控制(选择器),1..=数据口。默认 sync 全对齐。
+        with graph(
+            """
+nodes:
+  - { name: m, kernel: MuxKernel, input_ports: [sel, a, b], output_ports: [out] }
+input_ports: [sel, a, b]
+output_ports: [out]
+"""
+        ) as g:
+            out = g.add_poller("out")
+            g.start()
+            for ts, k, av, bv in [(0, 0, 100, 200), (1, 1, 101, 201)]:
+                g.input("sel").send(k, ts=ts)
+                g.input("a").send(av, ts=ts)
+                g.input("b").send(bv, ts=ts)
+            g.close_all_inputs()
+            g.wait_done(timeout=10.0)
+            self.assertEqual([p.as_int() for p in out], [100, 201], "ts0 选 a,ts1 选 b")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

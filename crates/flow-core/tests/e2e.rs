@@ -302,6 +302,77 @@ output_ports: ["out"]
     assert!(err.to_string().contains("没有任何节点产出"), "{err}");
 }
 
+/// MuxKernel:控制口(输入 0)的 I64 值选择转发哪个数据口(输入 1..)。默认 sync 全对齐。
+#[test]
+fn mux_kernel_forwards_selected_data_port() {
+    init();
+    let graph = Graph::from_yaml(
+        r#"
+nodes:
+  - name: "m"
+    kernel: "MuxKernel"
+    input_ports: ["sel", "a", "b"]
+    output_ports: ["out"]
+input_ports: ["sel", "a", "b"]
+output_ports: ["out"]
+"#,
+    )
+    .unwrap();
+    let out = graph.add_poller("out").unwrap();
+    graph.start().unwrap();
+    let sel = graph.input("sel").unwrap();
+    let a = graph.input("a").unwrap();
+    let b = graph.input("b").unwrap();
+    // sync 全对齐:每个 ts 三口都要有包。ts0 选 0→转发 a;ts1 选 1→转发 b。
+    for (ts, k, av, bv) in [(0i64, 0i64, 100i64, 200i64), (1, 1, 101, 201)] {
+        sel.send(Packet::from_i64(k).at(Timestamp(ts))).unwrap();
+        a.send(Packet::from_i64(av).at(Timestamp(ts))).unwrap();
+        b.send(Packet::from_i64(bv).at(Timestamp(ts))).unwrap();
+    }
+    graph.close_all_inputs();
+    graph.wait_done().unwrap();
+    let mut got = Vec::new();
+    while let Some(p) = out.try_next() {
+        got.push(p.as_i64().unwrap());
+    }
+    assert_eq!(
+        got,
+        vec![100, 201],
+        "ts0 选数据口 0(a=100),ts1 选数据口 1(b=201)"
+    );
+}
+
+/// MuxKernel:选择器越界必须报错(不静默转发错口/崩溃)。
+#[test]
+fn mux_kernel_rejects_out_of_range_selector() {
+    init();
+    let graph = Graph::from_yaml(
+        r#"
+nodes:
+  - { name: "m", kernel: "MuxKernel", input_ports: ["sel", "a"], output_ports: ["out"] }
+input_ports: ["sel", "a"]
+output_ports: ["out"]
+"#,
+    )
+    .unwrap();
+    graph.add_poller("out").unwrap();
+    graph.start().unwrap();
+    // 只有 1 个数据口(a),选择器 5 越界
+    graph
+        .input("sel")
+        .unwrap()
+        .send(Packet::from_i64(5).at(Timestamp(0)))
+        .unwrap();
+    graph
+        .input("a")
+        .unwrap()
+        .send(Packet::from_i64(1).at(Timestamp(0)))
+        .unwrap();
+    graph.close_all_inputs();
+    let err = graph.wait_done().unwrap_err();
+    assert!(err.to_string().contains("越界"), "{err}");
+}
+
 #[test]
 fn rejects_duplicate_producer() {
     init();
