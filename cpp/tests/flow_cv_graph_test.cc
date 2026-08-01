@@ -16,30 +16,15 @@
 #include "flow.hpp"
 #include "flow_cv.hpp"
 
-// 用户自己的 OpenCV 算子:把输入图像取反(255 - x)。只依赖 flow_cv.hpp 与 OpenCV。
-class CvInvertKernel : public lmflow::Kernel {
- public:
-  static void GetContract(lmflow::Contract& c) {
-    c.InputSetAny(0);
-    c.OutputSetAny(0);
-  }
-  lmflow::Status Process(lmflow::Context& cc) override {
-    lmflow::Packet p = cc.TakeInput(0);  // 取走 → 独占,CoW 零拷贝
-    cv::Mat m;
-    if (LMFlowStatus st = lmflow::CvMutable(p, &m)) return st;  // LMFlowBuffer → 可写 cv::Mat
-    cv::bitwise_not(m, m);                                  // OpenCV 就地取反
-    cc.Emit(0, std::move(p));
-    return lmflow::Status::Ok();
-  }
-};
+#include "cv_test_kernels.hpp"  // CvInvertTestKernel(带 Test 后缀的 CV 测试算子)
 
 int main() {
-  lmflow_register_kernel("CvInvert", lmflow::KernelAdapter<CvInvertKernel>::vtable(), nullptr);
+  lmflow_test::RegisterCvTestKernels();  // 注册 "CvInvertTest"
 
   LMFlowGraph* g = lmflow_graph_new();
   const char* yaml =
       "nodes:\n"
-      "  - { name: inv, kernel: CvInvert, input_ports: [in], output_ports: [out] }\n"
+      "  - { name: inv, kernel: CvInvertTest, input_ports: [in], output_ports: [out] }\n"
       "input_ports: [in]\n"
       "output_ports: [out]\n";
   assert(lmflow_graph_init_from_yaml(g, yaml) == 0);
