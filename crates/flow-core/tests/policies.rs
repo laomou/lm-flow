@@ -211,6 +211,50 @@ output_ports: ["out"]
     assert_eq!(got, (0..20).collect::<Vec<_>>(), "绑核不得改变处理结果");
 }
 
+/// `fixed_size` + **多输入**:每口队列各自有界。丢包会在某口留下时间戳缺口,
+/// sync 对齐靠 bound 推进跳过它 —— 关键是**不死锁**、丢包可观测、能正常终结。
+/// (单输入的 fixed_size 已另测;多输入是对齐 × 丢弃的叠加,最容易出死锁。)
+#[test]
+fn fixed_size_multi_input_does_not_deadlock() {
+    init();
+    let graph = Graph::from_yaml(
+        r#"
+nodes:
+  - name: "z"
+    kernel: "ZipKernel"
+    input_ports: ["A:x", "B:y"]
+    output_ports: ["out"]
+    input_policy: { type: "fixed_size", capacity: 2 }
+input_ports: ["x", "y"]
+output_ports: ["out"]
+"#,
+    )
+    .unwrap();
+    graph.add_poller("out").unwrap();
+    graph.start().unwrap();
+    let x = graph.input("x").unwrap();
+    let y = graph.input("y").unwrap();
+    // x 口猛灌(必溢出丢弃),y 口少量;时间戳交错。用内建 I64 以匹配 ZipKernel 契约。
+    for i in 0..10i32 {
+        x.send(Packet::from_i64(i as i64).at(Timestamp(i as i64)))
+            .unwrap();
+    }
+    for i in 0..4i32 {
+        y.send(Packet::from_i64((i * 100) as i64).at(Timestamp(i as i64)))
+            .unwrap();
+    }
+    graph.close_all_inputs();
+    // 必须能终结(不死锁);30s 兜底超时会把死锁暴露成失败而非永久挂住
+    graph
+        .wait_done_timeout(Duration::from_secs(30))
+        .expect("fixed_size 多输入必须能正常终结,不得死锁");
+    assert_eq!(
+        graph.dropped_count("x"),
+        Some(8),
+        "x 口应丢弃最旧的 8 个,可观测"
+    );
+}
+
 #[test]
 fn fixed_size_rejects_zero_capacity() {
     init();
