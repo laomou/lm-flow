@@ -271,6 +271,32 @@ fn steady_state_pool_max_in_flight_no_accumulation() {
     );
 }
 
+/// side packet 的 payload 必须恰好释放一次。start 时它被 clone 进**每个**节点 context 的
+/// `Arc<map>`(本图 2 节点 → 连同 graph 自己的那份共 3 个 Arc 引用),全部 drop 后才归还。
+/// 靠 `Arc<Payload>` 引用计数保证:clone 只 +ref,drop_fn 只在最后一个引用消失时调一次。
+#[test]
+fn side_packet_payload_released_exactly_once() {
+    let (_lock, base) = accounting();
+    {
+        let graph = linear_graph("PassThroughKernel");
+        graph
+            .set_side_packet("model", tracked_packet(42, 0))
+            .unwrap();
+        assert!(
+            ALIVE.load(Ordering::SeqCst) > base,
+            "注入后 side packet 应在途"
+        );
+        graph.start().unwrap(); // 这里把它 clone 进各 context
+        graph.close_all_inputs();
+        graph.wait_done().unwrap();
+    }
+    assert_eq!(
+        ALIVE.load(Ordering::SeqCst),
+        base,
+        "side packet 的 payload 必须恰好释放一次(不漏不重)"
+    );
+}
+
 // ---------------------------------------------------------------- CoW 不变量
 
 fn buffer_packet(len: usize, ts: i64) -> (Packet, usize) {

@@ -7,7 +7,7 @@
 //!  * 所有权守恒在并发下仍然成立;
 //!  * 混合执行器(一部分节点在池里、一部分在主线程)不会死锁。
 
-use std::sync::atomic::{AtomicIsize, Ordering};
+use std::sync::atomic::{AtomicIsize, AtomicUsize, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -476,6 +476,72 @@ output_ports: ["o1", "o2"]
     };
     assert_eq!(count(&p1), 100);
     assert_eq!(count(&p2), 100);
+}
+
+/// 多个宿主线程同时往**同一个**输入口送包 —— 比往不同口更难:`last_sent` 单调检查、
+/// 同一条边的入队、全局水位记账都被并发争用。引擎必须线程安全:不崩、无竞态(TSan)、
+/// 不泄漏,且每个**被接受**的包恰好投递一次。时间戳交错必然触发一些非单调拒绝,
+/// 被拒的包也必须释放。
+#[test]
+fn concurrent_send_to_same_port_is_safe() {
+    let _acct = ACCOUNTING.lock().unwrap_or_else(|e| e.into_inner());
+    let base = ALIVE.load(Ordering::SeqCst);
+    let accepted = std::sync::Arc::new(AtomicUsize::new(0));
+    {
+        init();
+        let graph = std::sync::Arc::new(
+            Graph::from_yaml(
+                r#"
+executors:
+  - { name: "cpu", type: "ThreadPoolExecutor", num_threads: 4 }
+nodes:
+  - { name: "p", kernel: "PassThroughKernel", executor: "cpu", input_ports: ["in"], output_ports: ["out"] }
+input_ports: ["in"]
+output_ports: ["out"]
+"#,
+            )
+            .unwrap(),
+        );
+        let poller = graph.add_poller("out").unwrap();
+        graph.start().unwrap();
+
+        let mut handles = Vec::new();
+        for t in 0..4i64 {
+            let g = graph.clone();
+            let acc = accepted.clone();
+            handles.push(std::thread::spawn(move || {
+                let input = g.input("in").unwrap();
+                // 4 个线程的时间戳区间交错(t, t+4, t+8, ...),到达顺序不定 → 必有非单调被拒
+                for k in 0..50i64 {
+                    let ts = k * 4 + t;
+                    if input.send(tracked_packet(ts as i32, ts)).is_ok() {
+                        acc.fetch_add(1, Ordering::SeqCst);
+                    }
+                }
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        graph.close_all_inputs();
+        graph.wait_done_timeout(Duration::from_secs(60)).unwrap();
+
+        let mut delivered = 0usize;
+        while poller.try_next().is_some() {
+            delivered += 1;
+        }
+        assert_eq!(
+            delivered,
+            accepted.load(Ordering::SeqCst),
+            "每个被接受的包都必须恰好投递一次(不丢不重)"
+        );
+    }
+    assert_eq!(
+        ALIVE.load(Ordering::SeqCst),
+        base,
+        "并发同口发送不得泄漏(含被非单调拒绝的包)"
+    );
 }
 
 /// 图在池仍有任务时被直接丢弃 —— 必须干净地关停并 join,不能崩也不能挂。
