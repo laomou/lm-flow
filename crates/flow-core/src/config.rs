@@ -20,6 +20,10 @@ pub struct ExecutorConfig {
     pub r#type: String,
     #[serde(default)]
     pub num_threads: usize,
+    /// CPU 亲和力:worker `i` 绑到 `affinity[i % len]` 号核。空 = 不绑(默认)。
+    /// 仅 Linux 生效;其它平台忽略。用于实时/NUMA 场景固定核、减少迁移抖动。
+    #[serde(default)]
+    pub affinity: Vec<usize>,
 }
 
 /// 输入策略(节点级可插拔)。见 docs/design.md §7.10。
@@ -256,6 +260,25 @@ max_queued_packets: 500
         assert_eq!(cfg.watchdog_ms, 5000);
         assert_eq!(cfg.max_queued_packets, 500);
         assert!(cfg.nodes[0].options.get("factor").is_some());
+    }
+
+    #[test]
+    fn parses_executor_affinity() {
+        let cfg = GraphConfig::from_yaml(
+            r#"
+executors:
+  - { name: "rt", type: "ThreadPoolExecutor", num_threads: 2, affinity: [2, 3] }
+nodes:
+  - { name: "n", kernel: "K", input_ports: ["a"], output_ports: ["b"] }
+"#,
+        )
+        .unwrap();
+        assert_eq!(cfg.executors[0].affinity, vec![2, 3], "绑核列表应被解析");
+        // 不配 affinity 时默认空
+        let cfg2 =
+            GraphConfig::from_yaml("executors:\n  - { name: c, type: ThreadPoolExecutor }\n")
+                .unwrap();
+        assert!(cfg2.executors[0].affinity.is_empty(), "默认不绑核");
     }
 
     #[test]

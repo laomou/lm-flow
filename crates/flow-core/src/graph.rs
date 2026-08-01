@@ -838,7 +838,7 @@ impl GraphInner {
             if executors.iter().any(|p| p.name() == e.name) {
                 return Err(Error::InvalidArg(format!("executor `{}` 重复定义", e.name)));
             }
-            executors.push(ThreadPool::new(&e.name, e.num_threads));
+            executors.push(ThreadPool::new(&e.name, e.num_threads, e.affinity.clone()));
         }
         let known: Vec<&str> = executors.iter().map(|p| p.name()).collect();
         for (idx, n) in cfg.nodes.iter().enumerate() {

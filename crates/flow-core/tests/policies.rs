@@ -176,6 +176,41 @@ output_ports: ["out"]
     graph.wait_done_timeout(Duration::from_secs(30)).unwrap();
 }
 
+/// 绑核的线程池:配了 affinity 的图必须照常正确跑完(绑核是优化,不能改变结果)。
+#[test]
+fn pool_with_affinity_runs_correctly() {
+    init();
+    let graph = Graph::from_yaml(
+        r#"
+executors:
+  - { name: "rt", type: "ThreadPoolExecutor", num_threads: 2, affinity: [0, 1] }
+nodes:
+  - name: "p"
+    kernel: "PassThroughKernel"
+    executor: "rt"
+    input_ports: ["in"]
+    output_ports: ["out"]
+input_ports: ["in"]
+output_ports: ["out"]
+"#,
+    )
+    .unwrap();
+    let poller = graph.add_poller("out").unwrap();
+    graph.start().unwrap();
+    let input = graph.input("in").unwrap();
+    for i in 0..20i32 {
+        input.send(Packet::new(i).at(Timestamp(i as i64))).unwrap();
+    }
+    graph.close_all_inputs();
+    graph.wait_done_timeout(Duration::from_secs(30)).unwrap();
+
+    let mut got = Vec::new();
+    while let Some(p) = poller.try_next() {
+        got.push(*p.get::<i32>().unwrap());
+    }
+    assert_eq!(got, (0..20).collect::<Vec<_>>(), "绑核不得改变处理结果");
+}
+
 #[test]
 fn fixed_size_rejects_zero_capacity() {
     init();

@@ -654,6 +654,20 @@ nodes:
   - { name: "draw",   kernel: "Overlay" }        # 未指定 → 宿主主线程
 ```
 
+**CPU 亲和力(绑核)** —— 池可选 `affinity: [核号...]`,worker `i` 绑到 `affinity[i % len]` 号核:
+
+```yaml
+executors:
+  - { name: "rt", type: "ThreadPoolExecutor", num_threads: 2, affinity: [2, 3] }
+```
+
+- 语义是 `sched_setaffinity` 的**硬绑核**:worker 线程**只能**在所列核上跑,减少迁移抖动、利于 NUMA/实时。
+- `affinity` 长度 == `num_threads` 即 1:1 独占绑核;短于线程数则按 `i % len` 轮转复用。
+- **仅 Linux 生效**;其它平台静默忽略。**是尽力而为的优化**:绑核失败(核不存在等)不影响正确性。
+- 只用 glibc 已链接的 `sched_setaffinity` 符号(`extern "C"` 声明),不引入 `libc` crate,守住「零外部 crate 依赖」。
+- ⚠ 亲和力 ≠ **优先级**:它只限制「能在哪些核跑」,不改变线程分到多少 CPU 时间。
+  实时优先级(`SCHED_FIFO`/`nice`)是另一根轴,本版本未做。
+
 **默认(节点未写 `executor`)= 宿主主线程,不是线程池**(ADR #16):
 
 - 默认零并发、执行顺序确定、断点调试直观;**并发是显式 opt-in**。
