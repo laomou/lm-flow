@@ -306,10 +306,12 @@ class NormalizeKernel : public flow::Kernel {
 }  // namespace
 
 /*
- * 显式聚合注册。宿主(Rust 侧 flow_core::register_builtin_kernels())调用一次。
- * 相比静态初始化,这条路径不会被链接器裁剪。
+ * 显式聚合注册的实现。由 Rust 侧的 C ABI 包装 `flow_register_builtin_kernels`
+ * (见 crates/flow-core/src/lib.rs)调用一次 —— 用 Rust 包装是为了让符号也能从
+ * cdylib(.so/.dylib)导出(C++ 符号若无人从导出根引用会被链接器 GC 掉)。
+ * 相比静态初始化,这条显式路径不会被链接器裁剪。
  */
-extern "C" void flow_register_builtin_kernels(void) {
+extern "C" void flow_register_builtin_kernels_impl(void) {
 #define FLOW_REG(T) flow_register_kernel(#T, flow::KernelAdapter<T>::vtable(), nullptr)
   FLOW_REG(PassThroughKernel);
   FLOW_REG(ScaleKernel);
