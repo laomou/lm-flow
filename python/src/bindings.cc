@@ -68,7 +68,12 @@ int dtype_from_numpy(const py::dtype& dt) {
   if (dt.is(py::dtype::of<int64_t>())) return FLOW_DTYPE_I64;
   if (dt.is(py::dtype::of<float>())) return FLOW_DTYPE_F32;
   if (dt.is(py::dtype::of<double>())) return FLOW_DTYPE_F64;
-  throw py::value_error("不支持的 numpy dtype;可用 uint8/int8/uint16/int16/int32/int64/float32/float64");
+  // float16:C++ 无标准 half 类型,按 numpy 的 kind('f')+itemsize(2) 辨认。
+  // 放在 F32/F64 之后,不会误伤它们。fp16 是模型推理的主力类型,必须支持。
+  if (dt.kind() == 'f' && dt.itemsize() == 2) return FLOW_DTYPE_F16;
+  throw py::value_error(
+      "不支持的 numpy dtype;可用 "
+      "uint8/int8/uint16/int16/int32/int64/float16/float32/float64");
 }
 
 py::dtype numpy_from_dtype(int dt) {
@@ -79,6 +84,7 @@ py::dtype numpy_from_dtype(int dt) {
     case FLOW_DTYPE_I16: return py::dtype::of<int16_t>();
     case FLOW_DTYPE_I32: return py::dtype::of<int32_t>();
     case FLOW_DTYPE_I64: return py::dtype::of<int64_t>();
+    case FLOW_DTYPE_F16: return py::dtype("float16");
     case FLOW_DTYPE_F32: return py::dtype::of<float>();
     case FLOW_DTYPE_F64: return py::dtype::of<double>();
     default: throw py::value_error("未知 FLOW_DTYPE");

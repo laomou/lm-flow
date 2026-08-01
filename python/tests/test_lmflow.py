@@ -196,6 +196,21 @@ class TestNumpy(unittest.TestCase):
             g.close_all_inputs()
             g.wait_done(timeout=5.0)
 
+    def test_float16_roundtrip(self):
+        # fp16 是模型推理主力类型:new_buffer 能建、零拷贝穿过管线、as_numpy 读回都须为 float16
+        with graph(one_node("PassThroughKernel")) as g:
+            out = g.add_poller("out")
+            g.start()
+            pkt, buf = g.new_buffer((4,), np.float16)
+            self.assertEqual(buf.dtype, np.float16)
+            buf[:] = [1.5, 2.0, -3.25, 0.0]
+            g.input("in").send(pkt, ts=0)
+            arr = out.next(timeout=5.0).as_numpy()
+            self.assertEqual(arr.dtype, np.float16, "dtype 必须原样保持 float16")
+            self.assertEqual(arr.tolist(), [1.5, 2.0, -3.25, 0.0])
+            g.close_all_inputs()
+            g.wait_done(timeout=5.0)
+
     def test_as_numpy_is_read_only(self):
         # 输入包是引用计数共享的,写它会污染别的分支 —— 必须是只读视图
         with graph(one_node("PassThroughKernel")) as g:
