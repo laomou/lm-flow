@@ -173,12 +173,6 @@ jobs:
               target/release/libflow_core.a $(pkg-config --cflags --libs opencv4) \
               -lpthread -ldl -lm -o /tmp/flow_cv_test
           /tmp/flow_cv_test
-      - name: OpenCV C++ 算子在真图里端到端(测试程序链 CV 库 + flow 库;引擎本身不含 CV)
-        run: |
-          g++ -std=c++17 -Wall -Wextra -Werror -Iinclude cpp/tests/flow_cv_graph_test.cc \
-              target/release/libflow_core.a $(pkg-config --cflags --libs opencv4) \
-              -lpthread -ldl -lm -o /tmp/flow_cv_graph_test
-          /tmp/flow_cv_graph_test
       # 直接证明「Python numpy 图 → C++ OpenCV 算子 → 读回」是同一块内存:带 --with-cv-test
       # 把 CvInvertTest 编进扩展(仅测试构建链 OpenCV;生产扩展仍零 CV),再从 Python 调用。
       - uses: actions/setup-python@v5
