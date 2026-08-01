@@ -249,6 +249,59 @@ nodes:
     assert!(err.to_string().contains("成环"), "{err}");
 }
 
+/// 退化图不该崩:空图(0 节点)能建/启/关/终结。
+#[test]
+fn empty_graph_terminates_cleanly() {
+    init();
+    let graph = Graph::from_yaml("nodes: []").unwrap();
+    graph.start().unwrap();
+    graph.close_all_inputs();
+    graph.wait_done().unwrap();
+    assert_eq!(graph.state(), State::Terminated, "空图也应能干净终结");
+}
+
+/// 节点输出无人消费、也不是图输出口(悬空输出):合法,包被丢弃,不崩不泄漏。
+#[test]
+fn dangling_output_is_allowed() {
+    init();
+    let graph = Graph::from_yaml(
+        r#"
+nodes:
+  - { name: "n", kernel: "PassThroughKernel", input_ports: ["in"], output_ports: ["dangling"] }
+input_ports: ["in"]
+"#,
+    )
+    .unwrap();
+    graph.start().unwrap();
+    let input = graph.input("in").unwrap();
+    for i in 0..5i32 {
+        input.send(Packet::new(i).at(Timestamp(i as i64))).unwrap();
+    }
+    graph.close_all_inputs();
+    graph.wait_done().unwrap();
+    assert_eq!(
+        graph.node_stats(0).unwrap().processed,
+        5,
+        "算子仍应处理每个包"
+    );
+}
+
+/// 图输出口没有任何节点产出它:必须在 init 报错(而不是留个永不触发的 poller)。
+#[test]
+fn rejects_graph_output_with_no_producer() {
+    init();
+    let err = Graph::from_yaml(
+        r#"
+nodes:
+  - { name: "n", kernel: "SinkKernel", input_ports: ["in"], output_ports: [] }
+input_ports: ["in"]
+output_ports: ["out"]
+"#,
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("没有任何节点产出"), "{err}");
+}
+
 #[test]
 fn rejects_duplicate_producer() {
     init();
