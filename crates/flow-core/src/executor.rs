@@ -48,15 +48,15 @@ pub struct ThreadPool {
     threads: Mutex<Vec<JoinHandle<()>>>,
 }
 
-/// 把**当前线程**绑定到指定 CPU 核(Linux)。绑核是尽力而为的优化 ——
+/// 把**当前线程**绑定到指定 CPU 核(Linux/Android)。绑核是尽力而为的优化 ——
 /// 其它平台、或核不存在等失败情形,一律静默降级为「不绑」,绝不影响正确性。
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 fn pin_current_thread_to(cpu: usize) {
-    // 直接声明 glibc 早已链接进来的符号,避免引入 libc crate(本引擎坚持零外部 crate 依赖)。
+    // 直接声明 libc(glibc/Bionic)早已链接进来的符号,避免引入 libc crate(本引擎坚持零外部 crate 依赖)。
     extern "C" {
         fn sched_setaffinity(pid: i32, cpusetsize: usize, mask: *const u64) -> i32;
     }
-    const NBITS: usize = 1024; // glibc 默认 cpu_set_t 位宽
+    const NBITS: usize = 1024; // cpu_set_t 位宽(glibc/Bionic 一致)
     if cpu >= NBITS {
         return;
     }
@@ -68,14 +68,14 @@ fn pin_current_thread_to(cpu: usize) {
     }
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
 fn pin_current_thread_to(_cpu: usize) {}
 
-/// 把**当前线程**设为 SCHED_FIFO 实时优先级(Linux)。**尽力而为**:设实时调度需要
+/// 把**当前线程**设为 SCHED_FIFO 实时优先级(Linux/Android)。**尽力而为**:设实时调度需要
 /// CAP_SYS_NICE / root,拿不到就静默失败(线程照常以普通分时跑,不影响正确性)。
 ///
 /// 与绑核配合是刻意的:实时线程只在被绑的核上抢占,万一算子死循环也不会拖垮整机。
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 fn set_current_thread_rt_priority(prio: i32) {
     extern "C" {
         fn sched_setscheduler(pid: i32, policy: i32, param: *const SchedParam) -> i32;
@@ -94,7 +94,7 @@ fn set_current_thread_rt_priority(prio: i32) {
     }
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
 fn set_current_thread_rt_priority(_prio: i32) {}
 
 impl ThreadPool {
@@ -237,7 +237,7 @@ mod tests {
     }
 
     /// Linux 下验证绑核**真的生效**:让工作线程回读自己的亲和力掩码,应恰为所绑的核。
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     #[test]
     fn affinity_actually_pins_worker_thread() {
         use std::sync::mpsc;
@@ -275,7 +275,7 @@ mod tests {
 
     /// 实时优先级是**尽力而为**的:有权限(CAP_SYS_NICE/root)时应真的切到 SCHED_FIFO;
     /// 无权限时静默失败、线程照常跑。两种情形都不能崩、不能改变功能。
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     #[test]
     fn rt_priority_is_best_effort() {
         extern "C" {

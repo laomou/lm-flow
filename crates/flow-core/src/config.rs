@@ -21,11 +21,11 @@ pub struct ExecutorConfig {
     #[serde(default)]
     pub num_threads: usize,
     /// CPU 亲和力:worker `i` 绑到 `affinity[i % len]` 号核。空 = 不绑(默认)。
-    /// 仅 Linux 生效;其它平台忽略。用于实时/NUMA 场景固定核、减少迁移抖动。
+    /// 仅 Linux/Android 生效;其它平台忽略。用于实时/NUMA 场景固定核、减少迁移抖动。
     #[serde(default)]
     pub affinity: Vec<usize>,
     /// 实时优先级(SCHED_FIFO,1..=99)。0 = 不动(默认,普通分时)。
-    /// 尽力而为:设实时调度需 CAP_SYS_NICE/root,拿不到就静默降级。仅 Linux。
+    /// 尽力而为:设实时调度需 CAP_SYS_NICE/root,拿不到就静默降级。仅 Linux/Android。
     #[serde(default)]
     pub priority: i32,
 }
