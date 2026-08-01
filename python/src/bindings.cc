@@ -487,8 +487,10 @@ class Graph;
 
 class Input {
  public:
-  Input(FlowInput* h, std::shared_ptr<void> keepalive)
-      : h_(h), keepalive_(std::move(keepalive)) {}
+  explicit Input(FlowInput* h) : h_(h) {}
+  ~Input() { flow_input_free(h_); }
+  Input(const Input&) = delete;
+  Input& operator=(const Input&) = delete;
 
   /// 送包。可能因背压而阻塞 → **必须释放 GIL**,否则引擎线程拿不到 GIL 而死锁。
   void send(const py::object& value, std::optional<int64_t> ts) {
@@ -515,13 +517,14 @@ class Input {
 
  private:
   FlowInput* h_;
-  std::shared_ptr<void> keepalive_;
 };
 
 class Poller {
  public:
-  Poller(FlowPoller* h, std::shared_ptr<void> keepalive)
-      : h_(h), keepalive_(std::move(keepalive)) {}
+  explicit Poller(FlowPoller* h) : h_(h) {}
+  ~Poller() { flow_poller_free(h_); }
+  Poller(const Poller&) = delete;
+  Poller& operator=(const Poller&) = delete;
 
   /// 取下一个包。`timeout` 为 None 表示不限时。图结束返回 None,超时抛 TimeoutError。
   py::object next(std::optional<double> timeout) {
@@ -562,7 +565,6 @@ class Poller {
 
  private:
   FlowPoller* h_;
-  std::shared_ptr<void> keepalive_;
 };
 
 /// 图。**必须在解释器销毁前关闭** —— 用 with 语句,或显式 close()。
@@ -574,8 +576,6 @@ class Graph {
     }
     g_ = flow_graph_new();
     if (!g_) throw std::runtime_error(std::string("flow_graph_new 失败: ") + flow_last_error());
-    // 让 Input/Poller 句柄能保证 graph 不先于它们释放
-    alive_ = std::shared_ptr<void>(reinterpret_cast<void*>(1), [](void*) {});
   }
   ~Graph() { close(); }
 
@@ -597,7 +597,7 @@ class Graph {
   Poller* add_poller(const std::string& port) {
     FlowPoller* p = flow_graph_add_poller(g_, port.c_str());
     if (!p) throw py::key_error(std::string("add_poller 失败: ") + flow_last_error());
-    return new Poller(p, alive_);
+    return new Poller(p);
   }
 
   void observe(const std::string& port, const py::function& fn) {
@@ -612,7 +612,7 @@ class Graph {
   Input* input(const std::string& port) {
     FlowInput* h = flow_graph_input(g_, port.c_str());
     if (!h) throw py::key_error(std::string("graph.input 失败: ") + flow_last_error());
-    return new Input(h, alive_);
+    return new Input(h);
   }
 
   void close_input(const std::string& port) {
@@ -719,7 +719,6 @@ class Graph {
   }
 
   FlowGraph* g_ = nullptr;
-  std::shared_ptr<void> alive_;
   std::list<py::function> observers_;
 };
 

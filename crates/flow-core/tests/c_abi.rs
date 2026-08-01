@@ -116,6 +116,7 @@ fn full_pipeline_through_c_abi() {
         );
         assert_eq!(flow_graph_state(g), 4, "结束后应为 Terminated(4)");
 
+        flow_input_free(input);
         flow_poller_free(poller);
         flow_graph_free(g);
     }
@@ -259,6 +260,50 @@ fn null_pointers_do_not_crash() {
         flow_graph_free(std::ptr::null_mut());
         flow_graph_cancel(std::ptr::null_mut());
         flow_graph_close_all_inputs(std::ptr::null_mut());
+        flow_input_free(std::ptr::null_mut());
+        flow_poller_free(std::ptr::null_mut());
+    }
+}
+
+/// 句柄由调用方拥有:即使先 free 了图,句柄仍安全 —— 之后再用只得到「图已结束」,
+/// 绝不 use-after-free。这守卫的是 Python/C++ 宿主先销毁 graph、后用 input/poller 的场景。
+#[test]
+fn handles_stay_safe_after_graph_free() {
+    flow_core::register_builtin_kernels();
+    unsafe {
+        let g = flow_graph_new();
+        let yaml = cs(CONFIG);
+        assert_eq!(flow_graph_init_from_yaml(g, yaml.as_ptr()), 0);
+        let port_out = cs("out");
+        let poller = flow_graph_add_poller(g, port_out.as_ptr());
+        assert_eq!(flow_graph_start(g), 0);
+        let port_in = cs("in");
+        let input = flow_graph_input(g, port_in.as_ptr());
+        assert!(!input.is_null() && !poller.is_null());
+
+        // 先把图 free 掉(cancel + wait_done + 释放图槽),句柄却仍在手上
+        flow_graph_free(g);
+
+        // 往已结束的图发送:必须安全地返回错误(而不是崩溃/挂死)
+        let rc = flow_input_send(input, make_int_packet(1, 0));
+        assert_ne!(rc, 0, "图已结束,send 应报错而不是 UAF");
+
+        // poller 取包也安全:图已结束,返回 false
+        let mut out = FlowPacket {
+            payload: std::ptr::null_mut(),
+            type_id: 0,
+            timestamp: 0,
+            owner: std::ptr::null_mut(),
+            drop_fn: None,
+        };
+        assert!(
+            !flow_poller_next(poller, &mut out),
+            "已结束的图 poller 应返回 false"
+        );
+
+        // 归还句柄(此刻才真正释放引擎)
+        flow_input_free(input);
+        flow_poller_free(poller);
     }
 }
 
@@ -394,6 +439,7 @@ fn observer_receives_packets() {
             vec![0, 10, 20],
             "observer 应按序收到每个包"
         );
+        flow_input_free(input);
         flow_graph_free(g);
     }
 }
@@ -432,6 +478,7 @@ output_ports: ["out"]
             .to_string_lossy()
             .into_owned();
         assert!(ge.contains("类型不符"), "图级错误: {ge}");
+        flow_input_free(input);
         flow_graph_free(g);
         flow_set_log_callback(None, std::ptr::null_mut());
     }

@@ -1281,15 +1281,14 @@ pub extern "C" fn flow_graph_new() -> *mut FlowGraph {
 
 /// `flow_graph_new` 先返回一个空槽,`init_from_yaml` 才真正建图。
 ///
-/// ⚠ `inputs`/`pollers` 用 `Vec<Box<T>>` 而**不能**按 clippy 建议改成 `Vec<T>`:
-/// 我们把元素的裸地址交给了 C 侧(`FlowInput*`/`FlowPoller*`),而 `Vec<T>` 扩容会
-/// 搬动元素、让那些已发出的指针全部失效(use-after-free)。`Box` 保证地址稳定。
+/// 输入/输出句柄(`FlowInput*`/`FlowPoller*`)**不**由本槽持有 —— 它们是**调用方拥有**的:
+/// `flow_graph_input`/`flow_graph_add_poller` 返回一个独立的 `Box::into_raw` 句柄,
+/// 各自持一份 `Arc<GraphInner>`,须由调用方 `flow_input_free`/`flow_poller_free` 释放。
+/// 这样即使先 `flow_graph_free` 了图,句柄内存依旧有效(其 Arc 撑着引擎),
+/// 之后再用只会得到「图已结束」的错误,而不是 use-after-free。
 #[derive(Default)]
-#[allow(clippy::vec_box)]
 pub struct GraphSlot {
     graph: Option<Graph>,
-    inputs: Vec<Box<InputHandle>>,
-    pollers: Vec<Box<Poller>>,
 }
 
 unsafe fn slot_mut<'a>(g: *mut FlowGraph) -> Option<&'a mut GraphSlot> {
@@ -1407,10 +1406,8 @@ pub unsafe extern "C" fn flow_graph_input(
         let inner = gr.inner().clone();
         match inner.input_edge_by_name(name) {
             Some(edge) => {
-                let h = Box::new(InputHandle { graph: inner, edge });
-                let ptr = &*h as *const InputHandle as *mut FlowInput;
-                slot.inputs.push(h);
-                ptr
+                // 调用方拥有:独立 Box,持一份 Arc<GraphInner>。须 flow_input_free 释放。
+                Box::into_raw(Box::new(InputHandle { graph: inner, edge })) as *mut FlowInput
             }
             None => {
                 last_error::set(&format!("图输入口 `{name}` 不存在"));
@@ -1455,6 +1452,16 @@ pub unsafe extern "C" fn flow_input_close(i: *mut FlowInput) {
     guard_val((), || {
         if let Some(h) = input_ref(i) {
             h.graph.close_edge_pub(h.edge);
+        }
+    });
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn flow_input_free(i: *mut FlowInput) {
+    guard_val((), || {
+        if !i.is_null() {
+            // 调用方拥有:归还这份句柄(及其对引擎的 Arc)。图可能已 free,但句柄仍安全。
+            drop(Box::from_raw(i as *mut InputHandle));
         }
     });
 }
@@ -1533,10 +1540,8 @@ pub unsafe extern "C" fn flow_graph_add_poller_ex(
         };
         match gr.add_poller(name) {
             Ok(p) => {
-                let b = Box::new(p);
-                let ptr = &*b as *const Poller as *mut FlowPoller;
-                slot.pollers.push(b);
-                ptr
+                // 调用方拥有:独立 Box,持一份 Arc<GraphInner>。须 flow_poller_free 释放。
+                Box::into_raw(Box::new(p)) as *mut FlowPoller
             }
             Err(e) => {
                 last_error::set(&e.to_string());
@@ -1608,8 +1613,12 @@ pub unsafe extern "C" fn flow_poller_next_timeout(
 
 #[no_mangle]
 pub unsafe extern "C" fn flow_poller_free(p: *mut FlowPoller) {
-    // poller 的所有权在 GraphSlot 里,随 graph 释放;此处无需动作。
-    let _ = p;
+    guard_val((), || {
+        if !p.is_null() {
+            // 调用方拥有:归还这份句柄(及其对引擎的 Arc)。图可能已 free,但句柄仍安全。
+            drop(Box::from_raw(p as *mut Poller));
+        }
+    });
 }
 
 #[no_mangle]

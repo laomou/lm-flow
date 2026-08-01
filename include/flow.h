@@ -546,6 +546,10 @@ FlowInput* flow_graph_input(FlowGraph*, const char* port);
 FlowStatus flow_input_send(FlowInput*, FlowPacket pkt);
 FlowStatus flow_input_try_send(FlowInput*, FlowPacket pkt);
 void flow_input_close(FlowInput*);
+/* 归还输入句柄。句柄由调用方拥有,持有一份对引擎的引用 —— 即使先 flow_graph_free
+ * 了图,句柄仍安全(之后再用只会返回「图已结束」错误,不会 use-after-free)。
+ * 不释放会泄漏引擎(句柄的引用一直撑着)。可传 NULL。 */
+void flow_input_free(FlowInput*);
 /* 便捷式(内部查表),等价于 flow_graph_input + flow_input_send */
 FlowStatus flow_graph_add_packet(FlowGraph*, const char* port, FlowPacket pkt);
 FlowStatus flow_graph_close_input(FlowGraph*, const char* port);
@@ -563,6 +567,8 @@ bool flow_poller_next(FlowPoller*, FlowPacket* out);
 bool flow_poller_try_next(FlowPoller*, FlowPacket* out);
 /* 带超时:FLOW_OK / FLOW_ERR_TIMEOUT / FLOW_ERR_CLOSED */
 FlowStatus flow_poller_next_timeout(FlowPoller*, FlowPacket* out, int64_t timeout_ms);
+/* 归还 poller 句柄。与 flow_input_free 同理:调用方拥有,持一份对引擎的引用,
+ * 图 free 后仍安全;不释放会泄漏引擎。可传 NULL。 */
 void flow_poller_free(FlowPoller*);
 /* 同一端口上可以同时挂多个 poller 与多个 observer,各自**独立收到一份**
  * (引擎按订阅者数递增引用计数,不复制 payload)。注册后不支持移除。

@@ -144,6 +144,43 @@ fn cancel_path_releases_everything() {
     assert_eq!(ALIVE.load(Ordering::SeqCst), base, "取消后也必须全部归还");
 }
 
+/// **被拒的 send 也必须释放 payload**。send 把包按值收下,任何错误路径(口已关、
+/// 时间戳非单调、UNSET、水位 WouldBlock 等)都得让它随函数返回而析构 —— 否则
+/// 每次发送失败漏一个包。这条不变量在宿主频繁试探性发送时尤其容易被踩。
+#[test]
+fn rejected_send_releases_the_packet() {
+    let (_lock, base) = accounting();
+    {
+        let graph = linear_graph("PassThroughKernel");
+        graph.start().unwrap();
+        let input = graph.input("in").unwrap();
+
+        // (1) 时间戳非单调:先送 ts=5(收下),再送 ts=3(必拒)。
+        input.send(tracked_packet(0, 5)).unwrap();
+        let after_accept = ALIVE.load(Ordering::SeqCst);
+        assert!(after_accept > base, "第一个包应在途");
+        let r = input.send(tracked_packet(1, 3));
+        assert!(r.is_err(), "时间戳回退必被拒");
+        assert_eq!(
+            ALIVE.load(Ordering::SeqCst),
+            after_accept,
+            "被拒的包必须立刻释放,不能叠加到在途计数上"
+        );
+
+        // (2) 往已关闭的输入口发送:必拒,且释放。
+        input.close();
+        let r = input.send(tracked_packet(2, 6));
+        assert!(r.is_err(), "往已关闭的口发送必被拒");
+
+        let _ = graph.wait_done();
+    }
+    assert_eq!(
+        ALIVE.load(Ordering::SeqCst),
+        base,
+        "所有包(含被拒的)最终都必须归还"
+    );
+}
+
 /// 线程池 + `max_in_flight` 的多槽管线。并行 in-flight 的每个 context 槽都持有
 /// 本次输入;取消 / 直接销毁 / 失败时,**所有槽**(不只槽 0)都必须归还 payload。
 fn pool_graph_mif(kernel: &str, mif: usize) -> Graph {

@@ -95,6 +95,7 @@ int main() {
   flow_graph_close_all_inputs(graph);
   CHECK(flow_graph_wait_done(graph));
 
+  flow_input_free(input);
   flow_poller_free(poller);
   flow_graph_free(graph);
   return 0;

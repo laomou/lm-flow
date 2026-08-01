@@ -431,6 +431,18 @@ output_ports: [out]
         g.close()
         g.close()
 
+    def test_handle_use_after_graph_closed_is_safe(self):
+        # 句柄由调用方拥有并各持一份对引擎的引用:即使先关掉/销毁了图,
+        # 用悬空句柄也只会安全报错,绝不 use-after-free(曾经会挂死)。
+        g = graph(one_node("TDouble"))
+        poller = g.add_poller("out")
+        g.start()
+        inp = g.input("in")
+        g.close()  # 显式关图;句柄仍在手上
+        with self.assertRaises(Exception):
+            inp.send(1, ts=0)  # 必须安全报「已关闭」,而不是崩溃/挂死
+        self.assertIsNone(poller.try_next(), "已结束的图 poller 安全返回 None")
+
 
 class TestIntrospection(unittest.TestCase):
     def test_stats_counters_and_dump(self):
