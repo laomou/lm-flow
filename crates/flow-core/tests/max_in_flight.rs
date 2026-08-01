@@ -221,3 +221,93 @@ output_ports: ["out"]
     assert!(err.to_string().contains("max_in_flight"), "{err}");
     assert!(err.to_string().contains("executor"), "{err}");
 }
+
+/// **多输入对齐 × 并行 in-flight**:两个易错的子系统叠在一起。
+///
+/// 两输入口 sync 策略:必须按时间戳配对才触发;同时 max_in_flight>1 并行处理多个
+/// 时间戳、且完成顺序与时间戳相反。要求:每个时间戳恰好触发一次(不把不同时刻的
+/// 数据配错),且下游按时间戳单调。
+mod reverse_sleep2_kernel {
+    use super::*;
+    use flow_core::ffi::FlowContext;
+    use std::ffi::c_void;
+
+    unsafe extern "C" fn process(_self: *mut c_void, ctx: *mut FlowContext) -> i32 {
+        let ts = flow_core::ffi::flow_ctx_input_timestamp(ctx);
+        let sleep_ms = (70 - ts * 10).clamp(5, 70) as u64;
+        std::thread::sleep(Duration::from_millis(sleep_ms));
+        // 两口都到齐才会被调用(sync);把 0 口原样转发,一个对齐时刻产出一个包。
+        flow_core::ffi::flow_ctx_forward(ctx, 0, 0);
+        0
+    }
+
+    pub fn register() {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            let vt = flow_core::ffi::FlowKernelVTable {
+                create: None,
+                get_contract: None,
+                open: None,
+                process: Some(process),
+                close: None,
+                destroy: None,
+            };
+            let vt: &'static _ = Box::leak(Box::new(vt));
+            let name = std::ffi::CString::new("ReverseSleep2").unwrap();
+            let rc = unsafe {
+                flow_core::ffi::flow_register_kernel(name.as_ptr(), vt, std::ptr::null_mut())
+            };
+            assert_eq!(rc, 0, "注册 ReverseSleep2 失败");
+        });
+    }
+}
+
+#[test]
+fn multi_input_alignment_holds_under_parallel_in_flight() {
+    let _g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    init();
+    reverse_sleep2_kernel::register();
+
+    let graph = Graph::from_yaml(
+        r#"
+executors:
+  - { name: "cpu", type: "ThreadPoolExecutor", num_threads: 6 }
+nodes:
+  - name: "z"
+    kernel: "ReverseSleep2"
+    executor: "cpu"
+    input_ports: ["A:x", "B:y"]
+    output_ports: ["out"]
+    max_in_flight: 6
+input_ports: ["x", "y"]
+output_ports: ["out"]
+"#,
+    )
+    .unwrap();
+    let poller = graph.add_poller("out").unwrap();
+    graph.start().unwrap();
+    let x = graph.input("x").unwrap();
+    let y = graph.input("y").unwrap();
+
+    // 两口都喂 ts 0..6;交错发送,值带上口的标记以便核对没配错。
+    for i in 0..6i32 {
+        x.send(Packet::new(i).at(Timestamp(i as i64))).unwrap();
+    }
+    for i in 0..6i32 {
+        y.send(Packet::new(1000 + i).at(Timestamp(i as i64)))
+            .unwrap();
+    }
+    graph.close_all_inputs();
+    graph.wait_done_timeout(Duration::from_secs(30)).unwrap();
+
+    let mut got = Vec::new();
+    while let Some(p) = poller.try_next() {
+        got.push((p.timestamp().0, *p.get::<i32>().unwrap()));
+    }
+    // 每个对齐时刻恰好一个输出(不是 12 个),转发的是 x 口的值,且按时间戳单调。
+    assert_eq!(
+        got,
+        (0..6).map(|i| (i as i64, i)).collect::<Vec<_>>(),
+        "多输入并行下:须按时间戳配对、每时刻一个、且单调"
+    );
+}

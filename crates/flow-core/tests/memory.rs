@@ -144,6 +144,96 @@ fn cancel_path_releases_everything() {
     assert_eq!(ALIVE.load(Ordering::SeqCst), base, "取消后也必须全部归还");
 }
 
+/// 线程池 + `max_in_flight` 的多槽管线。并行 in-flight 的每个 context 槽都持有
+/// 本次输入;取消 / 直接销毁 / 失败时,**所有槽**(不只槽 0)都必须归还 payload。
+fn pool_graph_mif(kernel: &str, mif: usize) -> Graph {
+    flow_core::register_builtin_kernels();
+    Graph::from_yaml(&format!(
+        r#"
+executors:
+  - {{ name: "cpu", type: "ThreadPoolExecutor", num_threads: 4 }}
+nodes:
+  - {{ name: "a", kernel: "{kernel}", executor: "cpu", max_in_flight: {mif},
+      input_ports: ["in"], output_ports: ["out"] }}
+input_ports: ["in"]
+output_ports: ["out"]
+"#
+    ))
+    .unwrap()
+}
+
+/// 取消一个正在并行处理多个时间戳的池节点:每个占用槽里的输入都必须释放。
+#[test]
+fn cancel_with_pool_max_in_flight_releases_all() {
+    let (_lock, base) = accounting();
+    {
+        let graph = pool_graph_mif("PassThroughKernel", 4);
+        graph.start().unwrap(); // 不挂 poller:输出会积在池里
+        let input = graph.input("in").unwrap();
+        for i in 0..64i32 {
+            input.send(tracked_packet(i, i as i64)).unwrap();
+        }
+        graph.cancel();
+        let _ = graph.wait_done();
+    }
+    assert_eq!(
+        ALIVE.load(Ordering::SeqCst),
+        base,
+        "并行 in-flight 下取消,所有槽的输入都必须归还"
+    );
+}
+
+/// 不排空就直接销毁池 + 多槽节点:最容易漏掉非 0 号槽的路径。
+#[test]
+fn drop_undrained_pool_max_in_flight_releases_all() {
+    let (_lock, base) = accounting();
+    {
+        let graph = pool_graph_mif("PassThroughKernel", 4);
+        graph.start().unwrap();
+        let input = graph.input("in").unwrap();
+        for i in 0..64i32 {
+            input.send(tracked_packet(i, i as i64)).unwrap();
+        }
+        // 立刻丢弃(可能仍有任务在池队列里没跑完)—— 不得漏释放任何一个槽
+    }
+    assert_eq!(
+        ALIVE.load(Ordering::SeqCst),
+        base,
+        "并行 in-flight 下直接销毁图,所有槽的输入都必须归还"
+    );
+}
+
+/// 稳态:并行处理 300 帧后在途包应归零,不随轮次累积。
+#[test]
+fn steady_state_pool_max_in_flight_no_accumulation() {
+    let (_lock, base) = accounting();
+    let graph = pool_graph_mif("PassThroughKernel", 4);
+    let poller = graph.add_poller("out").unwrap();
+    graph.start().unwrap();
+    let input = graph.input("in").unwrap();
+    for i in 0..300i32 {
+        input.send(tracked_packet(i, i as i64)).unwrap();
+    }
+    graph.close_all_inputs();
+    graph.wait_done().unwrap();
+    let mut n = 0;
+    while poller.try_next().is_some() {
+        n += 1;
+    }
+    assert_eq!(n, 300, "并行下仍须无丢无重");
+    assert_eq!(
+        graph.inner().shared.total_queued(),
+        0,
+        "稳态下不应有残留在途包"
+    );
+    drop(graph);
+    assert_eq!(
+        ALIVE.load(Ordering::SeqCst),
+        base,
+        "并行 300 帧之后不应残留任何 payload"
+    );
+}
+
 // ---------------------------------------------------------------- CoW 不变量
 
 fn buffer_packet(len: usize, ts: i64) -> (Packet, usize) {

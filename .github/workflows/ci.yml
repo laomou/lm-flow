@@ -59,18 +59,28 @@ jobs:
           expected=$(for i in $(seq 0 9); do echo "out: $i @ ts=$i"; done)
           [ "$out" = "$expected" ] || { echo "输出不符:"; echo "$out"; exit 1; }
 
-  # 并发是本设计的核心风险 —— 不做等于没验证(见 docs/design.md §13)
-  sanitizers:
+  # 并发是本设计的核心风险 —— TSan 是硬门禁(见 docs/design.md §13)。
+  # 排除 doctest:`-Zbuild-std` 下 rustdoc 会因 sanitizer ABI 不一致而编不过,
+  # 那是工具链限制,与被测代码无关;`--lib --tests` 覆盖全部单元+集成测试。
+  tsan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with: { components: rust-src }
+      - name: TSan(Rust + C++ 混合,含 max_in_flight 并行路径)
+        run: RUSTFLAGS="-Zsanitizer=thread" cargo +nightly test -Zbuild-std --target x86_64-unknown-linux-gnu --lib --tests
+
+  # ASan / Miri:辅助排查,暂不作门禁(build-std + C++ 侧易有误报,
+  # Miri 也不完整支持线程与跨 FFI 的真实函数指针)。
+  sanitizers-extra:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly
         with: { components: rust-src, miri }
-      - name: TSan(Rust + C++ 混合)
-        run: RUSTFLAGS="-Zsanitizer=thread" cargo +nightly test -Zbuild-std --target x86_64-unknown-linux-gnu
-        continue-on-error: true        # M3 之前引擎尚无线程,先不作门禁
       - name: ASan
-        run: RUSTFLAGS="-Zsanitizer=address" cargo +nightly test -Zbuild-std --target x86_64-unknown-linux-gnu
+        run: RUSTFLAGS="-Zsanitizer=address" cargo +nightly test -Zbuild-std --target x86_64-unknown-linux-gnu --lib --tests
         continue-on-error: true
       - name: Miri(专查 FFI 里的 unsafe)
         run: cargo +nightly miri test --lib
