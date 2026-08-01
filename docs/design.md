@@ -675,8 +675,10 @@ executors:
   - { name: "rt", type: "ThreadPoolExecutor", num_threads: 2, affinity: [2, 3], priority: 20 }
 ```
 
-- `0`(默认)= 普通分时(`SCHED_OTHER`),不动;`1..=99` = 该 RT 优先级的 `SCHED_FIFO`。
-- **尽力而为**:设实时调度需 `CAP_SYS_NICE`/root,拿不到就静默降级为普通分时,不影响正确性。仅 Linux。
+- `0`(默认)= 普通分时(`SCHED_OTHER`),不动;`1..=99` = 该 RT 优先级的 `SCHED_FIFO`(Linux/Android)。
+- **iOS/macOS 无应用级 SCHED_FIFO** —— 映射成 Apple 的 **QoS class**:`priority>0` → `USER_INITIATED`
+  (「用户在等结果」,正合推理),顶格(`>=90`)→ `USER_INTERACTIVE`。这是 Darwin 上表达线程重要性的正道。
+- **尽力而为**:设实时调度需 `CAP_SYS_NICE`/root,拿不到就静默降级为普通分时,不影响正确性。
 - 与绑核**配合**是刻意的:实时线程只在被绑的核上抢占,万一算子死循环也只拖垮那几个核、不拖垮整机。
   worker 空闲时阻塞在 condvar 上(让出 CPU),故 idle 的 RT 线程不会空转饿死别人。
 

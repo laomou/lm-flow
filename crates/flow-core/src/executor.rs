@@ -94,7 +94,34 @@ fn set_current_thread_rt_priority(prio: i32) {
     }
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "android")))]
+/// Darwin(macOS/iOS)没有应用可用的 SCHED_FIFO 式实时优先级 —— Apple 用 **QoS class**
+/// 表达线程重要性。把 `priority>0` 映射成「用户在等结果」的高 QoS(推理正合适):
+/// 一般用 `USER_INITIATED`,顶格(>=90)才用 `USER_INTERACTIVE`(那档 Apple 留给 UI)。
+/// 同样是尽力而为,失败无妨。
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+fn set_current_thread_rt_priority(prio: i32) {
+    extern "C" {
+        // libSystem 一直链接着,直接声明,无需 libc crate。
+        fn pthread_set_qos_class_self_np(qos_class: u32, relative_priority: i32) -> i32;
+    }
+    const QOS_CLASS_USER_INITIATED: u32 = 0x19;
+    const QOS_CLASS_USER_INTERACTIVE: u32 = 0x21;
+    let qos = if prio >= 90 {
+        QOS_CLASS_USER_INTERACTIVE
+    } else {
+        QOS_CLASS_USER_INITIATED
+    };
+    unsafe {
+        let _ = pthread_set_qos_class_self_np(qos, 0);
+    }
+}
+
+#[cfg(not(any(
+    target_os = "linux",
+    target_os = "android",
+    target_os = "macos",
+    target_os = "ios"
+)))]
 fn set_current_thread_rt_priority(_prio: i32) {}
 
 impl ThreadPool {
