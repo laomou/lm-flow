@@ -1,69 +1,71 @@
 # lm-flow
 
-一个数据流图计算框架:把计算描述成**有向图**,节点是**算子(Kernel)**,边上流动**带时间戳的数据包(Packet)**。
-引擎用 Rust 实现(调度、线程、队列、拓扑),对外只暴露一层稳定的 **C ABI**;算子可以用 **C++** 或 **Python** 编写。
+**English** | [简体中文](README.zh-CN.md)
+
+A dataflow-graph engine: computation is described as a **directed graph** — nodes are **kernels**, and **timestamped packets** flow along the edges. The engine is written in Rust (scheduling, threads, queues, topology) and exposes a single stable **C ABI**; kernels can be written in **C++** or **Python**.
 
 ```text
-              ┌─────────────────────────────────────────────┐
-  宿主(驱动图)│  Rust / C++ / Python                        │
-              ├──────────────── C ABI (include/flow.h) ─────┤
-  引擎        │  Rust:调度器 · 执行器 · 边队列 · 拓扑 · YAML │
-              ├──────────────── C ABI (回调) ───────────────┤
-  算子        │  C++(flow.hpp 糖层) / Python                │
-              └─────────────────────────────────────────────┘
+  Host (Rust / C++ / Python) ── drives the graph
+        │  C ABI  (include/flow.h)
+        ▼
+  Engine (Rust): scheduler · executors · edge queues · topology · YAML
+        │  C ABI  (callbacks)
+        ▼
+  Kernels: C++ (flow.hpp sugar)  /  Python
 ```
 
-## 目录结构
+## Layout
 
 ```text
 lm-flow/
-├── include/                   公共头(C ABI 权威定义 + 可选 C++ 糖层)
-│   ├── flow.h                 C ABI —— 唯一稳定接口
-│   └── flow.hpp               C++ 算子糖层(header-only,非 ABI)
-├── cpp/                       C++ 算子
-│   ├── kernels/               内置示例算子集(11 个,一文件一算子 + register.cc 聚合)
-│   ├── abi_assert.cc          跨界结构体布局的编译期校验
-│   └── tests/                 C++ 测试可执行(flow.hpp 单测、CV 转换/图测试)
+├── include/                   Public headers (authoritative C ABI + optional C++ sugar)
+│   ├── flow.h                 C ABI — the only stable interface
+│   └── flow.hpp               C++ kernel sugar (header-only, not ABI)
+├── cpp/                       C++ kernels
+│   ├── kernels/               Built-in sample kernels (11, one file per kernel + register.cc)
+│   ├── abi_assert.cc          Compile-time checks of the cross-boundary struct layout
+│   └── tests/                 C++ test executables (flow.hpp unit test, CV conversion test)
 ├── crates/
-│   └── flow-core/             引擎(lib + staticlib + cdylib)
-│       ├── build.rs           用 cc 编译 cpp/ 并链入
+│   └── flow-core/             Engine (lib + staticlib + cdylib)
+│       ├── build.rs           Compiles cpp/ via `cc` and links it in
 │       ├── src/
-│       ├── tests/             含 ABI 布局一致性测试
-│       └── examples/          Rust 宿主示例
+│       ├── tests/             Includes ABI layout-consistency tests
+│       └── examples/          Rust host examples
 ├── python/
-│   ├── src/bindings.cc        Python 绑定(pybind11)
-│   ├── lmflow/                Python 包(pip install lm-flow → import lmflow)
-│   └── build.py              免 pip 的本地构建脚本
+│   ├── src/bindings.cc        Python bindings (pybind11)
+│   ├── lmflow/                Python package (pip install lm-flow → import lmflow)
+│   └── build.py               pip-free local build script
 ├── examples/
-│   ├── cpp/                   外部 C++ 宿主示例(不进 cargo 构建)
-│   └── python/                Python 示例
-└── docs/design.md             设计方案(权威文档)
+│   ├── cpp/                   External C++ host example (not part of the cargo build)
+│   ├── python/                Python examples
+│   └── android/ ios/ harmonyos/   Mobile integration examples
+└── docs/design.md             Design document (authoritative)
 ```
 
-## 核心概念
+## Core concepts
 
-| 概念 | 说明 |
+| Concept | Description |
 |---|---|
-| `Graph` | 一张计算图,由 YAML 描述;负责初始化、启动、关流、终止 |
-| `Node` | 图中一个节点,持有一个算子实例 |
-| `Kernel` | 算子 —— 用户编写的计算逻辑,实现 `Open/Process/Close` |
-| `Edge/Port` | 边与端口,按名字连接上下游;边上是带时间戳的包队列 |
-| `Packet` | 数据包 = 不可变共享的 payload + 时间戳 |
-| `Contract` | 端口类型契约,算子在 `GetContract` 中声明 |
-| `Poller/Observer` | 图输出的两种取法:拉(阻塞/超时/非阻塞)与推(回调) |
+| `Graph` | A computation graph described in YAML; handles init, start, input-close and termination |
+| `Node` | A node in the graph, holding one kernel instance |
+| `Kernel` | User-written compute logic implementing `Open/Process/Close` |
+| `Edge/Port` | Edges and ports connect producers to consumers by name; an edge carries a queue of timestamped packets |
+| `Packet` | A packet = an immutable shared payload + a timestamp |
+| `Contract` | Port type contract, declared by the kernel in `GetContract` |
+| `Poller/Observer` | Two ways to take graph output: pull (blocking/timeout/non-blocking) and push (callback) |
 
-## 快速开始
+## Quick start
 
 ```bash
-cargo build                       # 编译引擎 + C++ 算子
-cargo test                        # 单测 + ABI 布局一致性
-cargo run --example hello_world   # 两级直通管线,输出 0..9
+cargo build                       # build the engine + C++ kernels
+cargo test                        # unit tests + ABI layout consistency
+cargo run --example hello_world   # two-stage passthrough pipeline, prints 0..9
 ```
 
 Python:
 
 ```bash
-pip install lm-flow               # 预编译 wheel(Linux manylinux / macOS)
+pip install lm-flow               # prebuilt wheels (Linux manylinux / macOS)
 ```
 
 ```python
@@ -89,23 +91,22 @@ print(out.next(timeout=5.0).as_int())   # 42
 g.close_all_inputs(); g.wait_done(timeout=5.0)
 ```
 
-> 没有对应平台的预编译 wheel 时,`pip` 会从源码构建 —— 需要本机装有 Rust 工具链与 C++ 编译器。
-> 不走 pip 也可以:`python python/build.py` 直接就地编出扩展。
+> When there is no prebuilt wheel for your platform, `pip` builds from source — you'll need a Rust toolchain and a C++ compiler. You can also skip pip entirely: `python python/build.py` builds the extension in place.
 
-算子长这样(C++,用糖层):
+A kernel looks like this (C++, using the sugar layer):
 
 ```cpp
-class PassThroughKernel : public flow::Kernel {
+class PassThroughKernel : public lmflow::Kernel {
  public:
-  static void GetContract(flow::Contract& c) { c.InputSetAny(0); c.OutputSetAny(0); }
-  flow::Status Process(flow::Context& cc) override {
-    cc.Forward(0, 0);                      // 零拷贝直通
-    return flow::Status::Ok();
+  static void GetContract(lmflow::Contract& c) { c.InputSetAny(0); c.OutputSetAny(0); }
+  lmflow::Status Process(lmflow::Context& cc) override {
+    cc.Forward(0, 0);                      // zero-copy passthrough
+    return lmflow::Status::Ok();
   }
 };
 ```
 
-图长这样(YAML):
+A graph looks like this (YAML):
 
 ```yaml
 nodes:
@@ -118,29 +119,30 @@ input_ports: ["in"]
 output_ports: ["out"]
 ```
 
-详细设计见 [`docs/design.md`](docs/design.md)。
+See [`docs/design.md`](docs/design.md) for the full design.
 
-## 原生 SDK(C / C++ / 移动端)
+## Native SDK (C / C++ / mobile)
 
-C/C++ 或移动端宿主不走 pip —— 直接用**头文件 + 库**。每个 tag 的 GitHub Release 会附带各平台的
-`lmflow-<版本>-<平台>.tar.gz`(Linux x86_64/aarch64、macOS arm64/x86_64、iOS arm64、Android arm64):
+C/C++ and mobile hosts don't use pip — they use the **headers + library** directly. Each tagged GitHub Release ships per-platform `lmflow-<version>-<platform>.tar.gz` (Linux x86_64/aarch64, macOS arm64/x86_64, iOS arm64, Android arm64):
 
 ```text
 lmflow-v0.1.0-linux-x86_64/
 ├── include/   flow.h · flow.hpp · flow_cv.hpp
-└── lib/       libflow_core.a(静态,完整,首选)· libflow_core.so(动态)
+└── lib/       libflow_core.a (static, self-contained, preferred) · libflow_core.so (shared)
 ```
 
 ```bash
-# 链静态库(推荐,尤其移动端嵌入):
+# Link the static library (recommended, especially for mobile embedding):
 g++ -std=c++17 -Iinclude my_host.cc lib/libflow_core.a -lpthread -ldl -lm -o my_host
 ```
 
-本地自己出一份也行:
+Or build one yourself locally:
 
 ```bash
 cargo build --release          # → target/release/libflow_core.{a,so}
-# 头文件就是 include/ 下那三个
+# the headers are the three under include/
 ```
 
-C ABI 是唯一稳定接口(`include/flow.h`);`flow.hpp` 是可选的 C++ 算子糖层,`flow_cv.hpp` 是 OpenCV 互转。
+The C ABI is the only stable interface (`include/flow.h`); `flow.hpp` is the optional C++ kernel sugar, and `flow_cv.hpp` is OpenCV interop.
+
+Mobile integration examples: [`examples/android`](examples/android) (JNI), [`examples/ios`](examples/ios) (Swift), [`examples/harmonyos`](examples/harmonyos) (NAPI).
