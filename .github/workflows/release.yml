@@ -1,0 +1,57 @@
+# 打 tag(v*)即构建 manylinux + macOS wheel 与 sdist,并发布到 PyPI。
+#
+# 一次性准备(仓库管理员做一次):在 PyPI 上为 lm-flow 配置「可信发布者」
+# (Trusted Publisher),指向本仓库的 release.yml —— 无需在仓库里存 API token。
+# 见 https://docs.pypi.org/trusted-publishers/ 。之后:`git tag v0.1.0 && git push --tags`。
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch: {}   # 也可手动触发做一次干跑(只构建、按需发布)
+
+jobs:
+  wheels:
+    name: wheels ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-13, macos-14]   # macos-13=x86_64, macos-14=arm64
+    steps:
+      - uses: actions/checkout@v4
+      # Linux 的 Rust 在 manylinux 容器内由 cibuildwheel 的 before-all 装;
+      # macOS 直接在 runner 上装,给主机侧也备一份(host 工具没用到但无害)。
+      - uses: dtolnay/rust-toolchain@stable
+      - name: 构建 wheel(cibuildwheel:含 Rust 引擎 + pybind11 扩展)
+        uses: pypa/cibuildwheel@v2.21
+        # 配置在 pyproject.toml 的 [tool.cibuildwheel]
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.os }}
+          path: ./wheelhouse/*.whl
+
+  sdist:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - run: pipx run build --sdist
+      - uses: actions/upload-artifact@v4
+        with: { name: sdist, path: ./dist/*.tar.gz }
+
+  publish:
+    # 只有打了 tag 才真正发布;workflow_dispatch 只到构建为止(便于验证不误发)。
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [wheels, sdist]
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write        # 可信发布(OIDC),不用 token
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { path: dist, merge-multiple: true }
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist

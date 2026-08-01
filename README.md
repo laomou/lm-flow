@@ -21,16 +21,18 @@ lm-flow/
 │   ├── flow.h                 C ABI —— 唯一稳定接口
 │   └── flow.hpp               C++ 算子糖层(header-only,非 ABI)
 ├── cpp/                       C++ 算子
-│   ├── kernels.cc             内置示例算子集(8 个,覆盖不同用途)
+│   ├── kernels.cc             内置示例算子集(10 个,覆盖不同用途)
 │   └── abi_assert.cc          跨界结构体布局的编译期校验
 ├── crates/
-│   ├── flow-core/             引擎(lib + staticlib + cdylib)
-│   │   ├── build.rs           用 cc 编译 cpp/ 并链入
-│   │   ├── src/
-│   │   ├── tests/             含 ABI 布局一致性测试
-│   │   └── examples/          Rust 宿主示例
-│   └── flow-py/               Python 绑定
-├── python/lmflow/             Python 包
+│   └── flow-core/             引擎(lib + staticlib + cdylib)
+│       ├── build.rs           用 cc 编译 cpp/ 并链入
+│       ├── src/
+│       ├── tests/             含 ABI 布局一致性测试
+│       └── examples/          Rust 宿主示例
+├── python/
+│   ├── src/bindings.cc        Python 绑定(pybind11)
+│   ├── lmflow/                Python 包(pip install lm-flow → import lmflow)
+│   └── build.py              免 pip 的本地构建脚本
 ├── examples/
 │   ├── cpp/                   外部 C++ 宿主示例(不进 cargo 构建)
 │   └── python/                Python 示例
@@ -56,6 +58,38 @@ cargo build                       # 编译引擎 + C++ 算子
 cargo test                        # 单测 + ABI 布局一致性
 cargo run --example hello_world   # 两级直通管线,输出 0..9
 ```
+
+Python:
+
+```bash
+pip install lm-flow               # 预编译 wheel(Linux manylinux / macOS)
+```
+
+```python
+import lmflow
+
+lmflow.register_builtin_kernels()
+
+@lmflow.kernel("Double")
+class Double(lmflow.Kernel):
+    def process(self, cc):
+        cc.emit(0, cc.input(0).as_int() * 2)
+
+g = lmflow.Graph.from_yaml("""
+nodes:
+  - { name: d, kernel: Double, input_ports: [in], output_ports: [out] }
+input_ports: [in]
+output_ports: [out]
+""")
+out = g.add_poller("out")
+g.start()
+g.input("in").send(21, ts=0)
+print(out.next(timeout=5.0).as_int())   # 42
+g.close_all_inputs(); g.wait_done(timeout=5.0)
+```
+
+> 没有对应平台的预编译 wheel 时,`pip` 会从源码构建 —— 需要本机装有 Rust 工具链与 C++ 编译器。
+> 不走 pip 也可以:`python python/build.py` 直接就地编出扩展。
 
 算子长这样(C++,用糖层):
 

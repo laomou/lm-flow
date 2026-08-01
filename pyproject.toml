@@ -3,19 +3,59 @@ requires = ["setuptools>=64", "pybind11>=2.10", "numpy>=1.20"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "lmflow"
+# 发布名(PyPI)是 lm-flow;导入名仍是 lmflow(pip install lm-flow → import lmflow)。
+name = "lm-flow"
 version = "0.1.0"
 description = "数据流图计算框架:Rust 引擎 + C ABI + C++/Python 算子"
+readme = "README.md"
 requires-python = ">=3.8"
 dependencies = ["numpy>=1.20"]
 license = { text = "Apache-2.0" }
+authors = [{ name = "laomou", email = "rui.mou@foxmail.com" }]
+keywords = ["dataflow", "graph", "pipeline", "streaming", "rust", "pybind11"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Rust",
+    "Programming Language :: C++",
+    "Programming Language :: Python :: 3",
+    "Topic :: Software Development :: Libraries",
+    "Topic :: Scientific/Engineering",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+]
 
 [project.urls]
-Documentation = "https://github.com/example/lmflow/blob/main/docs/design.md"
+Homepage = "https://github.com/laomou/lm-flow"
+Repository = "https://github.com/laomou/lm-flow"
+Documentation = "https://github.com/laomou/lm-flow/blob/main/docs/design.md"
 
 [tool.setuptools]
 package-dir = { "" = "python" }
 packages = ["lmflow"]
 
 [tool.setuptools.package-data]
-lmflow = ["*.so", "*.pyd", "py.typed"]
+# 只带类型标记;编译出的扩展(_lmflow.*.so / .pyd)由 build_ext 自动纳入 wheel。
+# 不要在这里用 "*.so" 通配 —— 会把开发目录里 build.py 顺带产出的旧 .so 一起打进去。
+lmflow = ["py.typed", "*.pyi"]
+
+# ---- 构建 wheel 的矩阵(cibuildwheel,见 .github/workflows/release.yml)----
+[tool.cibuildwheel]
+# 引擎是 Rust 编的:每个构建环境都得先有工具链。
+build-frontend = "build"
+skip = ["*-musllinux*", "pp*", "*_i686", "*-win32"]
+test-command = "python -c \"import lmflow; lmflow.register_builtin_kernels(); print('lm-flow OK', len(lmflow.registered_kernels()))\""
+
+[tool.cibuildwheel.linux]
+# 在 manylinux 容器内构建:装 rustup,把 cargo 放进 PATH。auditwheel 会自动把
+# 产物打成 manylinux 标签(引擎是静态库、已链进扩展,只余 glibc 内的 pthread/dl/m)。
+# 固定 manylinux_2_28(glibc 2.28):比 2014(glibc 2.17)更稳当地跑 Rust 工具链,
+# 仍兼容 2019 年以后的绝大多数发行版。
+manylinux-x86_64-image = "manylinux_2_28"
+before-all = "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal"
+environment = { PATH = "$HOME/.cargo/bin:$PATH" }
+
+[tool.cibuildwheel.macos]
+before-all = "rustup --version || curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal"
+environment = { PATH = "$HOME/.cargo/bin:$PATH", MACOSX_DEPLOYMENT_TARGET = "10.12" }
