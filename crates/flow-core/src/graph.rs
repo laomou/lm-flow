@@ -1106,15 +1106,29 @@ impl GraphInner {
             ));
         }
 
-        // 全局水位:超限时把压力转化成图输入口背压(§7.5)
+        // 全局水位:超限时把压力转化成图输入口背压(§7.5)。
         while self.shared.over_watermark() {
             if !blocking {
                 return Err(Error::WouldBlock);
             }
-            if !self.pump_step() {
-                // 推不动又降不下来 —— 报错而不是永久阻塞
+            // 长时间背压等待期间图可能被取消/出错,及时退出而不是傻等。
+            if self.shared.is_cancelled() {
+                return Err(Error::Cancelled);
+            }
+            if let Some(e) = self.shared.first_error() {
+                return Err(e);
+            }
+            // 先记活动代数,再尝试推进/等待 —— 避免判定与等待之间丢唤醒。
+            let before = self.activity_gen();
+            if self.pump_step() {
+                continue; // 在调用线程上推进了主线程执行器
+            }
+            // 本线程推不动。若线程池还有在飞任务,就等它们排水(这才是真正的背压);
+            // 若全图都空了水位却下不去(如下游无人消费),那是真卡死 —— 报错而非永久阻塞。
+            if self.is_idle() {
                 return Err(Error::WouldBlock);
             }
+            self.wait_activity_since(before, std::time::Duration::from_millis(100));
         }
 
         // 时间戳单调性:图输入口强制校验(ADR #23)

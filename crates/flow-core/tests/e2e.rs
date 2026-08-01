@@ -494,6 +494,78 @@ max_queued_packets: 2
     assert!(sent < 10, "全局水位必须能拦住无限增长,实际送进 {sent} 个");
 }
 
+/// 背压正确性:**线程池图**上,阻塞 `send` 命中全局水位时必须**等池排水**,
+/// 而不是误报 `WouldBlock`。旧实现里 `pump_step` 只跑主线程任务,池图上它恒为 false,
+/// 于是阻塞 send 一撞水位就直接报错 —— 本测试就是那个回归的守卫。
+mod slow_sink_kernel {
+    use flow_core::ffi::FlowContext;
+    use std::ffi::c_void;
+    use std::time::Duration;
+
+    // 慢消费 sink(无输出口):睡 3ms 后丢弃。发端会远快于它,必然反复撞水位。
+    unsafe extern "C" fn process(_s: *mut c_void, _ctx: *mut FlowContext) -> i32 {
+        std::thread::sleep(Duration::from_millis(3));
+        0
+    }
+    pub fn register() {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            let vt = flow_core::ffi::FlowKernelVTable {
+                create: None,
+                get_contract: None,
+                open: None,
+                process: Some(process),
+                close: None,
+                destroy: None,
+            };
+            let vt: &'static _ = Box::leak(Box::new(vt));
+            let name = std::ffi::CString::new("SlowSink").unwrap();
+            let rc = unsafe {
+                flow_core::ffi::flow_register_kernel(name.as_ptr(), vt, std::ptr::null_mut())
+            };
+            assert_eq!(rc, 0, "注册 SlowSink 失败");
+        });
+    }
+}
+
+#[test]
+fn blocking_send_applies_backpressure_on_pool_instead_of_erroring() {
+    init();
+    slow_sink_kernel::register();
+    // 池 2 线程、每包 3ms;发端远快于处理端,必然反复撞上 max_queued_packets 水位。
+    let graph = Graph::from_yaml(
+        r#"
+executors:
+  - { name: "cpu", type: "ThreadPoolExecutor", num_threads: 2 }
+nodes:
+  - { name: "s", kernel: "SlowSink", executor: "cpu", input_ports: ["in"], output_ports: [] }
+input_ports: ["in"]
+max_queued_packets: 4
+"#,
+    )
+    .unwrap();
+    graph.start().unwrap();
+    let input = graph.input("in").unwrap();
+
+    // 30 个阻塞 send:命中水位时必须转为背压等待,而不是报 WouldBlock。
+    // 旧实现会在这里 panic(池图上 pump_step 恒 false → 直接 WouldBlock)。
+    for i in 0..30i32 {
+        input
+            .send(Packet::new(i).at(Timestamp(i as i64)))
+            .unwrap_or_else(|e| panic!("阻塞 send 第 {i} 个不应失败(应转为背压等待),却得到 {e}"));
+    }
+    graph.close_all_inputs();
+    graph
+        .wait_done_timeout(std::time::Duration::from_secs(30))
+        .unwrap();
+
+    assert_eq!(
+        graph.node_stats(0).unwrap().processed,
+        30,
+        "背压下 30 个都要处理完,不丢不错"
+    );
+}
+
 // ---------------------------------------------------------------- 辅助
 
 fn simple_graph() -> Graph {
