@@ -27,11 +27,11 @@ input_ports: ["input1"]
 output_ports: ["output2"]
 )";
 
-/* 把 int 打包成 LmflowPacket:owner=NULL 表示「宿主新建」,提交后引擎接管并在引用归零时
+/* 把 int 打包成 LMFlowPacket:owner=NULL 表示「宿主新建」,提交后引擎接管并在引用归零时
  * 调用 drop_fn。type_id 用一个约定值(跨语言读值时两侧须一致,见 flow.h 说明);
  * 本例算子只做直通、不读值,故取 0(= 不声明类型)亦可。 */
-static LmflowPacket MakeInt(int value, int64_t ts) {
-  LmflowPacket p;
+static LMFlowPacket MakeInt(int value, int64_t ts) {
+  LMFlowPacket p;
   p.payload = new int(value);
   p.type_id = 0;
   p.timestamp = ts;
@@ -42,7 +42,7 @@ static LmflowPacket MakeInt(int value, int64_t ts) {
 
 #define CHECK(expr)                                                        \
   do {                                                                     \
-    LmflowStatus st_ = (expr);                                               \
+    LMFlowStatus st_ = (expr);                                               \
     if (st_ != LMFLOW_OK) {                                                  \
       fprintf(stderr, "%s failed: %d (%s)\n", #expr, st_, lmflow_last_error()); \
       return 1;                                                            \
@@ -59,7 +59,7 @@ int main() {
   /* 必须先注册内置算子,否则 init 会报「算子未注册」 */
   lmflow_register_builtin_kernels();
 
-  LmflowGraph* graph = lmflow_graph_new();
+  LMFlowGraph* graph = lmflow_graph_new();
   if (!graph) {
     fprintf(stderr, "lmflow_graph_new: %s\n", lmflow_last_error());
     return 1;
@@ -67,7 +67,7 @@ int main() {
 
   CHECK(lmflow_graph_init_from_yaml(graph, kConfig));
 
-  LmflowPoller* poller = lmflow_graph_add_poller(graph, "output2");
+  LMFlowPoller* poller = lmflow_graph_add_poller(graph, "output2");
   if (!poller) {
     fprintf(stderr, "add_poller: %s\n", lmflow_last_error());
     return 1;
@@ -76,7 +76,7 @@ int main() {
   CHECK(lmflow_graph_start(graph));
 
   /* 句柄式输入:热路径免去每包按名字查表(生命周期随 graph,无需释放) */
-  LmflowInput* input = lmflow_graph_input(graph, "input1");
+  LMFlowInput* input = lmflow_graph_input(graph, "input1");
   if (!input) {
     fprintf(stderr, "graph_input: %s\n", lmflow_last_error());
     return 1;
@@ -85,7 +85,7 @@ int main() {
   for (int i = 0; i < 10; ++i) {
     CHECK(lmflow_input_send(input, MakeInt(i, i)));
 
-    LmflowPacket out;
+    LMFlowPacket out;
     if (!lmflow_poller_next(poller, &out)) break; /* 图已结束 */
     printf("out: %d @ ts=%lld\n", *static_cast<const int*>(out.payload),
            static_cast<long long>(out.timestamp));

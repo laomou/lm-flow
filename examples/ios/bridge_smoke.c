@@ -10,7 +10,7 @@
 int main(void) {
   if (lmflow_abi_version() != LMFLOW_ABI_VERSION) return 1;
   lmflow_register_builtin_kernels();
-  LmflowGraph* g = lmflow_graph_new();
+  LMFlowGraph* g = lmflow_graph_new();
   if (!g) return 2;
   lmflow_graph_free(g);
   return 0;

@@ -219,8 +219,8 @@ class InvertKernel : public lmflow::Kernel {
   lmflow::Status Process(lmflow::Context& cc) override {
     // 关键第一步:把包从输入槽**取走**。否则上下文仍持一份引用,CoW 必然复制。
     lmflow::Packet p = cc.TakeInput(0);
-    LmflowBuffer buf{};
-    if (LmflowStatus st = p.MakeMutableBuffer(&buf)) return st;
+    LMFlowBuffer buf{};
+    if (LMFlowStatus st = p.MakeMutableBuffer(&buf)) return st;
     if (buf.dtype != LMFLOW_DTYPE_U8 || buf.ndim < 2) return LMFLOW_ERR_INVALID_ARG;
 
     const size_t row_bytes = static_cast<size_t>(buf.shape[1]) *

@@ -35,7 +35,7 @@ back-edge、零输入口节点(source)、子图。
 ### 0.3 非目标
 
 - 不做分布式 / 跨进程;单进程内多线程。
-- 不做 GPU 内存空间(`LmflowBuffer.device` 已预留字段,但本版本只有 CPU)。
+- 不做 GPU 内存空间(`LMFlowBuffer.device` 已预留字段,但本版本只有 CPU)。
 - 不支持图跑完后重跑(`Terminated` 之后只能 `free`)。
 
 ---
@@ -53,14 +53,14 @@ back-edge、零输入口节点(source)、子图。
 | 5 | **Python 绑定用 pybind11**(非 PyO3) | 场景要 OpenCV:`cv::Mat` ↔ numpy 零拷贝是 pybind11 最成熟的路径 |
 | 6 | **引擎不解释 payload**,只搬引用 | 任意数据类型都能流动;张量、图像只是「又一个类型」,不该做成引擎的一等概念 |
 | 7 | **内建类型只为跨语言存在**,对引擎无特权 | 跨语言时对方无法解读不透明 C++ 对象,故需一套双方都认识的内存约定 |
-| 8 | **`LmflowBuffer` 一个 N 维描述符统管**图像/张量/音频 | 避免 IMAGE/TENSOR/AUDIO 各设一种类型;语义对齐 numpy buffer protocol |
+| 8 | **`LMFlowBuffer` 一个 N 维描述符统管**图像/张量/音频 | 避免 IMAGE/TENSOR/AUDIO 各设一种类型;语义对齐 numpy buffer protocol |
 | 9 | **Python 算子只收发内建类型** | 保持 payload 语言中立。否则 Python 算子的输出接到 C++ 算子上会得到无法解读的指针,且只在运行时暴露;另有 GIL-in-drop 死锁风险 |
 | 10 | **省拷贝用 CoW**(`take_input` + `make_mutable`) | 线性管线全程零拷贝;被扇出共享时才复制,从而不污染其它分支 |
 | 11 | **只有图输入口限流,内部边不对生产者背压** | 内部边设硬上界会让「扇出后汇合」的合法 DAG 死锁(详见 §7.5) |
 | 12 | **手写 `flow.h` 为权威 + 布局一致性测试**(不用 cbindgen) | header 是给用户看的文档,可读性优先;用 `static_assert` + Rust 测试钉死布局,拿到等价安全性 |
 | 13 | **`flow.hpp` 糖层保留**,但不属于 ABI | 让 C++ 算子写法自然;模板便利全部在用户 TU 内 monomorphize,不过界 |
 | 14 | **OpenCV 不进 core**,隔离到可选头 `flow_cv.hpp` | 引擎与 `flow.h`/`flow.hpp` 零图像库依赖,没装 OpenCV 也能编译全部 core |
-| 15 | **`LmflowBuffer` 预留 `flags`/`device`/`reserved`** | 一次性预留,未来加字段(最可能是 GPU 内存空间)不破 ABI |
+| 15 | **`LMFlowBuffer` 预留 `flags`/`device`/`reserved`** | 一次性预留,未来加字段(最可能是 GPU 内存空间)不破 ABI |
 | 16 | **节点默认跑在宿主主线程**,并发是显式 opt-in | 默认零并发、执行顺序确定、断点调试直观;副产品:Python 算子默认无 GIL 争抢 |
 | 17 | **端口扁平序号 = YAML 声明顺序** | 常见做法是按 tag 字典序分组,混用「有标签/无标签」端口时 `Index(0)` 拿到的不是写的第一个 —— 真实陷阱,故分道 |
 | 18 | **引入 side packet(常量输入)** | `options` 只能给标量/JSON,无法交付「一个已初始化好的模型」这类对象 |
@@ -133,7 +133,7 @@ pub struct Packet {
 }
 ```
 
-跨界表示 `LmflowPacket{payload, type_id, timestamp, owner, drop_fn}`(40 字节),
+跨界表示 `LMFlowPacket{payload, type_id, timestamp, owner, drop_fn}`(40 字节),
 **三种所有权语义由 `owner` 区分**:
 
 | 场景 | `owner` | 语义 |
@@ -160,7 +160,7 @@ pub struct Packet {
 > 算子与宿主分属不同编译产物时应改用稳定方案(对类型名做 FNV-1a)。糖层已把生成逻辑
 > 收敛到单一函数 `lmflow::TypeId<T>()`,改一处即可。
 
-### 3.3 LmflowBuffer:一个描述符统管所有大块数值数据
+### 3.3 LMFlowBuffer:一个描述符统管所有大块数值数据
 
 ```c
 typedef struct {
@@ -170,7 +170,7 @@ typedef struct {
   int32_t ndim, dtype;
   uint32_t flags; int32_t device;  /* READONLY 标记 / 内存空间 */
   int64_t reserved[2];             /* ABI 预留,置零 */
-} LmflowBuffer;                      /* 168 字节,布局由 static_assert 钉死 */
+} LMFlowBuffer;                      /* 168 字节,布局由 static_assert 钉死 */
 ```
 
 | 用途 | 表示 |
@@ -193,8 +193,8 @@ payload 默认**不可变共享**。需要就地改写时用 CoW —— 语义�
 
 ```cpp
 lmflow::Packet p = cc.TakeInput(0);          // ← 关键:移出输入槽
-LmflowBuffer buf{};
-if (LmflowStatus st = p.MakeMutableBuffer(&buf)) return st;   // 独占 → 零拷贝
+LMFlowBuffer buf{};
+if (LMFlowStatus st = p.MakeMutableBuffer(&buf)) return st;   // 独占 → 零拷贝
 // ...原地写 buf.data...
 cc.Emit(0, std::move(p));
 ```
@@ -210,7 +210,7 @@ cc.Emit(0, std::move(p));
 
 限制:CoW 只支持**引擎持有的内建 payload**(`BUFFER`/`BYTES`/标量)。自定义 payload
 引擎只有 `drop_fn`、无从复制,返回 `LMFLOW_ERR_INVALID_ARG`(该情形自行拷贝)。
-要通用化需给 `LmflowPacket` 增加 `clone_fn` 字段 —— 会改 ABI 布局,本版本不做。
+要通用化需给 `LMFlowPacket` 增加 `clone_fn` 字段 —— 会改 ABI 布局,本版本不做。
 
 ### 3.5 Timestamp
 
@@ -239,9 +239,9 @@ UNSET < UNSTARTED < PRE_STREAM < MIN … MAX < POST_STREAM < ONE_OVER_POST_STREA
 这是引入它的直接原因。
 
 ```c
-LmflowStatus lmflow_graph_set_side_packet(LmflowGraph*, const char* name, LmflowPacket pkt);  /* start 之前 */
-LmflowPacket lmflow_ctx_side_packet(const LmflowContext*, const char* name);                /* 借用,勿 drop */
-bool       lmflow_ctx_has_side_packet(const LmflowContext*, const char* name);
+LMFlowStatus lmflow_graph_set_side_packet(LMFlowGraph*, const char* name, LMFlowPacket pkt);  /* start 之前 */
+LMFlowPacket lmflow_ctx_side_packet(const LMFlowContext*, const char* name);                /* 借用,勿 drop */
+bool       lmflow_ctx_has_side_packet(const LMFlowContext*, const char* name);
 ```
 
 - 必须在 `start` 之前设置,之后返回 `LMFLOW_ERR_STATE`;传入即移交所有权,引擎持有到 graph 释放。
@@ -261,7 +261,7 @@ bool       lmflow_ctx_has_side_packet(const LmflowContext*, const char* name);
 | 内建类型 | `lmflow_packet_from_bytes/i64/f64/bool/str` + 对应 `as_*` |
 | 缓冲 | `lmflow_packet_new_buffer` `lmflow_packet_from_buffer` `lmflow_packet_as_buffer` `lmflow_dtype_size` |
 | 写时复制 | `lmflow_packet_make_mutable_buffer` `lmflow_packet_make_mutable_bytes` |
-| 算子注册 | `lmflow_register_kernel` + `LmflowKernelVTable`(48 字节) |
+| 算子注册 | `lmflow_register_kernel` + `LMFlowKernelVTable`(48 字节) |
 | Contract | `lmflow_contract_num_inputs/outputs` `…_input_id(tag)` `…_set_any` `…_set_type` |
 | Context 数据 | `lmflow_ctx_input` `…_input_payload` `…_take_input` `…_emit` `…_forward` `…_set_next_ts_bound` |
 | Context 端口 | `lmflow_ctx_input_id(tag,idx)` `…_input_index(name)` `…_input_name` `…_num_inputs/outputs` |
@@ -276,14 +276,14 @@ bool       lmflow_ctx_has_side_packet(const LmflowContext*, const char* name);
 | 算子自我信息 | `lmflow_ctx_node_name` `…_kernel_name` `lmflow_ctx_log` `lmflow_ctx_set_error` `lmflow_ctx_close_reason` `lmflow_ctx_counter_add` |
 | 参数(增强) | 点号路径嵌套、`lmflow_ctx_require_option_*`(必需参数)、`lmflow_ctx_option_*_array`(数组) |
 | 全局水位 | `lmflow_graph_total_queued` `…_total_queued_bytes`;YAML `max_queued_packets/bytes` |
-| 统计 | `lmflow_graph_node_stats`(`LmflowNodeStats`)、`lmflow_graph_counter_value`;YAML `watchdog_ms` |
+| 统计 | `lmflow_graph_node_stats`(`LMFlowNodeStats`)、`lmflow_graph_counter_value`;YAML `watchdog_ms` |
 | 状态 / 拓扑 | `lmflow_graph_state` `…_num_input_ports/output_ports/num_nodes` `lmflow_registered_kernel_*` |
 | 内省 | `lmflow_graph_dump` `lmflow_graph_queue_depth` `lmflow_graph_dropped_count` `lmflow_graph_last_error` `lmflow_packet_debug_string` |
 
 **接口设计要点**
 
 - `lmflow_ctx_forward` 专为直通存在:算子不碰引用计数,引擎内部共享同一 `Arc`。
-- 输入口**句柄化**(`LmflowInput*`),热路径免去按名字 hash+strcmp。
+- 输入口**句柄化**(`LMFlowInput*`),热路径免去按名字 hash+strcmp。
 - 阻塞接口一律有非阻塞/超时兄弟:`try_send` / `try_next` / `next_timeout` / `wait_done_timeout`。
   生产代码建议一律用带超时版本 —— 算子逻辑有误会让图静止而非结束,无超时等待就是永久挂起。
 - `lmflow_last_error()` 是**线程局部**的:算子在工作线程失败时,其文本不会出现在宿主线程。
@@ -802,12 +802,12 @@ with lmflow.Graph.from_yaml(CONFIG) as graph:        # with 是硬要求,见 8.3
 
 ### 8.4 数据类型限制
 
-**Python 算子只能收发内建类型**(整数/浮点/布尔/字符串/bytes/`LmflowBuffer`)。
+**Python 算子只能收发内建类型**(整数/浮点/布尔/字符串/bytes/`LMFlowBuffer`)。
 理由见 ADR #9:保持 payload 的**语言中立性**。表达结构化数据:
 
 | 想传 | 用什么 |
 |---|---|
-| 检测框、关键点等数值集合 | N×K 的 `LmflowBuffer`(零拷贝,C++ 侧可直读) |
+| 检测框、关键点等数值集合 | N×K 的 `LMFlowBuffer`(零拷贝,C++ 侧可直读) |
 | 任意元数据 | JSON 字符串(`LMFLOW_TYPE_STR`) |
 | 配置参数 | node `options`,本不该进数据流 |
 
@@ -858,7 +858,7 @@ cc.emit(0, packet)
   不匹配返回 NULL 并置错误。动态链接时 header 与 `.so` 不一致会导致布局错乱。
 - **布局一致性**:`cpp/abi_assert.cc` 的 `static_assert` 与 `crates/flow-core/tests/abi_layout.rs`
   钉在同一组常量上,任一侧改字段而忘同步 → **构建失败**(已实测能拦住)。
-- **ABI 演进**:`LmflowBuffer` 留了 `reserved` 供未来加字段(最可能是 GPU 内存空间);
+- **ABI 演进**:`LMFlowBuffer` 留了 `reserved` 供未来加字段(最可能是 GPU 内存空间);
   一旦改变既有布局,必须提升 `LMFLOW_ABI_VERSION`,所有既有二进制都要重编。
 
 ---
@@ -891,7 +891,7 @@ lmflow/
 ├── include/                   公共头
 │   ├── flow.h                 C ABI —— 唯一稳定接口(权威定义)
 │   ├── flow.hpp               C++ 算子糖层(header-only,非 ABI)
-│   └── flow_cv.hpp            可选:LmflowBuffer ↔ cv::Mat(仅需 OpenCV 者 include)
+│   └── flow_cv.hpp            可选:LMFlowBuffer ↔ cv::Mat(仅需 OpenCV 者 include)
 ├── cpp/                       C++ 算子
 │   ├── kernels.cc             内置算子集(9 个)
 │   └── abi_assert.cc          跨界结构体布局的编译期校验
@@ -973,7 +973,7 @@ lmflow/
 | 必需 side packet 借用计数器承载,会把内部键暴露到用户可见的 counter 列表 | 自我审查 | |
 | **丢唤醒** —— `wait_for_activity` 在判空闲之后才捕获活动代数,任务恰在此间隙全部完成就白等到轮询上限(`max_in_flight` 真并行测试里表现为 55ms 假慢) | 并行测试的耗时断言 | 等待前必须先捕获代数,再 `wait_activity_since`;这是「捕获-判定-等待」三步的经典次序 |
 | **阻塞 `send` 在线程池图上误报 `WOULD_BLOCK`** —— 它只 `pump_step()`,而那只跑主线程任务;池图上恒为 false,一撞水位就报错而非背压 | 自我发掘 + `blocking_send_applies_backpressure_on_pool…` 回归测试 | 背压等待要区分「本线程能不能推」与「别的执行器还在不在跑」:池仍在跑就等排水,全图空转才算真卡死 |
-| **句柄悬空(use-after-free)** —— `LmflowInput*/LmflowPoller*` 原本由图槽持有、随 `lmflow_graph_free` 一起释放;Python/C++ 宿主先销毁图、后用句柄(如 `del g` 后 `inp.send`)就读已释放内存(实测挂死) | 自我发掘 + Python `del g` 复现 + `handles_stay_safe_after_graph_free` 回归 | 改为**调用方拥有**句柄:各自持一份 `Arc<GraphInner>`,`lmflow_input_free/lmflow_poller_free` 释放;图先 free 也不失效,再用只得「已结束」错误。原先的 `alive_` shared_ptr 兜底是坏的(no-op deleter,且 Python GC 看不见 C++ 引用) |
+| **句柄悬空(use-after-free)** —— `LMFlowInput*/LMFlowPoller*` 原本由图槽持有、随 `lmflow_graph_free` 一起释放;Python/C++ 宿主先销毁图、后用句柄(如 `del g` 后 `inp.send`)就读已释放内存(实测挂死) | 自我发掘 + Python `del g` 复现 + `handles_stay_safe_after_graph_free` 回归 | 改为**调用方拥有**句柄:各自持一份 `Arc<GraphInner>`,`lmflow_input_free/lmflow_poller_free` 释放;图先 free 也不失效,再用只得「已结束」错误。原先的 `alive_` shared_ptr 兜底是坏的(no-op deleter,且 Python GC 看不见 C++ 引用) |
 | **C++ 算子构造抛异常穿越 FFI** —— `flow.hpp` 的 `KernelAdapter::create` 直接 `new T()`,若 T 构造函数抛异常(如打开设备失败),C++ 异常会穿越 `extern "C"` 回到 Rust(UB;catch_unwind 接不住);且引擎把 create 返回的 null 当「无状态算子」,后续 `process` 会对 null self 解引用 | 自我发掘 + `cpp/flow_hpp_test.cc`(有 bug 版实测 abort/段错误) | create 包 try/catch 失败返回 null;open/process/close 加 self 空判返回错误 —— 与 Python 端 `py_create`/`py_invoke` 的处理对齐 |
 | **非连续 numpy 数组静默损坏** —— `lmflow_packet_from_buffer` 号称「逐行拷贝(源可能不连续)」,实则只认倒数第二维的 stride、假定最后一维连续,于是转置 / 步长切片 / 负步长 / 3D 非连续视图全拷错 | 自我发掘 + `a.T`/`a[:,::2]` 端到端实测输出错乱 | 改为按**完整 strides** 的 N 维里程表拷贝:最后一维连续则整行拷、否则逐元素;负步长用 `.offset()` 处理。回归:`c_abi.rs from_buffer_handles_non_contiguous_strides` + Python `test_non_contiguous_ndarray_roundtrip` |
 
@@ -1006,7 +1006,7 @@ lmflow/
 | 时间戳单调性校验放在哪层 | 图输入口强制校验;内部边仅 `debug_assertions` 下校验(ADR #23) |
 | 内部边软水位的默认值与告警形式 | 软水位默认取顶层 `max_queue_size`(默认 100);每条边**首次**超限打 WARN,之后按 1/2/4/8… 指数退避,避免日志洪水;深度与丢弃数经 `queue_depth` / `dropped_count` 可查 |
 | `type_id` 是否改稳定方案 | **现在就改**为 FNV-1a(修饰名)+ `LMFLOW_DECLARE_TYPE_NAME` 逃生口(ADR #22) |
-| 生产可观测性 | 已落地:`LmflowNodeStats`(含 running / running_for_us / 耗时统计)、`watchdog_ms`、算子自报计数器 |
+| 生产可观测性 | 已落地:`LMFlowNodeStats`(含 running / running_for_us / 耗时统计)、`watchdog_ms`、算子自报计数器 |
 | 是否启用 `LMFLOW_TYPE_HOST_OBJECT` | **不启用**(ADR #26) |
 | stream header | **不做**,用 side packet 覆盖(ADR #24) |
 | subgraph 组合 | **推迟**,但预留 node `type:` 扩展点(ADR #27) |
@@ -1017,8 +1017,8 @@ lmflow/
 
 | 结构体 | 做法 | 为什么 |
 |---|---|---|
-| `LmflowBuffer` | 固定 `reserved` 字段 | 在**热路径**上、形状稳定(对齐 numpy buffer protocol),固定布局便于零开销传递 |
-| `LmflowNodeStats` | 入参 `struct_size` | **诊断用**、字段天然会持续增加;调用方填 `sizeof`,引擎只写认得且装得下的部分 |
+| `LMFlowBuffer` | 固定 `reserved` 字段 | 在**热路径**上、形状稳定(对齐 numpy buffer protocol),固定布局便于零开销传递 |
+| `LMFlowNodeStats` | 入参 `struct_size` | **诊断用**、字段天然会持续增加;调用方填 `sizeof`,引擎只写认得且装得下的部分 |
 
 ### 15.2 实现阶段的验证结果
 

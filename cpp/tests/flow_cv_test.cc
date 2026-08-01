@@ -54,7 +54,7 @@ int main() {
     lmflow::Packet p = lmflow::NewMatPacket(2, 2, 1, LMFLOW_DTYPE_U8, &m);
     m.setTo(0);
     cv::Mat mut;
-    LmflowStatus st = lmflow::CvMutable(p, &mut);
+    LMFlowStatus st = lmflow::CvMutable(p, &mut);
     assert(st == LMFLOW_OK);
     mut.at<uint8_t>(0, 0) = 42;
     const cv::Mat v = lmflow::CvView(p);

@@ -28,16 +28,16 @@ napi_value RunScale(napi_env env, napi_callback_info info) {
   napi_get_value_int64(env, args[1], &factor);
 
   lmflow_register_builtin_kernels();  // 幂等
-  LmflowGraph* g = lmflow_graph_new();
+  LMFlowGraph* g = lmflow_graph_new();
   std::string yaml =
       "nodes:\n  - name: \"scale\"\n    kernel: \"ScaleKernel\"\n"
       "    input_ports: [\"in\"]\n    output_ports: [\"out\"]\n"
       "    options: { factor: " + std::to_string(static_cast<long long>(factor)) + " }\n"
       "input_ports: [\"in\"]\noutput_ports: [\"out\"]\n";
   lmflow_graph_init_from_yaml(g, yaml.c_str());
-  LmflowPoller* poller = lmflow_graph_add_poller(g, "out");
+  LMFlowPoller* poller = lmflow_graph_add_poller(g, "out");
   lmflow_graph_start(g);
-  LmflowInput* in = lmflow_graph_input(g, "in");
+  LMFlowInput* in = lmflow_graph_input(g, "in");
 
   napi_value result = nullptr;
   napi_create_array_with_length(env, n, &result);
@@ -48,7 +48,7 @@ napi_value RunScale(napi_env env, napi_callback_info info) {
     napi_get_value_int64(env, el, &v);
 
     lmflow_input_send(in, lmflow_packet_from_i64(v, i));
-    LmflowPacket pkt;
+    LMFlowPacket pkt;
     if (lmflow_poller_next(poller, &pkt)) {
       int64_t out = 0;
       lmflow_packet_as_i64(&pkt, &out);
@@ -87,6 +87,6 @@ static napi_module g_lmflowModule = {
     .reserved = {0},
 };
 
-extern "C" __attribute__((constructor)) void RegisterLmflowModule(void) {
+extern "C" __attribute__((constructor)) void RegisterLMFlowModule(void) {
   napi_module_register(&g_lmflowModule);
 }

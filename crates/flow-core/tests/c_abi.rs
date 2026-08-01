@@ -1,7 +1,7 @@
 //! C ABI 冒烟测试:**完全按 C 调用方的方式**驱动引擎。
 //!
 //! 这是 `docs/design.md` 里「边界①」的覆盖。刻意只用 `extern "C"` 函数与
-//! `LmflowPacket` 裸结构体,不碰任何 Rust 侧便利 API —— 因为外部 C/C++/Python
+//! `LMFlowPacket` 裸结构体,不碰任何 Rust 侧便利 API —— 因为外部 C/C++/Python
 //! 宿主看到的就只有这些。`examples/cpp/hello_world_host.cc` 的逻辑与此一致。
 
 use std::ffi::{c_char, c_void, CStr, CString};
@@ -23,8 +23,8 @@ unsafe extern "C" fn drop_boxed_i32(p: *mut c_void) {
     drop(Box::from_raw(p as *mut i32));
 }
 
-fn make_int_packet(v: i32, ts: i64) -> LmflowPacket {
-    LmflowPacket {
+fn make_int_packet(v: i32, ts: i64) -> LMFlowPacket {
+    LMFlowPacket {
         payload: Box::into_raw(Box::new(v)) as *mut c_void,
         type_id: 0, // 不声明类型 —— 与 PassThroughKernel 的 SetAny 契约相容
         timestamp: ts,
@@ -90,7 +90,7 @@ fn full_pipeline_through_c_abi() {
                 "send 失败: {}",
                 last_error()
             );
-            let mut out = LmflowPacket {
+            let mut out = LMFlowPacket {
                 payload: std::ptr::null_mut(),
                 type_id: 0,
                 timestamp: 0,
@@ -173,7 +173,7 @@ fn builtin_packet_types_roundtrip() {
 fn buffer_alloc_view_and_cow() {
     unsafe {
         let shape = [2i64, 3, 4];
-        let mut buf = LmflowBuffer::default();
+        let mut buf = LMFlowBuffer::default();
         let mut p = lmflow_packet_new_buffer(3, shape.as_ptr(), 7 /*F32*/, 0, &mut buf);
         assert!(!p.payload.is_null(), "分配失败: {}", last_error());
         assert_eq!(p.type_id, 6, "LMFLOW_TYPE_BUFFER");
@@ -187,14 +187,14 @@ fn buffer_alloc_view_and_cow() {
         *(buf.data as *mut f32) = 1.25;
 
         // 只读视图
-        let mut view = LmflowBuffer::default();
+        let mut view = LMFlowBuffer::default();
         assert!(lmflow_packet_as_buffer(&p, &mut view));
         assert_eq!(*(view.data as *const f32), 1.25);
         assert_eq!(view.flags & 1, 1, "as_buffer 取得的视图应标记 READONLY");
 
         // CoW:独占时零拷贝(指针不变)
         let before = buf.data;
-        let mut m = LmflowBuffer::default();
+        let mut m = LMFlowBuffer::default();
         assert_eq!(lmflow_packet_make_mutable_buffer(&mut p, &mut m), 0);
         assert_eq!(m.data, before, "独占时 CoW 不应复制");
 
@@ -206,7 +206,7 @@ fn buffer_alloc_view_and_cow() {
 fn cow_copies_when_shared() {
     unsafe {
         let shape = [4i64];
-        let mut b = LmflowBuffer::default();
+        let mut b = LMFlowBuffer::default();
         let mut p1 = lmflow_packet_new_buffer(1, shape.as_ptr(), 0 /*U8*/, 0, &mut b);
         *(b.data as *mut u8) = 0x11;
 
@@ -216,7 +216,7 @@ fn cow_copies_when_shared() {
         assert_eq!(p2.payload, p1.payload, "clone 只增引用,不复制数据");
 
         // 此时 make_mutable 必须复制,且不污染另一份
-        let mut m = LmflowBuffer::default();
+        let mut m = LMFlowBuffer::default();
         assert_eq!(lmflow_packet_make_mutable_buffer(&mut p2, &mut m), 0);
         assert_ne!(m.data, b.data, "被共享时 CoW 必须复制");
         *(m.data as *mut u8) = 0x22;
@@ -240,7 +240,7 @@ fn from_buffer_handles_non_contiguous_strides() {
         let mut strides = [0i64; 8];
         strides[0] = esz;
         strides[1] = 3 * esz;
-        let src = LmflowBuffer {
+        let src = LMFlowBuffer {
             data: data.as_ptr() as *mut c_void,
             ndim: 2,
             shape,
@@ -253,7 +253,7 @@ fn from_buffer_handles_non_contiguous_strides() {
         assert!(!p.payload.is_null(), "{}", last_error());
 
         // 取回:应被展平成行优先连续的 3x2 = [[0,3],[1,4],[2,5]]
-        let mut view = LmflowBuffer::default();
+        let mut view = LMFlowBuffer::default();
         assert!(lmflow_packet_as_buffer(&p, &mut view));
         assert_eq!(&view.shape[..2], &[3, 2]);
         let out = std::slice::from_raw_parts(view.data as *const i32, 6);
@@ -271,7 +271,7 @@ fn make_mutable_rejects_borrowed_packet() {
     unsafe {
         // owner==NULL 的自建包不属于引擎,不能 CoW
         let mut p = make_int_packet(1, 0);
-        let mut m = LmflowBuffer::default();
+        let mut m = LMFlowBuffer::default();
         assert_ne!(
             lmflow_packet_make_mutable_buffer(&mut p, &mut m),
             0,
@@ -334,7 +334,7 @@ fn handles_stay_safe_after_graph_free() {
         assert_ne!(rc, 0, "图已结束,send 应报错而不是 UAF");
 
         // poller 取包也安全:图已结束,返回 false
-        let mut out = LmflowPacket {
+        let mut out = LMFlowPacket {
             payload: std::ptr::null_mut(),
             type_id: 0,
             timestamp: 0,
@@ -419,7 +419,7 @@ fn introspection_through_c_abi() {
         assert!(dump.contains("n1") && dump.contains("n2"), "{dump}");
 
         // struct_size 太小必须被拒(前向兼容契约)
-        let mut st = LmflowNodeStats {
+        let mut st = LMFlowNodeStats {
             struct_size: 4,
             reserved0: 0,
             node_name: std::ptr::null(),
@@ -436,7 +436,7 @@ fn introspection_through_c_abi() {
             !lmflow_graph_node_stats(g, 0, &mut st),
             "struct_size 过小应被拒"
         );
-        st.struct_size = std::mem::size_of::<LmflowNodeStats>() as u32;
+        st.struct_size = std::mem::size_of::<LMFlowNodeStats>() as u32;
         assert!(lmflow_graph_node_stats(g, 0, &mut st));
         assert_eq!(
             CStr::from_ptr(st.kernel_name).to_str().unwrap(),
@@ -453,7 +453,7 @@ fn observer_receives_packets() {
 
     // 用 Mutex 而非 static mut:后者创建共享引用本身就是坏实践
     static SEEN: std::sync::Mutex<Vec<i32>> = std::sync::Mutex::new(Vec::new());
-    unsafe extern "C" fn on_packet(_user: *mut c_void, pkt: LmflowPacket) {
+    unsafe extern "C" fn on_packet(_user: *mut c_void, pkt: LMFlowPacket) {
         if !pkt.payload.is_null() {
             let v = unsafe { *(pkt.payload as *const i32) };
             SEEN.lock().expect("锁中毒").push(v);

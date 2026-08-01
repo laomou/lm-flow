@@ -102,7 +102,7 @@ pub mod last_error {
 
 // ---------------------------------------------------------------- 图级共享状态
 
-/// 关闭原因,与 `LmflowCloseReason` 一致。
+/// 关闭原因,与 `LMFlowCloseReason` 一致。
 pub const CLOSE_NORMAL: i32 = 0;
 pub const CLOSE_ERROR: i32 = 1;
 pub const CLOSE_CANCELLED: i32 = 2;

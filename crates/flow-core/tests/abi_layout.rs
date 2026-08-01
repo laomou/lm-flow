@@ -11,39 +11,39 @@
 
 use std::mem::{align_of, offset_of, size_of};
 
-use flow_core::ffi::{LmflowBuffer, LmflowNodeStats, LmflowPacket};
+use flow_core::ffi::{LMFlowBuffer, LMFlowNodeStats, LMFlowPacket};
 
 #[test]
 fn lmflow_packet_layout() {
-    assert_eq!(size_of::<LmflowPacket>(), 40, "LmflowPacket 大小");
-    assert_eq!(align_of::<LmflowPacket>(), 8, "LmflowPacket 对齐");
-    assert_eq!(offset_of!(LmflowPacket, payload), 0);
-    assert_eq!(offset_of!(LmflowPacket, type_id), 8);
-    assert_eq!(offset_of!(LmflowPacket, timestamp), 16);
-    assert_eq!(offset_of!(LmflowPacket, owner), 24);
-    assert_eq!(offset_of!(LmflowPacket, drop_fn), 32);
+    assert_eq!(size_of::<LMFlowPacket>(), 40, "LMFlowPacket 大小");
+    assert_eq!(align_of::<LMFlowPacket>(), 8, "LMFlowPacket 对齐");
+    assert_eq!(offset_of!(LMFlowPacket, payload), 0);
+    assert_eq!(offset_of!(LMFlowPacket, type_id), 8);
+    assert_eq!(offset_of!(LMFlowPacket, timestamp), 16);
+    assert_eq!(offset_of!(LMFlowPacket, owner), 24);
+    assert_eq!(offset_of!(LMFlowPacket, drop_fn), 32);
 }
 
 #[test]
 fn flow_buffer_layout() {
     // data(8) + shape[8](64) + strides[8](64) + ndim(4) + dtype(4) + flags(4) + device(4) + reserved[2](16)
-    assert_eq!(size_of::<LmflowBuffer>(), 168, "LmflowBuffer 大小");
-    assert_eq!(align_of::<LmflowBuffer>(), 8, "LmflowBuffer 对齐");
-    assert_eq!(offset_of!(LmflowBuffer, data), 0);
-    assert_eq!(offset_of!(LmflowBuffer, shape), 8);
-    assert_eq!(offset_of!(LmflowBuffer, strides), 72);
-    assert_eq!(offset_of!(LmflowBuffer, ndim), 136);
-    assert_eq!(offset_of!(LmflowBuffer, dtype), 140);
-    assert_eq!(offset_of!(LmflowBuffer, flags), 144);
-    assert_eq!(offset_of!(LmflowBuffer, device), 148);
-    assert_eq!(offset_of!(LmflowBuffer, reserved), 152);
+    assert_eq!(size_of::<LMFlowBuffer>(), 168, "LMFlowBuffer 大小");
+    assert_eq!(align_of::<LMFlowBuffer>(), 8, "LMFlowBuffer 对齐");
+    assert_eq!(offset_of!(LMFlowBuffer, data), 0);
+    assert_eq!(offset_of!(LMFlowBuffer, shape), 8);
+    assert_eq!(offset_of!(LMFlowBuffer, strides), 72);
+    assert_eq!(offset_of!(LMFlowBuffer, ndim), 136);
+    assert_eq!(offset_of!(LMFlowBuffer, dtype), 140);
+    assert_eq!(offset_of!(LMFlowBuffer, flags), 144);
+    assert_eq!(offset_of!(LMFlowBuffer, device), 148);
+    assert_eq!(offset_of!(LMFlowBuffer, reserved), 152);
 }
 
 #[test]
 fn flow_node_stats_uses_struct_size_for_forward_compat() {
-    // 与 LmflowBuffer 不同,统计结构体用入参 struct_size 做前向兼容(见 docs/design.md §15.1),
+    // 与 LMFlowBuffer 不同,统计结构体用入参 struct_size 做前向兼容(见 docs/design.md §15.1),
     // 所以这里只钉住「struct_size 是第一个字段」这一契约,而不钉总大小。
-    assert_eq!(offset_of!(LmflowNodeStats, struct_size), 0);
+    assert_eq!(offset_of!(LMFlowNodeStats, struct_size), 0);
     assert_eq!(size_of::<u32>(), 4);
 }
 
@@ -119,6 +119,6 @@ fn timestamp_sentinels_match_header() {
 
 #[test]
 fn max_dims_matches_header() {
-    // include/flow.h: #define LMFLOW_MAX_DIMS 8 —— 改它会改变 LmflowBuffer 布局
+    // include/flow.h: #define LMFLOW_MAX_DIMS 8 —— 改它会改变 LMFlowBuffer 布局
     assert_eq!(flow_core::packet::MAX_DIMS, 8);
 }

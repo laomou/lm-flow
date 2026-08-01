@@ -47,7 +47,7 @@ JNIEXPORT jlongArray JNICALL
 Java_com_lmflow_demo_LmFlow_runScale(JNIEnv* env, jclass, jlongArray inputs, jlong factor) {
   lmflow_register_builtin_kernels();  // 幂等
 
-  LmflowGraph* g = lmflow_graph_new();
+  LMFlowGraph* g = lmflow_graph_new();
   if (!g) {
     ThrowRuntime(env, "lmflow_graph_new 失败");
     return nullptr;
@@ -70,14 +70,14 @@ Java_com_lmflow_demo_LmFlow_runScale(JNIEnv* env, jclass, jlongArray inputs, jlo
     return nullptr;
   }
 
-  LmflowPoller* poller = lmflow_graph_add_poller(g, "out");
+  LMFlowPoller* poller = lmflow_graph_add_poller(g, "out");
   if (!poller || lmflow_graph_start(g) != LMFLOW_OK) {
     ThrowRuntime(env, "add_poller/start 失败");
     lmflow_poller_free(poller);
     lmflow_graph_free(g);
     return nullptr;
   }
-  LmflowInput* in = lmflow_graph_input(g, "in");
+  LMFlowInput* in = lmflow_graph_input(g, "in");
 
   const jsize n = env->GetArrayLength(inputs);
   jlong* src = env->GetLongArrayElements(inputs, nullptr);
@@ -91,7 +91,7 @@ Java_com_lmflow_demo_LmFlow_runScale(JNIEnv* env, jclass, jlongArray inputs, jlo
       lmflow_input_free(in); lmflow_poller_free(poller); lmflow_graph_free(g);
       return nullptr;
     }
-    LmflowPacket pkt;
+    LMFlowPacket pkt;
     if (lmflow_poller_next(poller, &pkt)) {
       int64_t v = 0;
       if (lmflow_packet_as_i64(&pkt, &v)) out.push_back(v);

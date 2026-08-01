@@ -1,5 +1,5 @@
 /*
- * flow_cv.hpp —— 可选头:LmflowBuffer <-> cv::Mat 零拷贝互转。
+ * flow_cv.hpp —— 可选头:LMFlowBuffer <-> cv::Mat 零拷贝互转。
  *
  * **不属于 ABI,也不是 core 的依赖。** 只有需要 OpenCV 的算子才 include 本文件;
  * 引擎与 flow.h / flow.hpp 均不依赖 OpenCV,所以没装 OpenCV 也能编译整个 core。
@@ -12,7 +12,7 @@
  *   lmflow::Status Process(lmflow::Context& cc) override {
  *     lmflow::Packet p = cc.TakeInput(0);          // 先取走,否则 CoW 必然复制
  *     cv::Mat m;
- *     if (LmflowStatus st = lmflow::CvMutable(p, &m)) return st;
+ *     if (LMFlowStatus st = lmflow::CvMutable(p, &m)) return st;
  *     cv::GaussianBlur(m, m, {5, 5}, 0);          // 原地
  *     cc.Emit(0, std::move(p));
  *     return lmflow::Status::Ok();
@@ -54,10 +54,10 @@ inline int32_t DtypeFromCv(int cv_depth) {
   }
 }
 
-/// 把 LmflowBuffer 包成 cv::Mat —— 零拷贝,不接管所有权。
+/// 把 LMFlowBuffer 包成 cv::Mat —— 零拷贝,不接管所有权。
 /// 约定:ndim==2 视作单通道 [H,W];ndim==3 视作 [H,W,C]。
 /// 返回的 Mat 仅在底层 Packet 存活期间有效。
-inline cv::Mat CvWrap(const LmflowBuffer& b) {
+inline cv::Mat CvWrap(const LMFlowBuffer& b) {
   if (b.ndim != 2 && b.ndim != 3) {
     throw std::invalid_argument("flow: cv::Mat 只支持 ndim 为 2 或 3 的缓冲");
   }
@@ -70,16 +70,16 @@ inline cv::Mat CvWrap(const LmflowBuffer& b) {
 
 /// 输入包的**只读**视图(零拷贝)。非缓冲包抛异常(会被糖层蹦床转成错误码)。
 inline const cv::Mat CvView(const Packet& pkt) {
-  LmflowBuffer b{};
-  if (!pkt.AsBuffer(&b)) throw std::invalid_argument("flow: 输入不是 LmflowBuffer 包");
+  LMFlowBuffer b{};
+  if (!pkt.AsBuffer(&b)) throw std::invalid_argument("flow: 输入不是 LMFlowBuffer 包");
   return CvWrap(b);
 }
 
 /// 取得**可写** cv::Mat(CoW):独占零拷贝,被共享才复制。
 /// pkt 须为调用方所拥有 —— 典型来自 Context::TakeInput。成功返回 LMFLOW_OK。
-inline LmflowStatus CvMutable(Packet& pkt, cv::Mat* out) {
-  LmflowBuffer b{};
-  LmflowStatus st = pkt.MakeMutableBuffer(&b);
+inline LMFlowStatus CvMutable(Packet& pkt, cv::Mat* out) {
+  LMFlowBuffer b{};
+  LMFlowStatus st = pkt.MakeMutableBuffer(&b);
   if (st != LMFLOW_OK) return st;
   *out = CvWrap(b);
   return LMFLOW_OK;
@@ -88,7 +88,7 @@ inline LmflowStatus CvMutable(Packet& pkt, cv::Mat* out) {
 /// 让**引擎**分配缓冲,返回 (Packet, 可写 cv::Mat)。产出新图像的推荐路径。
 inline Packet NewMatPacket(int rows, int cols, int channels, int32_t dtype, cv::Mat* out) {
   const int64_t shape[3] = {rows, cols, channels};
-  LmflowBuffer b{};
+  LMFlowBuffer b{};
   Packet p = Packet::Adopt(lmflow_packet_new_buffer(3, shape, dtype, LMFLOW_TS_UNSET, &b));
   *out = CvWrap(b);
   return p;
@@ -96,7 +96,7 @@ inline Packet NewMatPacket(int rows, int cols, int channels, int32_t dtype, cv::
 
 /// 便捷:把已有 cv::Mat **拷贝**进新包(src 之后可立即释放)。
 inline Packet PacketFromMat(const cv::Mat& m) {
-  LmflowBuffer src{};
+  LMFlowBuffer src{};
   src.data = const_cast<void*>(static_cast<const void*>(m.data));
   src.ndim = 3;
   src.dtype = DtypeFromCv(m.depth());

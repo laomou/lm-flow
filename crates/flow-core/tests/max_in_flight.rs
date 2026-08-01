@@ -20,7 +20,7 @@ fn init() {
 /// 「睡 (10 - ts) 毫秒后把 ts 原样输出」的算子 —— ts 越小睡越久,故完成顺序与 ts 相反。
 mod reverse_sleep_kernel {
     use super::*;
-    use flow_core::ffi::{LmflowContext, LmflowContract};
+    use flow_core::ffi::{LMFlowContext, LMFlowContract};
     use std::ffi::c_void;
 
     // 记录 process 的**进入**顺序与并发峰值,用来证明并行。
@@ -30,7 +30,7 @@ mod reverse_sleep_kernel {
     unsafe extern "C" fn create(_f: *mut c_void) -> *mut c_void {
         std::ptr::null_mut() // 无状态
     }
-    unsafe extern "C" fn process(_self: *mut c_void, ctx: *mut LmflowContext) -> i32 {
+    unsafe extern "C" fn process(_self: *mut c_void, ctx: *mut LMFlowContext) -> i32 {
         let cur = CUR_CONCURRENCY.fetch_add(1, Ordering::SeqCst) + 1;
         MAX_CONCURRENCY.fetch_max(cur, Ordering::SeqCst);
 
@@ -43,14 +43,14 @@ mod reverse_sleep_kernel {
         CUR_CONCURRENCY.fetch_sub(1, Ordering::SeqCst);
         0
     }
-    // get_contract 声明为 None,故不需要;但 vtable 字段类型要匹配 LmflowContract。
+    // get_contract 声明为 None,故不需要;但 vtable 字段类型要匹配 LMFlowContract。
     #[allow(dead_code)]
-    unsafe extern "C" fn _unused_contract(_f: *mut c_void, _c: *mut LmflowContract) {}
+    unsafe extern "C" fn _unused_contract(_f: *mut c_void, _c: *mut LMFlowContract) {}
 
     pub fn register() {
         static ONCE: std::sync::Once = std::sync::Once::new();
         ONCE.call_once(|| {
-            let vt = flow_core::ffi::LmflowKernelVTable {
+            let vt = flow_core::ffi::LMFlowKernelVTable {
                 create: Some(create),
                 get_contract: None,
                 open: None,
@@ -228,10 +228,10 @@ output_ports: ["out"]
 /// 数据配错),且下游按时间戳单调。
 mod reverse_sleep2_kernel {
     use super::*;
-    use flow_core::ffi::LmflowContext;
+    use flow_core::ffi::LMFlowContext;
     use std::ffi::c_void;
 
-    unsafe extern "C" fn process(_self: *mut c_void, ctx: *mut LmflowContext) -> i32 {
+    unsafe extern "C" fn process(_self: *mut c_void, ctx: *mut LMFlowContext) -> i32 {
         let ts = flow_core::ffi::lmflow_ctx_input_timestamp(ctx);
         let sleep_ms = (70 - ts * 10).clamp(5, 70) as u64;
         std::thread::sleep(Duration::from_millis(sleep_ms));
@@ -243,7 +243,7 @@ mod reverse_sleep2_kernel {
     pub fn register() {
         static ONCE: std::sync::Once = std::sync::Once::new();
         ONCE.call_once(|| {
-            let vt = flow_core::ffi::LmflowKernelVTable {
+            let vt = flow_core::ffi::LMFlowKernelVTable {
                 create: None,
                 get_contract: None,
                 open: None,

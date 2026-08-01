@@ -38,7 +38,7 @@ enum LmFlow {
         var out: [Int64] = []
         for (i, v) in inputs.enumerated() {
             _ = lmflow_input_send(input, lmflow_packet_from_i64(v, Int64(i)))
-            var pkt = LmflowPacket()
+            var pkt = LMFlowPacket()
             if lmflow_poller_next(poller, &pkt) {
                 var r: Int64 = 0
                 if lmflow_packet_as_i64(&pkt, &r) { out.append(r) }

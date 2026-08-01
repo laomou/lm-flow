@@ -48,14 +48,14 @@ inline uint64_t TypeId() {
 /* ---------- Status ---------- */
 class Status {
  public:
-  Status(LmflowStatus code) : code_(code) {}  // 允许隐式,便于 return LMFLOW_OK;
+  Status(LMFlowStatus code) : code_(code) {}  // 允许隐式,便于 return LMFLOW_OK;
   static Status Ok() { return Status(LMFLOW_OK); }
   static Status Error() { return Status(LMFLOW_ERR_KERNEL); }
   bool ok() const { return code_ == LMFLOW_OK; }
-  LmflowStatus code() const { return code_; }
+  LMFlowStatus code() const { return code_; }
 
  private:
-  LmflowStatus code_;
+  LMFlowStatus code_;
 };
 
 /* ---------- Packet ----------
@@ -80,7 +80,7 @@ class Packet {
   }
 
   /* 借用引擎输入包(算子内使用),不获得所有权 */
-  static Packet Borrow(LmflowPacket raw) {
+  static Packet Borrow(LMFlowPacket raw) {
     Packet p;
     p.raw_ = raw;
     p.own_ = Own::None;
@@ -88,7 +88,7 @@ class Packet {
   }
 
   /* 接管 lmflow_poller_next 移交的包,析构时归还引擎引用 */
-  static Packet Adopt(LmflowPacket raw) {
+  static Packet Adopt(LMFlowPacket raw) {
     Packet p;
     p.raw_ = raw;
     p.own_ = Own::Engine;
@@ -144,19 +144,19 @@ class Packet {
   bool AsBool(bool* o) const { return lmflow_packet_as_bool(&raw_, o); }
   bool AsStr(const char** o) const { return lmflow_packet_as_str(&raw_, o); }
   /// N 维缓冲的**只读**视图(零拷贝)。cv::Mat 互转见可选头 flow_cv.hpp。
-  bool AsBuffer(LmflowBuffer* o) const { return lmflow_packet_as_buffer(&raw_, o); }
+  bool AsBuffer(LMFlowBuffer* o) const { return lmflow_packet_as_buffer(&raw_, o); }
 
   /* ---- 引用与写时复制 ---- */
   /// 引用 +1,得到一份自己拥有的包(不拷贝数据)。
   Packet Clone() const { return Adopt(lmflow_packet_clone(&raw_)); }
   /// 取得独占可写视图:独占则零拷贝,被共享才复制。前置条件是本包为自己所拥有
   /// (典型来源是 Context::TakeInput),借用的输入包会返回错误。
-  LmflowStatus MakeMutableBuffer(LmflowBuffer* o) { return lmflow_packet_make_mutable_buffer(&raw_, o); }
-  LmflowStatus MakeMutableBytes(void** d, size_t* n) {
+  LMFlowStatus MakeMutableBuffer(LMFlowBuffer* o) { return lmflow_packet_make_mutable_buffer(&raw_, o); }
+  LMFlowStatus MakeMutableBytes(void** d, size_t* n) {
     return lmflow_packet_make_mutable_bytes(&raw_, d, n);
   }
 
-  LmflowPacket release() {  // 交给引擎:此后本对象不再释放
+  LMFlowPacket release() {  // 交给引擎:此后本对象不再释放
     own_ = Own::None;
     return raw_;
   }
@@ -190,14 +190,14 @@ class Packet {
     own_ = Own::None;
     raw_.payload = nullptr;
   }
-  LmflowPacket raw_;
+  LMFlowPacket raw_;
   Own own_;
 };
 
 /* ---------- Contract:在 GetContract 里声明端口类型 ---------- */
 class Contract {
  public:
-  explicit Contract(LmflowContract* c) : c_(c) {}
+  explicit Contract(LMFlowContract* c) : c_(c) {}
   Contract(const Contract&) = delete;
   Contract& operator=(const Contract&) = delete;
 
@@ -233,13 +233,13 @@ class Contract {
   }
 
  private:
-  LmflowContract* c_;
+  LMFlowContract* c_;
 };
 
 /* ---------- Context(仅回调期有效,故禁止拷贝/移动以防存留)---------- */
 class Context {
  public:
-  explicit Context(LmflowContext* c) : c_(c) {}
+  explicit Context(LMFlowContext* c) : c_(c) {}
   Context(const Context&) = delete;
   Context& operator=(const Context&) = delete;
   Context(Context&&) = delete;
@@ -251,7 +251,7 @@ class Context {
   /* ---- 自我信息 / 日志 / 错误 ---- */
   const char* NodeName() const { return lmflow_ctx_node_name(c_); }
   const char* KernelName() const { return lmflow_ctx_kernel_name(c_); }
-  void Log(LmflowLogLevel level, const char* msg) const { lmflow_ctx_log(c_, level, msg); }
+  void Log(LMFlowLogLevel level, const char* msg) const { lmflow_ctx_log(c_, level, msg); }
   void LogInfo(const char* msg) const { Log(LMFLOW_LOG_INFO, msg); }
   void LogWarn(const char* msg) const { Log(LMFLOW_LOG_WARN, msg); }
   /// 设置失败原因,随后返回非 0 状态码 —— 否则宿主只拿到错误码、无从诊断。
@@ -265,7 +265,7 @@ class Context {
     return Status(LMFLOW_ERR_KERNEL);
   }
   /// close 的触发原因:正常排空 / 图内出错 / 被取消。
-  LmflowCloseReason CloseReason() const { return lmflow_ctx_close_reason(c_); }
+  LMFlowCloseReason CloseReason() const { return lmflow_ctx_close_reason(c_); }
 
   /* 按 tag 定位端口,避免依赖 YAML 书写顺序 */
   size_t InputId(const char* tag, size_t index = 0) const { return lmflow_ctx_input_id(c_, tag, index); }
@@ -305,16 +305,16 @@ class Context {
 
   /// 必需参数:缺失或类型不符即返回错误(算子应在 Open 里直接失败,
   /// 让配置问题当场暴露,而不是静默走默认值)。
-  LmflowStatus RequireOption(const char* key, int64_t* o) const {
+  LMFlowStatus RequireOption(const char* key, int64_t* o) const {
     return lmflow_ctx_require_option_i64(c_, key, o);
   }
-  LmflowStatus RequireOption(const char* key, double* o) const {
+  LMFlowStatus RequireOption(const char* key, double* o) const {
     return lmflow_ctx_require_option_f64(c_, key, o);
   }
-  LmflowStatus RequireOption(const char* key, bool* o) const {
+  LMFlowStatus RequireOption(const char* key, bool* o) const {
     return lmflow_ctx_require_option_bool(c_, key, o);
   }
-  LmflowStatus RequireOption(const char* key, const char** o) const {
+  LMFlowStatus RequireOption(const char* key, const char** o) const {
     return lmflow_ctx_require_option_str(c_, key, o);
   }
 
@@ -338,7 +338,7 @@ class Context {
   }
 
  private:
-  LmflowContext* c_;
+  LMFlowContext* c_;
 };
 
 /* ---------- Kernel 基类 ----------
@@ -380,7 +380,7 @@ struct KernelAdapter {
   }
   static void destroy(void* self) { delete static_cast<T*>(self); }
 
-  static void get_contract(void*, LmflowContract* c) {
+  static void get_contract(void*, LMFlowContract* c) {
     if constexpr (internal::HasGetContract<T>::value) {
       try {
         Contract ct(c);
@@ -391,7 +391,7 @@ struct KernelAdapter {
     (void)c;
   }
 
-  static LmflowStatus open(void* self, LmflowContext* c) {
+  static LMFlowStatus open(void* self, LMFlowContext* c) {
     if (!self) return LMFLOW_ERR_KERNEL;  // create 失败(构造抛异常)
     try {
       Context cc(c);
@@ -400,7 +400,7 @@ struct KernelAdapter {
       return LMFLOW_ERR_KERNEL;
     }
   }
-  static LmflowStatus process(void* self, LmflowContext* c) {
+  static LMFlowStatus process(void* self, LMFlowContext* c) {
     if (!self) return LMFLOW_ERR_KERNEL;
     try {
       Context cc(c);
@@ -409,7 +409,7 @@ struct KernelAdapter {
       return LMFLOW_ERR_KERNEL;
     }
   }
-  static LmflowStatus close(void* self, LmflowContext* c) {
+  static LMFlowStatus close(void* self, LMFlowContext* c) {
     if (!self) return LMFLOW_ERR_KERNEL;
     try {
       Context cc(c);
@@ -419,8 +419,8 @@ struct KernelAdapter {
     }
   }
 
-  static const LmflowKernelVTable* vtable() {
-    static const LmflowKernelVTable vt = {
+  static const LMFlowKernelVTable* vtable() {
+    static const LMFlowKernelVTable vt = {
         &create,
         internal::HasGetContract<T>::value ? &get_contract : nullptr,
         &open,
@@ -442,10 +442,10 @@ struct KernelAdapter {
  */
 #define LMFLOW_REGISTER_KERNEL_AS(T, name_str)                                             \
   namespace {                                                                            \
-  struct LmflowReg_##T {                                                                   \
-    LmflowReg_##T() { lmflow_register_kernel(name_str, lmflow::KernelAdapter<T>::vtable(), nullptr); } \
+  struct LMFlowReg_##T {                                                                   \
+    LMFlowReg_##T() { lmflow_register_kernel(name_str, lmflow::KernelAdapter<T>::vtable(), nullptr); } \
   };                                                                                     \
-  static LmflowReg_##T g_flow_reg_##T;                                                     \
+  static LMFlowReg_##T g_flow_reg_##T;                                                     \
   }
 
 #define LMFLOW_REGISTER_KERNEL(T) LMFLOW_REGISTER_KERNEL_AS(T, #T)

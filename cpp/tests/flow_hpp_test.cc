@@ -35,14 +35,14 @@ struct OkKernel : lmflow::Kernel {
 int main() {
   // 1) 构造抛异常:create 返回 nullptr,绝不让异常穿越 extern "C"。
   {
-    const LmflowKernelVTable* vt = lmflow::KernelAdapter<ThrowingCtorKernel>::vtable();
+    const LMFlowKernelVTable* vt = lmflow::KernelAdapter<ThrowingCtorKernel>::vtable();
     void* self = vt->create(nullptr);
     assert(self == nullptr && "构造抛异常时 create 必须返回 nullptr");
   }
 
   // 2) create 失败后 self==nullptr:open/process/close 必须安全返回错误(不 null 解引用)。
   {
-    const LmflowKernelVTable* vt = lmflow::KernelAdapter<OkKernel>::vtable();
+    const LMFlowKernelVTable* vt = lmflow::KernelAdapter<OkKernel>::vtable();
     assert(vt->open(nullptr, nullptr) == LMFLOW_ERR_KERNEL);
     assert(vt->process(nullptr, nullptr) == LMFLOW_ERR_KERNEL);
     assert(vt->close(nullptr, nullptr) == LMFLOW_ERR_KERNEL);
@@ -50,7 +50,7 @@ int main() {
 
   // 3) Process 抛异常:process 转成 LMFLOW_ERR_KERNEL。
   {
-    const LmflowKernelVTable* vt = lmflow::KernelAdapter<ThrowingProcessKernel>::vtable();
+    const LMFlowKernelVTable* vt = lmflow::KernelAdapter<ThrowingProcessKernel>::vtable();
     void* self = vt->create(nullptr);
     assert(self != nullptr);
     assert(vt->process(self, nullptr) == LMFLOW_ERR_KERNEL);
@@ -59,7 +59,7 @@ int main() {
 
   // 4) 正常算子:create 非空,process 返回 LMFLOW_OK。
   {
-    const LmflowKernelVTable* vt = lmflow::KernelAdapter<OkKernel>::vtable();
+    const LMFlowKernelVTable* vt = lmflow::KernelAdapter<OkKernel>::vtable();
     void* self = vt->create(nullptr);
     assert(self != nullptr);
     assert(vt->process(self, nullptr) == LMFLOW_OK);

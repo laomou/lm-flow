@@ -622,19 +622,19 @@ max_queued_packets: 2
 /// 而不是误报 `WouldBlock`。旧实现里 `pump_step` 只跑主线程任务,池图上它恒为 false,
 /// 于是阻塞 send 一撞水位就直接报错 —— 本测试就是那个回归的守卫。
 mod slow_sink_kernel {
-    use flow_core::ffi::LmflowContext;
+    use flow_core::ffi::LMFlowContext;
     use std::ffi::c_void;
     use std::time::Duration;
 
     // 慢消费 sink(无输出口):睡 3ms 后丢弃。发端会远快于它,必然反复撞水位。
-    unsafe extern "C" fn process(_s: *mut c_void, _ctx: *mut LmflowContext) -> i32 {
+    unsafe extern "C" fn process(_s: *mut c_void, _ctx: *mut LMFlowContext) -> i32 {
         std::thread::sleep(Duration::from_millis(3));
         0
     }
     pub fn register() {
         static ONCE: std::sync::Once = std::sync::Once::new();
         ONCE.call_once(|| {
-            let vt = flow_core::ffi::LmflowKernelVTable {
+            let vt = flow_core::ffi::LMFlowKernelVTable {
                 create: None,
                 get_contract: None,
                 open: None,

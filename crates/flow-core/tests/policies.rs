@@ -292,7 +292,7 @@ mod port_probe {
     use flow_core::ffi::*;
     use std::ffi::c_void;
 
-    unsafe extern "C" fn process(_s: *mut c_void, ctx: *mut LmflowContext) -> i32 {
+    unsafe extern "C" fn process(_s: *mut c_void, ctx: *mut LMFlowContext) -> i32 {
         let n = lmflow_ctx_num_inputs(ctx);
         let mut mask: i64 = 0;
         for i in 0..n {
@@ -308,7 +308,7 @@ mod port_probe {
     pub fn register() {
         static ONCE: std::sync::Once = std::sync::Once::new();
         ONCE.call_once(|| {
-            let vt = LmflowKernelVTable {
+            let vt = LMFlowKernelVTable {
                 create: None,
                 get_contract: None,
                 open: None,

@@ -19,7 +19,7 @@
  *     析构里兜底,但不保证时机 —— 文档强调用 with。
  *
  * 数据类型:遵循「Python 算子只收发内建类型」(见 flow.h 的说明)。
- * 大块数值数据走 LmflowBuffer,与 numpy 零拷贝互通。
+ * 大块数值数据走 LMFlowBuffer,与 numpy 零拷贝互通。
  */
 #include <pybind11/functional.h>
 #include <pybind11/numpy.h>
@@ -41,7 +41,7 @@ namespace py = pybind11;
 namespace {
 
 /// 把 C ABI 的失败转成 Python 异常,并带上引擎给的可读原因。
-void check(LmflowStatus st, const char* what) {
+void check(LMFlowStatus st, const char* what) {
   if (st == LMFLOW_OK) return;
   const char* detail = lmflow_last_error();
   std::string msg = std::string(what) + " 失败(code=" + std::to_string(st) + ")";
@@ -91,9 +91,9 @@ py::dtype numpy_from_dtype(int dt) {
   }
 }
 
-/// 把 LmflowBuffer 包成 numpy 视图(**零拷贝**)。
+/// 把 LMFlowBuffer 包成 numpy 视图(**零拷贝**)。
 /// `owner` 让底层缓冲在数组存活期间不被释放。
-py::array wrap_buffer(const LmflowBuffer& b, const py::object& owner, bool writable) {
+py::array wrap_buffer(const LMFlowBuffer& b, const py::object& owner, bool writable) {
   std::vector<py::ssize_t> shape(b.shape, b.shape + b.ndim);
   std::vector<py::ssize_t> strides(b.strides, b.strides + b.ndim);
   auto dt = numpy_from_dtype(b.dtype);
@@ -117,8 +117,8 @@ namespace lmflow {
 /// Python 侧的数据包。`owned_` 决定析构是否归还引擎引用。
 class Packet {
  public:
-  Packet() { raw_ = LmflowPacket{nullptr, 0, LMFLOW_TS_UNSET, nullptr, nullptr}; }
-  explicit Packet(LmflowPacket raw, bool owned) : raw_(raw), owned_(owned) {}
+  Packet() { raw_ = LMFlowPacket{nullptr, 0, LMFLOW_TS_UNSET, nullptr, nullptr}; }
+  explicit Packet(LMFlowPacket raw, bool owned) : raw_(raw), owned_(owned) {}
 
   Packet(const Packet&) = delete;
   Packet& operator=(const Packet&) = delete;
@@ -134,13 +134,13 @@ class Packet {
   }
 
   /// 交给引擎(emit/send):此后不再由本对象释放。
-  LmflowPacket surrender() {
+  LMFlowPacket surrender() {
     owned_ = false;
     return raw_;
   }
 
-  const LmflowPacket& raw() const { return raw_; }
-  LmflowPacket* raw_mut() { return &raw_; }
+  const LMFlowPacket& raw() const { return raw_; }
+  LMFlowPacket* raw_mut() { return &raw_; }
 
   int64_t timestamp() const { return raw_.timestamp; }
   void set_timestamp(int64_t ts) { raw_.timestamp = ts; }
@@ -181,9 +181,9 @@ class Packet {
   /// 只读 numpy 视图(零拷贝)。**仅在本包存活期间有效** ——
   /// 算子输入包是借用的,回调返回后不得再用。
   py::array as_numpy(const py::object& self) const {
-    LmflowBuffer b{};
+    LMFlowBuffer b{};
     if (!lmflow_packet_as_buffer(&raw_, &b)) {
-      throw py::value_error("该包不是 LmflowBuffer(需要用 new_buffer 或 from_numpy 构造)");
+      throw py::value_error("该包不是 LMFlowBuffer(需要用 new_buffer 或 from_numpy 构造)");
     }
     return wrap_buffer(b, self, /*writable=*/false);
   }
@@ -191,7 +191,7 @@ class Packet {
   /// 可写 numpy 视图(写时复制)。独占则零拷贝;被共享才复制。
   /// 前置条件:本包为调用方所拥有 —— 典型来自 `Context.take_input`。
   py::array make_mutable(const py::object& self) {
-    LmflowBuffer b{};
+    LMFlowBuffer b{};
     check(lmflow_packet_make_mutable_buffer(&raw_, &b), "make_mutable");
     return wrap_buffer(b, self, /*writable=*/true);
   }
@@ -224,7 +224,7 @@ class Packet {
     if (arr.ndim() < 1 || arr.ndim() > LMFLOW_MAX_DIMS) {
       throw py::value_error("ndim 必须在 1..=8");
     }
-    LmflowBuffer b{};
+    LMFlowBuffer b{};
     b.data = const_cast<void*>(arr.data());
     b.ndim = static_cast<int32_t>(arr.ndim());
     b.dtype = dtype_from_numpy(arr.dtype());
@@ -236,12 +236,12 @@ class Packet {
   }
 
  private:
-  LmflowPacket raw_{};
+  LMFlowPacket raw_{};
   bool owned_ = false;
 };
 
 /// 把 Python 值转成包:既接受 Packet,也接受裸的 int/float/bool/str/bytes/ndarray。
-static LmflowPacket to_flow_packet(const py::object& o, int64_t ts) {
+static LMFlowPacket to_flow_packet(const py::object& o, int64_t ts) {
   if (py::isinstance<Packet>(o)) {
     auto* p = o.cast<Packet*>();
     if (ts != LMFLOW_TS_UNSET) p->set_timestamp(ts);
@@ -271,7 +271,7 @@ static LmflowPacket to_flow_packet(const py::object& o, int64_t ts) {
 
 class Contract {
  public:
-  explicit Contract(LmflowContract* c) : c_(c) {}
+  explicit Contract(LMFlowContract* c) : c_(c) {}
   size_t num_inputs() const { return lmflow_contract_num_inputs(c_); }
   size_t num_outputs() const { return lmflow_contract_num_outputs(c_); }
   size_t input_id(const std::string& tag, size_t i) const {
@@ -291,14 +291,14 @@ class Contract {
   }
 
  private:
-  LmflowContract* c_;
+  LMFlowContract* c_;
 };
 
 // ---------------------------------------------------------------- Context
 
 class Context {
  public:
-  explicit Context(LmflowContext* c) : c_(c) {}
+  explicit Context(LMFlowContext* c) : c_(c) {}
 
   size_t num_inputs() const { return lmflow_ctx_num_inputs(c_); }
   size_t num_outputs() const { return lmflow_ctx_num_outputs(c_); }
@@ -394,7 +394,7 @@ class Context {
     return new Packet(lmflow_ctx_side_packet(c_, n.c_str()), false);
   }
   void log(int level, const std::string& msg) const {
-    lmflow_ctx_log(c_, static_cast<LmflowLogLevel>(level), msg.c_str());
+    lmflow_ctx_log(c_, static_cast<LMFlowLogLevel>(level), msg.c_str());
   }
   void set_error(const std::string& msg) const { lmflow_ctx_set_error(c_, msg.c_str()); }
   void counter_add(const std::string& n, int64_t d) const {
@@ -402,7 +402,7 @@ class Context {
   }
 
  private:
-  LmflowContext* c_;
+  LMFlowContext* c_;
 };
 
 // ---------------------------------------------------------------- Python 算子蹦床
@@ -439,7 +439,7 @@ void py_destroy(void* self) {
 }
 
 /// 调 Python 算子的某个方法。异常一律转错误码,绝不穿越 extern "C"。
-LmflowStatus py_invoke(void* self, LmflowContext* ctx, const char* method) {
+LMFlowStatus py_invoke(void* self, LMFlowContext* ctx, const char* method) {
   if (!self) return LMFLOW_ERR_KERNEL;
   // 引擎线程回调进 Python:必须先拿 GIL
   py::gil_scoped_acquire gil;
@@ -460,11 +460,11 @@ LmflowStatus py_invoke(void* self, LmflowContext* ctx, const char* method) {
   }
 }
 
-LmflowStatus py_open(void* self, LmflowContext* c) { return py_invoke(self, c, "open"); }
-LmflowStatus py_process(void* self, LmflowContext* c) { return py_invoke(self, c, "process"); }
-LmflowStatus py_close(void* self, LmflowContext* c) { return py_invoke(self, c, "close"); }
+LMFlowStatus py_open(void* self, LMFlowContext* c) { return py_invoke(self, c, "open"); }
+LMFlowStatus py_process(void* self, LMFlowContext* c) { return py_invoke(self, c, "process"); }
+LMFlowStatus py_close(void* self, LMFlowContext* c) { return py_invoke(self, c, "close"); }
 
-void py_get_contract(void* factory, LmflowContract* out) {
+void py_get_contract(void* factory, LMFlowContract* out) {
   auto* reg = static_cast<PyKernelReg*>(factory);
   py::gil_scoped_acquire gil;
   try {
@@ -476,7 +476,7 @@ void py_get_contract(void* factory, LmflowContract* out) {
   }
 }
 
-const LmflowKernelVTable kPyVTable = {&py_create, &py_get_contract, &py_open,
+const LMFlowKernelVTable kPyVTable = {&py_create, &py_get_contract, &py_open,
                                     &py_process, &py_close,       &py_destroy};
 
 void register_python_kernel(const std::string& name, const py::object& cls) {
@@ -493,15 +493,15 @@ class Graph;
 
 class Input {
  public:
-  explicit Input(LmflowInput* h) : h_(h) {}
+  explicit Input(LMFlowInput* h) : h_(h) {}
   ~Input() { lmflow_input_free(h_); }
   Input(const Input&) = delete;
   Input& operator=(const Input&) = delete;
 
   /// 送包。可能因背压而阻塞 → **必须释放 GIL**,否则引擎线程拿不到 GIL 而死锁。
   void send(const py::object& value, std::optional<int64_t> ts) {
-    LmflowPacket p = to_flow_packet(value, ts.value_or(LMFLOW_TS_UNSET));
-    LmflowStatus st;
+    LMFlowPacket p = to_flow_packet(value, ts.value_or(LMFLOW_TS_UNSET));
+    LMFlowStatus st;
     {
       py::gil_scoped_release unlock;
       st = lmflow_input_send(h_, p);
@@ -509,8 +509,8 @@ class Input {
     check(st, "send");
   }
   bool try_send(const py::object& value, std::optional<int64_t> ts) {
-    LmflowPacket p = to_flow_packet(value, ts.value_or(LMFLOW_TS_UNSET));
-    LmflowStatus st;
+    LMFlowPacket p = to_flow_packet(value, ts.value_or(LMFLOW_TS_UNSET));
+    LMFlowStatus st;
     {
       py::gil_scoped_release unlock;
       st = lmflow_input_try_send(h_, p);
@@ -522,22 +522,22 @@ class Input {
   void close() { lmflow_input_close(h_); }
 
  private:
-  LmflowInput* h_;
+  LMFlowInput* h_;
 };
 
 class Poller {
  public:
-  explicit Poller(LmflowPoller* h) : h_(h) {}
+  explicit Poller(LMFlowPoller* h) : h_(h) {}
   ~Poller() { lmflow_poller_free(h_); }
   Poller(const Poller&) = delete;
   Poller& operator=(const Poller&) = delete;
 
   /// 取下一个包。`timeout` 为 None 表示不限时。图结束返回 None,超时抛 TimeoutError。
   py::object next(std::optional<double> timeout) {
-    LmflowPacket out{};
+    LMFlowPacket out{};
     if (timeout.has_value()) {
       auto ms = static_cast<int64_t>(*timeout * 1000.0);
-      LmflowStatus st;
+      LMFlowStatus st;
       {
         py::gil_scoped_release unlock;
         st = lmflow_poller_next_timeout(h_, &out, ms);
@@ -559,7 +559,7 @@ class Poller {
   }
 
   py::object try_next() {
-    LmflowPacket out{};
+    LMFlowPacket out{};
     bool ok;
     {
       py::gil_scoped_release unlock;
@@ -570,7 +570,7 @@ class Poller {
   }
 
  private:
-  LmflowPoller* h_;
+  LMFlowPoller* h_;
 };
 
 /// 图。**必须在解释器销毁前关闭** —— 用 with 语句,或显式 close()。
@@ -601,7 +601,7 @@ class Graph {
   }
 
   Poller* add_poller(const std::string& port) {
-    LmflowPoller* p = lmflow_graph_add_poller(g_, port.c_str());
+    LMFlowPoller* p = lmflow_graph_add_poller(g_, port.c_str());
     if (!p) throw py::key_error(std::string("add_poller 失败: ") + lmflow_last_error());
     return new Poller(p);
   }
@@ -616,7 +616,7 @@ class Graph {
   void start() { check(lmflow_graph_start(g_), "start"); }
 
   Input* input(const std::string& port) {
-    LmflowInput* h = lmflow_graph_input(g_, port.c_str());
+    LMFlowInput* h = lmflow_graph_input(g_, port.c_str());
     if (!h) throw py::key_error(std::string("graph.input 失败: ") + lmflow_last_error());
     return new Input(h);
   }
@@ -631,7 +631,7 @@ class Graph {
 
   /// 等待图跑完。阻塞 → 释放 GIL。
   void wait_done(std::optional<double> timeout) {
-    LmflowStatus st;
+    LMFlowStatus st;
     {
       py::gil_scoped_release unlock;
       st = timeout.has_value()
@@ -642,7 +642,7 @@ class Graph {
   }
 
   void wait_until_idle(std::optional<double> timeout) {
-    LmflowStatus st;
+    LMFlowStatus st;
     {
       py::gil_scoped_release unlock;
       st = timeout.has_value()
@@ -679,7 +679,7 @@ class Graph {
     return v;
   }
   py::dict node_stats(size_t i) const {
-    LmflowNodeStats st{};
+    LMFlowNodeStats st{};
     st.struct_size = sizeof(st);
     if (!lmflow_graph_node_stats(g_, i, &st)) throw py::index_error("节点序号越界");
     py::dict d;
@@ -702,7 +702,7 @@ class Graph {
   /// 而工作线程可能正在回调 Python(需要 GIL)。
   void close() {
     if (!g_) return;
-    LmflowGraph* g = g_;
+    LMFlowGraph* g = g_;
     g_ = nullptr;
     {
       py::gil_scoped_release unlock;
@@ -712,7 +712,7 @@ class Graph {
   }
 
  private:
-  static void observer_trampoline(void* user, LmflowPacket pkt) {
+  static void observer_trampoline(void* user, LMFlowPacket pkt) {
     auto* fn = static_cast<py::function*>(user);
     py::gil_scoped_acquire gil;
     try {
@@ -724,14 +724,14 @@ class Graph {
     }
   }
 
-  LmflowGraph* g_ = nullptr;
+  LMFlowGraph* g_ = nullptr;
   std::list<py::function> observers_;
 };
 
 py::tuple Context::new_buffer(const std::vector<int64_t>& shape, const py::object& dtype) {
-  LmflowBuffer b{};
+  LMFlowBuffer b{};
   int dt = dtype_from_numpy(py::dtype::from_args(dtype));
-  LmflowPacket raw = lmflow_packet_new_buffer(static_cast<int32_t>(shape.size()), shape.data(), dt,
+  LMFlowPacket raw = lmflow_packet_new_buffer(static_cast<int32_t>(shape.size()), shape.data(), dt,
                                           LMFLOW_TS_UNSET, &b);
   if (!raw.payload) throw std::runtime_error(std::string("new_buffer 失败: ") + lmflow_last_error());
   auto* p = new Packet(raw, true);
@@ -740,9 +740,9 @@ py::tuple Context::new_buffer(const std::vector<int64_t>& shape, const py::objec
 }
 
 py::tuple Graph::new_buffer(const std::vector<int64_t>& shape, const py::object& dtype) {
-  LmflowBuffer b{};
+  LMFlowBuffer b{};
   int dt = dtype_from_numpy(py::dtype::from_args(dtype));
-  LmflowPacket raw = lmflow_packet_new_buffer(static_cast<int32_t>(shape.size()), shape.data(), dt,
+  LMFlowPacket raw = lmflow_packet_new_buffer(static_cast<int32_t>(shape.size()), shape.data(), dt,
                                           LMFLOW_TS_UNSET, &b);
   if (!raw.payload) throw std::runtime_error(std::string("new_buffer 失败: ") + lmflow_last_error());
   auto* p = new Packet(raw, true);
@@ -757,7 +757,7 @@ extern "C" void lmflow_register_builtin_kernels(void);
 namespace {
 py::object g_log_cb;
 
-void log_trampoline(void* /*user*/, LmflowLogLevel level, const char* msg) {
+void log_trampoline(void* /*user*/, LMFlowLogLevel level, const char* msg) {
   py::gil_scoped_acquire gil;
   if (!g_log_cb || g_log_cb.is_none()) return;
   try {

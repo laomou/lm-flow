@@ -17,38 +17,38 @@
 
 static_assert(sizeof(void*) == 8, "预期 64 位指针");
 
-/* LmflowPacket: payload | type_id | timestamp | owner | drop_fn */
-static_assert(sizeof(LmflowPacket) == 40, "LmflowPacket 大小变化 —— 同步 tests/abi_layout.rs");
-static_assert(alignof(LmflowPacket) == 8, "LmflowPacket 对齐变化");
-static_assert(offsetof(LmflowPacket, payload) == 0, "LmflowPacket::payload 偏移变化");
-static_assert(offsetof(LmflowPacket, type_id) == 8, "LmflowPacket::type_id 偏移变化");
-static_assert(offsetof(LmflowPacket, timestamp) == 16, "LmflowPacket::timestamp 偏移变化");
-static_assert(offsetof(LmflowPacket, owner) == 24, "LmflowPacket::owner 偏移变化");
-static_assert(offsetof(LmflowPacket, drop_fn) == 32, "LmflowPacket::drop_fn 偏移变化");
+/* LMFlowPacket: payload | type_id | timestamp | owner | drop_fn */
+static_assert(sizeof(LMFlowPacket) == 40, "LMFlowPacket 大小变化 —— 同步 tests/abi_layout.rs");
+static_assert(alignof(LMFlowPacket) == 8, "LMFlowPacket 对齐变化");
+static_assert(offsetof(LMFlowPacket, payload) == 0, "LMFlowPacket::payload 偏移变化");
+static_assert(offsetof(LMFlowPacket, type_id) == 8, "LMFlowPacket::type_id 偏移变化");
+static_assert(offsetof(LMFlowPacket, timestamp) == 16, "LMFlowPacket::timestamp 偏移变化");
+static_assert(offsetof(LMFlowPacket, owner) == 24, "LMFlowPacket::owner 偏移变化");
+static_assert(offsetof(LMFlowPacket, drop_fn) == 32, "LMFlowPacket::drop_fn 偏移变化");
 
-/* LmflowKernelVTable: 6 个函数指针 */
-static_assert(sizeof(LmflowKernelVTable) == 48, "LmflowKernelVTable 大小变化");
-static_assert(alignof(LmflowKernelVTable) == 8, "LmflowKernelVTable 对齐变化");
-static_assert(offsetof(LmflowKernelVTable, create) == 0, "vtable::create 偏移变化");
-static_assert(offsetof(LmflowKernelVTable, get_contract) == 8, "vtable::get_contract 偏移变化");
-static_assert(offsetof(LmflowKernelVTable, open) == 16, "vtable::open 偏移变化");
-static_assert(offsetof(LmflowKernelVTable, process) == 24, "vtable::process 偏移变化");
-static_assert(offsetof(LmflowKernelVTable, close) == 32, "vtable::close 偏移变化");
-static_assert(offsetof(LmflowKernelVTable, destroy) == 40, "vtable::destroy 偏移变化");
+/* LMFlowKernelVTable: 6 个函数指针 */
+static_assert(sizeof(LMFlowKernelVTable) == 48, "LMFlowKernelVTable 大小变化");
+static_assert(alignof(LMFlowKernelVTable) == 8, "LMFlowKernelVTable 对齐变化");
+static_assert(offsetof(LMFlowKernelVTable, create) == 0, "vtable::create 偏移变化");
+static_assert(offsetof(LMFlowKernelVTable, get_contract) == 8, "vtable::get_contract 偏移变化");
+static_assert(offsetof(LMFlowKernelVTable, open) == 16, "vtable::open 偏移变化");
+static_assert(offsetof(LMFlowKernelVTable, process) == 24, "vtable::process 偏移变化");
+static_assert(offsetof(LMFlowKernelVTable, close) == 32, "vtable::close 偏移变化");
+static_assert(offsetof(LMFlowKernelVTable, destroy) == 40, "vtable::destroy 偏移变化");
 
-/* LmflowBuffer: data | shape[8] | strides[8] | ndim | dtype | flags | device | reserved[2] */
-static_assert(sizeof(LmflowBuffer) == 8 + 64 + 64 + 4 + 4 + 4 + 4 + 16,
-              "LmflowBuffer 大小变化 —— 同步 Rust 侧并提升 LMFLOW_ABI_VERSION");
-static_assert(alignof(LmflowBuffer) == 8, "LmflowBuffer 对齐变化");
-static_assert(offsetof(LmflowBuffer, data) == 0, "LmflowBuffer::data 偏移变化");
-static_assert(offsetof(LmflowBuffer, shape) == 8, "LmflowBuffer::shape 偏移变化");
-static_assert(offsetof(LmflowBuffer, strides) == 72, "LmflowBuffer::strides 偏移变化");
-static_assert(offsetof(LmflowBuffer, ndim) == 136, "LmflowBuffer::ndim 偏移变化");
-static_assert(offsetof(LmflowBuffer, dtype) == 140, "LmflowBuffer::dtype 偏移变化");
-static_assert(offsetof(LmflowBuffer, flags) == 144, "LmflowBuffer::flags 偏移变化");
-static_assert(offsetof(LmflowBuffer, device) == 148, "LmflowBuffer::device 偏移变化");
-static_assert(offsetof(LmflowBuffer, reserved) == 152, "LmflowBuffer::reserved 偏移变化");
-static_assert(LMFLOW_MAX_DIMS == 8, "LMFLOW_MAX_DIMS 变化会改变 LmflowBuffer 布局");
+/* LMFlowBuffer: data | shape[8] | strides[8] | ndim | dtype | flags | device | reserved[2] */
+static_assert(sizeof(LMFlowBuffer) == 8 + 64 + 64 + 4 + 4 + 4 + 4 + 16,
+              "LMFlowBuffer 大小变化 —— 同步 Rust 侧并提升 LMFLOW_ABI_VERSION");
+static_assert(alignof(LMFlowBuffer) == 8, "LMFlowBuffer 对齐变化");
+static_assert(offsetof(LMFlowBuffer, data) == 0, "LMFlowBuffer::data 偏移变化");
+static_assert(offsetof(LMFlowBuffer, shape) == 8, "LMFlowBuffer::shape 偏移变化");
+static_assert(offsetof(LMFlowBuffer, strides) == 72, "LMFlowBuffer::strides 偏移变化");
+static_assert(offsetof(LMFlowBuffer, ndim) == 136, "LMFlowBuffer::ndim 偏移变化");
+static_assert(offsetof(LMFlowBuffer, dtype) == 140, "LMFlowBuffer::dtype 偏移变化");
+static_assert(offsetof(LMFlowBuffer, flags) == 144, "LMFlowBuffer::flags 偏移变化");
+static_assert(offsetof(LMFlowBuffer, device) == 148, "LMFlowBuffer::device 偏移变化");
+static_assert(offsetof(LMFlowBuffer, reserved) == 152, "LMFlowBuffer::reserved 偏移变化");
+static_assert(LMFLOW_MAX_DIMS == 8, "LMFLOW_MAX_DIMS 变化会改变 LMFlowBuffer 布局");
 
 #endif /* 64-bit */
 
