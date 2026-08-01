@@ -8,7 +8,7 @@ name = "lm-flow"
 version = "0.1.0"
 description = "数据流图计算框架:Rust 引擎 + C ABI + C++/Python 算子"
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.9"
 dependencies = ["numpy>=1.20"]
 license = { text = "Apache-2.0" }
 authors = [{ name = "laomou", email = "rui.mou@foxmail.com" }]
@@ -20,6 +20,10 @@ classifiers = [
     "Programming Language :: Rust",
     "Programming Language :: C++",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
     "Topic :: Software Development :: Libraries",
     "Topic :: Scientific/Engineering",
     "Operating System :: POSIX :: Linux",
@@ -44,6 +48,8 @@ lmflow = ["py.typed", "*.pyi"]
 [tool.cibuildwheel]
 # 引擎是 Rust 编的:每个构建环境都得先有工具链。
 build-frontend = "build"
+# 显式钉死 CPython 3.9–3.12(不随 cibuildwheel 默认版本漂移)。
+build = ["cp39-*", "cp310-*", "cp311-*", "cp312-*"]
 skip = ["*-musllinux*", "pp*", "*_i686", "*-win32"]
 test-command = "python -c \"import lmflow; lmflow.register_builtin_kernels(); print('lm-flow OK', len(lmflow.registered_kernels()))\""
 
