@@ -70,7 +70,7 @@ cargo run --example hello_world   # two-stage passthrough pipeline, prints 0..9
 Python:
 
 ```bash
-pip install lm-flow               # prebuilt wheels (Linux manylinux / macOS)
+pip install lm-lmflow               # prebuilt wheels (Linux manylinux / macOS)
 ```
 
 ```python
@@ -172,7 +172,7 @@ find_package(lmflow REQUIRED)
 target_link_libraries(my_app PRIVATE lmflow::flow_core)   # headers + libflow_core.a + system libs
 ```
 
-> Rust developers use `cargo` in `lmflow/flow-core`; Python users just `pip install lm-flow` (prebuilt wheels). The wheel is built by **scikit-build-core driving this same root CMake** (`-DLMFLOW_BUILD_PYTHON=ON`), so there is one build definition, not three.
+> Rust developers use `cargo` in `lmflow/flow-core`; Python users just `pip install lm-lmflow` (prebuilt wheels). The wheel is built by **scikit-build-core driving this same root CMake** (`-DLMFLOW_BUILD_PYTHON=ON`), so there is one build definition, not three.
 
 The C ABI is the only stable interface (`lmflow/include/flow.h`); `flow.hpp` is the optional C++ kernel sugar, `flow_cv.hpp` is OpenCV interop, and `flow_platform_log.hpp` bridges engine logs to the platform logger (logcat / os_log / HiLog) in one call — `lmflow::InstallPlatformLogSink()`.
 

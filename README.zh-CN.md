@@ -72,7 +72,7 @@ cargo run --example hello_world   # 两级直通管线,输出 0..9
 Python:
 
 ```bash
-pip install lm-flow               # 预编译 wheel(Linux manylinux / macOS)
+pip install lm-lmflow               # 预编译 wheel(Linux manylinux / macOS)
 ```
 
 ```python
@@ -176,7 +176,7 @@ find_package(lmflow REQUIRED)
 target_link_libraries(my_app PRIVATE lmflow::flow_core)   # 头 + libflow_core.a + 系统库
 ```
 
-> Rust 开发者在 `lmflow/flow-core` 里用 `cargo`;Python 用户直接 `pip install lm-flow`(预编 wheel)。
+> Rust 开发者在 `lmflow/flow-core` 里用 `cargo`;Python 用户直接 `pip install lm-lmflow`(预编 wheel)。
 > wheel 由 **scikit-build-core 驱动这同一份根 CMake**(`-DLMFLOW_BUILD_PYTHON=ON`)构建 —— 一份构建定义,而非三份。
 
 C ABI 是唯一稳定接口(`lmflow/include/flow.h`);`flow.hpp` 是可选的 C++ 算子糖层,`flow_cv.hpp` 是 OpenCV 互转,`flow_platform_log.hpp` 一行把引擎日志接到平台日志系统(logcat / os_log / HiLog)—— `lmflow::InstallPlatformLogSink()`。

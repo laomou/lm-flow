@@ -3,8 +3,9 @@ requires = ["scikit-build-core>=0.10", "numpy>=1.20"]
 build-backend = "scikit_build_core.build"
 
 [project]
-# 发布名(PyPI)是 lm-flow;导入名仍是 lmflow(pip install lm-flow → import lmflow)。
-name = "lm-flow"
+# 发布名(PyPI)是 lm-lmflow;导入名仍是 lmflow(pip install lm-lmflow → import lmflow)。
+# lm-flow 因去分隔符后与已存在的 lmflow 撞名被 PyPI 拒,故用 lm-lmflow。
+name = "lm-lmflow"
 version = "0.1.0"
 description = "数据流图计算框架:Rust 引擎 + C ABI + C++/Python 算子"
 readme = "README.md"
