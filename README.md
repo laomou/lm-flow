@@ -6,7 +6,7 @@ A dataflow-graph engine: computation is described as a **directed graph** — no
 
 ```text
   Host (Rust / C++ / Python) ── drives the graph
-        │  C ABI  (include/flow.h)
+        │  C ABI  (lmflow/include/flow.h)
         ▼
   Engine (Rust): scheduler · executors · edge queues · topology · YAML
         │  C ABI  (callbacks)
@@ -16,29 +16,32 @@ A dataflow-graph engine: computation is described as a **directed graph** — no
 
 ## Layout
 
+First-party source lives under `lmflow/`; build files and the vendored submodule sit at the repo root (which is also the Python project root, so wheels bundle everything they need).
+
 ```text
 lm-flow/
-├── include/                   Public headers (authoritative C ABI + optional C++ sugar)
-│   ├── flow.h                 C ABI — the only stable interface
-│   └── flow.hpp               C++ kernel sugar (header-only, not ABI)
-├── cpp/                       C++ kernels
-│   ├── kernels/               Built-in sample kernels (11, one file per kernel + register.cc)
-│   ├── abi_assert.cc          Compile-time checks of the cross-boundary struct layout
-│   └── tests/                 C++ test executables (flow.hpp unit test, CV conversion test)
-├── flow-core/                 Engine — the Rust crate (lib + staticlib + cdylib)
-│   ├── build.rs               Compiles cpp/ via `cc` and links it in
-│   ├── src/
-│   ├── tests/                 Includes ABI layout-consistency tests
-│   └── examples/              Rust host examples
-├── python/
-│   ├── src/bindings.cc        Python bindings (pybind11)
-│   ├── lmflow/                Python package (pip install lm-flow → import lmflow)
-│   └── build.py               pip-free local build script
-├── examples/                  each example is a self-contained project: examples/<lang>/<name>/
-│   ├── cpp/hello_world/       standalone C++ project (CMake: find_package or build-from-source)
-│   ├── python/                hello_world/, realtime_pipeline/, opencv_pipeline/
-│   └── {android,ios,harmonyos}/hello_world/   mobile integration examples
-└── docs/design.md             Design document (authoritative)
+├── lmflow/                    All first-party source
+│   ├── flow-core/             Engine — standalone Rust crate (lib + staticlib + cdylib)
+│   │   ├── build.rs           Compiles ../cpp via `cc` and links it in
+│   │   ├── Cargo.toml · Cargo.lock
+│   │   ├── src/ · tests/ (ABI layout consistency) · examples/ (Rust hosts)
+│   ├── include/               Public headers (authoritative C ABI + optional C++ sugar)
+│   │   ├── flow.h             C ABI — the only stable interface
+│   │   └── flow.hpp           C++ kernel sugar (header-only, not ABI)
+│   ├── cpp/                    C++ kernels
+│   │   ├── kernels/            Built-in sample kernels (11, one file per kernel + register.cc)
+│   │   ├── abi_assert.cc       Compile-time checks of the cross-boundary struct layout
+│   │   └── tests/              C++ test executables (flow.hpp unit test, CV conversion test)
+│   ├── python/                pybind11 bindings (src/) + the lmflow package + CMakeLists
+│   └── examples/              each example is self-contained: examples/<lang>/<name>/
+│       ├── cpp/hello_world/    standalone C++ project (find_package or build-from-source)
+│       ├── python/             hello_world/, realtime_pipeline/, opencv_pipeline/
+│       └── {android,ios,harmonyos}/hello_world/   mobile integration examples
+├── third_party/pybind11/      vendored git submodule (only used to build the Python wheel)
+├── cmake/                     engine.cmake · install-sdk.cmake · find_package config
+├── docs/design.md             Design document (authoritative)
+├── CMakeLists.txt             Top-level build (drives cargo; C/C++ SDK + Python extension)
+└── pyproject.toml             Python wheel (scikit-build-core → the same CMake)
 ```
 
 ## Core concepts
@@ -55,7 +58,10 @@ lm-flow/
 
 ## Quick start
 
+The engine is a standalone Rust crate under `lmflow/flow-core` (Rust developers work there directly):
+
 ```bash
+cd lmflow/flow-core
 cargo build                       # build the engine + C++ kernels
 cargo test                        # unit tests + ABI layout consistency
 cargo run --example hello_world   # two-stage passthrough pipeline, prints 0..9
@@ -90,7 +96,12 @@ print(out.next(timeout=5.0).as_int())   # 42
 g.close_all_inputs(); g.wait_done(timeout=5.0)
 ```
 
-> When there is no prebuilt wheel for your platform, `pip` builds from source — you'll need a Rust toolchain and a C++ compiler. You can also skip pip entirely: `python python/build.py` builds the extension in place.
+> Only prebuilt wheels are published — if no wheel matches your platform, `pip install` fails rather than compiling on your machine. To build locally instead, clone with submodules and build the wheel from source (needs a Rust toolchain + CMake):
+>
+> ```bash
+> git clone --recursive https://github.com/laomou/lm-flow
+> pip install ./lm-flow          # scikit-build-core drives CMake → cargo + pybind11
+> ```
 
 A kernel looks like this (C++, using the sugar layer):
 
@@ -138,13 +149,14 @@ g++ -std=c++17 -Iinclude my_host.cc lib/libflow_core.a -lpthread -ldl -lm -o my_
 Or build one yourself locally:
 
 ```bash
-cargo build --release          # → target/release/libflow_core.{a,so}
-# the headers are the three under include/
+cd lmflow/flow-core
+cargo build --release          # → lmflow/flow-core/target/release/libflow_core.{a,so}
+# the headers are the three under lmflow/include
 ```
 
 ### Build & consume with CMake
 
-CMake is the top-level build for the C++/native side. It **drives cargo** (which builds the Rust engine + C++ kernels into `libflow_core`), builds the C++ examples/tests, and installs a `find_package` config:
+CMake is the top-level build for the C++/native side; it lives at the repo root and **drives cargo** (which builds the Rust engine + C++ kernels into `libflow_core`), builds the C++ examples/tests, and installs a `find_package` config:
 
 ```bash
 cmake -B build -DCMAKE_BUILD_TYPE=Release
@@ -160,8 +172,8 @@ find_package(lmflow REQUIRED)
 target_link_libraries(my_app PRIVATE lmflow::flow_core)   # headers + libflow_core.a + system libs
 ```
 
-> Rust developers keep using `cargo build`/`cargo test`; Python keeps using pip / `python python/build.py`. CMake doesn't replace them — it orchestrates cargo for the C++/SDK path.
+> Rust developers use `cargo` in `lmflow/flow-core`; Python users just `pip install lm-flow` (prebuilt wheels). The wheel is built by **scikit-build-core driving this same root CMake** (`-DLMFLOW_BUILD_PYTHON=ON`), so there is one build definition, not three.
 
-The C ABI is the only stable interface (`include/flow.h`); `flow.hpp` is the optional C++ kernel sugar, `flow_cv.hpp` is OpenCV interop, and `flow_platform_log.hpp` bridges engine logs to the platform logger (logcat / os_log / HiLog) in one call — `lmflow::InstallPlatformLogSink()`.
+The C ABI is the only stable interface (`lmflow/include/flow.h`); `flow.hpp` is the optional C++ kernel sugar, `flow_cv.hpp` is OpenCV interop, and `flow_platform_log.hpp` bridges engine logs to the platform logger (logcat / os_log / HiLog) in one call — `lmflow::InstallPlatformLogSink()`.
 
-Mobile integration examples: [`examples/android/hello_world`](examples/android/hello_world) (JNI), [`examples/ios/hello_world`](examples/ios/hello_world) (Swift), [`examples/harmonyos/hello_world`](examples/harmonyos/hello_world) (NAPI).
+Mobile integration examples: [`lmflow/examples/android/hello_world`](lmflow/examples/android/hello_world) (JNI), [`lmflow/examples/ios/hello_world`](lmflow/examples/ios/hello_world) (Swift), [`lmflow/examples/harmonyos/hello_world`](lmflow/examples/harmonyos/hello_world) (NAPI).

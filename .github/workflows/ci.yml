@@ -8,6 +8,9 @@ on: [push, pull_request]
 #   bindings       — the Python extension really builds and runs
 #   cross-platform — Android (NDK) / macOS / iOS cross-compile, guarding platform-specific code
 #   integration    — optional OpenCV (flow_cv.hpp + Python→C++ CV-kernel proof)
+#
+# 布局:源码在 lmflow/(引擎 lmflow/flow-core 是独立 crate),构建文件 + third_party 在仓库根。
+# 各 job 用 working-directory 或显式路径落到对应目录。
 
 jobs:
   # ================================ build & correctness ================================
@@ -16,6 +19,7 @@ jobs:
   headers:
     name: build · headers (C/C++ includable + kernels)
     runs-on: ubuntu-latest
+    defaults: { run: { working-directory: lmflow } }
     steps:
       - uses: actions/checkout@v4
       - name: flow.h 作为纯 C11
@@ -41,6 +45,7 @@ jobs:
   rust:
     name: build · rust (fmt/clippy/test/example)
     runs-on: ubuntu-latest
+    defaults: { run: { working-directory: lmflow/flow-core } }
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -61,28 +66,30 @@ jobs:
   external-host:
     name: build · external C++ host + symbol alignment
     runs-on: ubuntu-latest
+    defaults: { run: { working-directory: lmflow } }
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo build --release
+      - run: cargo build --release --manifest-path flow-core/Cargo.toml
       - name: header 声明与库导出符号对齐
         run: |
           decl=$(grep -oE "^[A-Za-z_][A-Za-z0-9_ *]*\blmflow_[a-z_0-9]+\(" include/flow.h \
                  | grep -oE "lmflow_[a-z_0-9]+" | sort -u)
-          syms=$(nm -g --defined-only target/release/libflow_core.a \
+          syms=$(nm -g --defined-only flow-core/target/release/libflow_core.a \
                  | grep -oE " T lmflow_[a-z_0-9]+" | grep -oE "lmflow_[a-z_0-9]+" | sort -u)
           missing=$(comm -23 <(echo "$decl") <(echo "$syms"))
           [ -z "$missing" ] || { echo "header 声明了但库里没有:"; echo "$missing"; exit 1; }
       - name: 编译并运行外部 C++ 宿主
         run: |
           g++ -std=c++17 -Wall -Wextra -Werror -Iinclude \
-              examples/cpp/hello_world/hello_world_host.cc target/release/libflow_core.a \
+              examples/cpp/hello_world/hello_world_host.cc flow-core/target/release/libflow_core.a \
               -lpthread -ldl -lm -o /tmp/cpp_host
           out=$(/tmp/cpp_host)
           expected=$(for i in $(seq 0 9); do echo "out: $i @ ts=$i"; done)
           [ "$out" = "$expected" ] || { echo "输出不符:"; echo "$out"; exit 1; }
 
   # 用 CMake 出原生 SDK 并被消费者 find_package —— 与 cargo 并存(CMake 驱动 cargo)。
+  # 根 CMakeLists 在仓库根,configure/build 都在根跑。
   cmake-sdk:
     name: build · cmake SDK (configure/build/ctest/install/find_package)
     runs-on: ubuntu-latest
@@ -97,7 +104,7 @@ jobs:
       - name: install SDK + 用 examples/cpp 的 CMakeLists 做消费者(find_package)
         run: |
           cmake --install build --prefix /tmp/sdk
-          cmake -S examples/cpp/hello_world -B /tmp/ex -Dlmflow_DIR=/tmp/sdk/lib/cmake/lmflow
+          cmake -S lmflow/examples/cpp/hello_world -B /tmp/ex -Dlmflow_DIR=/tmp/sdk/lib/cmake/lmflow
           cmake --build /tmp/ex
           out=$(/tmp/ex/hello_world_host)
           expected=$(for i in $(seq 0 9); do echo "out: $i @ ts=$i"; done)
@@ -111,6 +118,7 @@ jobs:
   tsan:
     name: safety · tsan (concurrency, required)
     runs-on: ubuntu-latest
+    defaults: { run: { working-directory: lmflow/flow-core } }
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly
@@ -123,6 +131,7 @@ jobs:
   sanitizers-extra:
     name: safety · asan/miri (advisory)
     runs-on: ubuntu-latest
+    defaults: { run: { working-directory: lmflow/flow-core } }
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly
@@ -136,28 +145,30 @@ jobs:
 
   # ================================ bindings ================================
 
-  # Python 绑定:必须真的编出来并跑通,不能只查语法
+  # Python 绑定:必须真的编出来并跑通,不能只查语法。
+  # 走 pip install .(scikit-build-core 调根 CMake:cargo 引擎 + pybind11 扩展),
+  # 与最终 wheel 完全同一条构建路径。
   python:
     name: bindings · python (pybind11)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with: { submodules: recursive }   # third_party/pybind11
       - uses: dtolnay/rust-toolchain@stable
       - uses: actions/setup-python@v5
         with: { python-version: '3.11' }
-      - run: python -m pip install pybind11 numpy
-      - name: 构建引擎 + pybind11 扩展
-        run: python python/build.py
+      - name: pip install(scikit-build-core → CMake → 引擎 + pybind11 扩展)
+        run: python -m pip install -v .
       - name: Python 测试套件
-        run: PYTHONPATH=python python -m unittest discover -s python/tests -v
+        run: python -m unittest discover -s lmflow/python/tests -v
       - name: hello_world.py 输出必须正确
         run: |
-          out=$(PYTHONPATH=python python examples/python/hello_world/hello_world.py)
+          out=$(python lmflow/examples/python/hello_world/hello_world.py)
           expected=$(for i in $(seq 0 9); do echo "out: $((i*10+1)) @ ts=$i"; done)
           [ "$out" = "$expected" ] || { echo "输出不符:"; echo "$out"; exit 1; }
       - name: 实时管线示例必须端到端跑通(自带断言)
-        run: PYTHONPATH=python python examples/python/realtime_pipeline/realtime_pipeline.py
-      - run: python -m compileall -q python examples/python
+        run: python lmflow/examples/python/realtime_pipeline/realtime_pipeline.py
+      - run: python -m compileall -q lmflow/python lmflow/examples/python
 
   # ================================ cross-platform / mobile ================================
   # 引擎是可移植 Rust + cc 编的 C++,必须真能交叉编到各目标;这能抓住平台相关代码
@@ -166,6 +177,7 @@ jobs:
   cross-android:
     name: cross-platform · android (ndk)
     runs-on: ubuntu-latest
+    defaults: { run: { working-directory: lmflow } }
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -177,12 +189,12 @@ jobs:
           export CXX_aarch64_linux_android="$TOOL/aarch64-linux-android21-clang++"
           export AR_aarch64_linux_android="$TOOL/llvm-ar"
           export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$TOOL/aarch64-linux-android21-clang"
-          cargo build --target aarch64-linux-android
+          cargo build --target aarch64-linux-android --manifest-path flow-core/Cargo.toml
           # examples/android 的 JNI 桥:证明它连同引擎能被 NDK 交叉编+链成 .so
           # (JNI 符号由 App 的 JVM 在运行时提供,故 -shared 允许其未定义;引擎符号须从 .a 解析)
           "$TOOL/aarch64-linux-android21-clang++" -std=c++17 -Wall -Wextra -Werror \
             -shared -fPIC -Iinclude examples/android/hello_world/jni/lmflow_jni.cc \
-            target/aarch64-linux-android/debug/libflow_core.a -llog -o /tmp/liblmflow_jni.so
+            flow-core/target/aarch64-linux-android/debug/libflow_core.a -llog -o /tmp/liblmflow_jni.so
           echo "Android JNI 桥交叉编+链接成功"
       # 鸿蒙/OpenHarmony 标准系统是 target_os=linux(rustc 已确认),与 Linux 走同一套代码路径,
       # 由 rust/external-host 门禁间接覆盖;其 SDK 不在 runner 上,故不单列交叉编译。
@@ -190,22 +202,23 @@ jobs:
   cross-darwin:
     name: cross-platform · macos/ios
     runs-on: macos-latest
+    defaults: { run: { working-directory: lmflow } }
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with: { targets: aarch64-apple-ios }
       # 原生 macOS:既验证 macOS 分支(QoS 优先级)能编,又让引擎真的在 macOS 上跑一遍
       - name: macOS 原生 cargo test
-        run: cargo test
+        run: cargo test --manifest-path flow-core/Cargo.toml
       # iOS:交叉编译(Xcode 自带 iOS SDK,cc 经 xcrun 编 C++ 算子)
       - name: 交叉编译到 iOS + Swift/C 桥接冒烟
         run: |
-          cargo build --release --target aarch64-apple-ios
+          cargo build --release --target aarch64-apple-ios --manifest-path flow-core/Cargo.toml
           # examples/ios 的桥接:iOS SDK 下编译+链接,证明 C ABI 头与库在 iOS 工具链可用
           # (只编+链不跑:runner 无真机;链接成功即证明头解析、符号解析、C++ 运行时可链)
           xcrun --sdk iphoneos clang -arch arm64 -miphoneos-version-min=13.0 -Iinclude \
             examples/ios/hello_world/bridge_smoke.c \
-            target/aarch64-apple-ios/release/libflow_core.a -lc++ -o /tmp/ios_smoke
+            flow-core/target/aarch64-apple-ios/release/libflow_core.a -lc++ -o /tmp/ios_smoke
           echo "iOS 桥接编译+链接成功"
       - name: Swift 示例类型检查(Demo.swift 对着 C 模块 LmFlowC)
         run: |
@@ -223,21 +236,21 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with: { submodules: recursive }   # 下面 python 部分要编 pybind11 扩展
       - uses: dtolnay/rust-toolchain@stable
       - run: sudo apt-get update && sudo apt-get install -y libopencv-dev
-      - run: cargo build --release
+      - run: cargo build --release --manifest-path lmflow/flow-core/Cargo.toml
       - name: 编译并运行 flow_cv.hpp 测试(含非连续 ROI 拷贝)
         run: |
-          g++ -std=c++17 -Wall -Wextra -Werror -Iinclude cpp/tests/flow_cv_test.cc \
-              target/release/libflow_core.a $(pkg-config --cflags --libs opencv4) \
+          g++ -std=c++17 -Wall -Wextra -Werror -Ilmflow/include lmflow/cpp/tests/flow_cv_test.cc \
+              lmflow/flow-core/target/release/libflow_core.a $(pkg-config --cflags --libs opencv4) \
               -lpthread -ldl -lm -o /tmp/flow_cv_test
           /tmp/flow_cv_test
-      # 直接证明「Python numpy 图 → C++ OpenCV 算子 → 读回」是同一块内存:带 --with-cv-test
+      # 直接证明「Python numpy 图 → C++ OpenCV 算子 → 读回」是同一块内存:开 LMFLOW_WITH_CV_TEST
       # 把 CvInvertTest 编进扩展(仅测试构建链 OpenCV;生产扩展仍零 CV),再从 Python 调用。
       - uses: actions/setup-python@v5
         with: { python-version: '3.11' }
-      - run: python -m pip install pybind11 numpy
       - name: PY numpy → C++ CV 算子(CvInvertTest)端到端
         run: |
-          python python/build.py --with-cv-test
-          PYTHONPATH=python python python/tests/test_cv_kernel.py -v
+          python -m pip install -v . --config-settings=cmake.define.LMFLOW_WITH_CV_TEST=ON
+          python lmflow/python/tests/test_cv_kernel.py -v

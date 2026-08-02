@@ -1,7 +1,6 @@
-# Rust
-/target
+# Rust(引擎是独立 crate,target 落在 lmflow/flow-core 下;Cargo.lock 提交以复现构建)
+/lmflow/flow-core/target/
 **/*.rs.bk
-Cargo.lock
 
 # C/C++
 *.o
@@ -11,20 +10,21 @@ Cargo.lock
 *.dll
 
 # Python
-# 注意:.gitignore 不支持行尾注释 —— 模式后面写 # 会被当成模式的一部分
-# .pydeps 是 build.py --deps 解包的 pybind11/numpy(不装到系统)
-/.pydeps/
-/.pydeps-wheels/
-# 扩展模块产物
-python/lmflow/*.so
-python/lmflow/*.pyd
+lmflow/python/lmflow/*.so
+lmflow/python/lmflow/*.pyd
 __pycache__/
 *.py[cod]
 *.egg-info/
 .venv/
 dist/
 build/
+buildpy/
 .pytest_cache/
+
+# 本地测试解包的构建依赖(scikit-build-core / numpy),不进仓库
+/.pydeps-test/
+/.pydeps/
+/.pydeps-wheels/
 
 # 编辑器 / 工具
 .vscode/

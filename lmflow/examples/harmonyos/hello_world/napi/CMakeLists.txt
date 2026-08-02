@@ -15,13 +15,13 @@ else()
   set(RUST_TARGET aarch64-unknown-linux-ohos)
 endif()
 
-get_filename_component(REPO_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../../../.." ABSOLUTE)
+get_filename_component(LMFLOW_SRC "${CMAKE_CURRENT_SOURCE_DIR}/../../../.." ABSOLUTE)
 
 add_library(lmflow SHARED lmflow_napi.cpp)
-target_include_directories(lmflow PRIVATE "${REPO_ROOT}/include")
+target_include_directories(lmflow PRIVATE "${LMFLOW_SRC}/include")
 # libace_napi.z.so:OHOS 的 NAPI 运行时;libhilog_ndk.z.so:HiLog(日志桥用);
 # libflow_core.a:交叉编好的引擎。
 target_link_libraries(lmflow
-    "${REPO_ROOT}/target/${RUST_TARGET}/release/libflow_core.a"
+    "${LMFLOW_SRC}/flow-core/target/${RUST_TARGET}/release/libflow_core.a"
     libace_napi.z.so
     libhilog_ndk.z.so)

@@ -4,14 +4,14 @@
 # 两种方式都开箱即用:
 #
 #   A) 仓库内直接构建(无需先装 SDK)—— 找不到已装的 lmflow 就从源码构建引擎(驱动 cargo):
-#        cmake -S examples/cpp/hello_world -B examples/cpp/hello_world/build
-#        cmake --build examples/cpp/hello_world/build
-#        ./examples/cpp/hello_world/build/hello_world_host      # 输出 out: 0..9
+#        cmake -S lmflow/examples/cpp/hello_world -B lmflow/examples/cpp/hello_world/build
+#        cmake --build lmflow/examples/cpp/hello_world/build
+#        ./lmflow/examples/cpp/hello_world/build/hello_world_host      # 输出 out: 0..9
 #
 #   B) 消费已装好的 SDK(外部工程的标准姿势):
 #        # 先在仓库根出 SDK:cmake -S . -B build && cmake --build build
 #        #                    cmake --install build --prefix /opt/lmflow
-#        cmake -S examples/cpp/hello_world -B build -Dlmflow_DIR=/opt/lmflow/lib/cmake/lmflow
+#        cmake -S lmflow/examples/cpp/hello_world -B build -Dlmflow_DIR=/opt/lmflow/lib/cmake/lmflow
 #        cmake --build build
 
 cmake_minimum_required(VERSION 3.18)
@@ -28,7 +28,7 @@ if(NOT TARGET lmflow::flow_core)
   if(NOT lmflow_FOUND)
     message(STATUS "lmflow: 未找到已装 SDK —— 从源码构建引擎(仓库根,驱动 cargo)")
     set(LMFLOW_BUILD_TESTS OFF)  # 只要引擎,不建引擎自带的测试
-    add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../../.." "${CMAKE_BINARY_DIR}/lmflow-engine")
+    add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../../../.." "${CMAKE_BINARY_DIR}/lmflow-engine")
   endif()
 endif()
 

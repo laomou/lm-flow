@@ -1,99 +1,32 @@
 cmake_minimum_required(VERSION 3.18)
 project(lmflow VERSION 0.1.0 LANGUAGES CXX)
 
-# ---------------------------------------------------------------------------
-# 引擎是 Rust crate,由 cargo 权威构建(build.rs 经 cc 顺带编 cpp/ 下的 C++ 算子,
-# 产出单一 libflow_core)。CMake **不取代** cargo —— 它驱动 cargo,并拥有 C++ 侧:
-# 示例、测试,以及原生 SDK 的 install + find_package(lmflow)。
-#   Rust 开发者仍可直接 `cargo build` / `cargo test`;Python 仍走 pip / build.py。
-#   C/C++/移动端 + IDE + 打包走本 CMake。
+# 引擎是 Rust crate(lmflow/flow-core),cargo 权威构建(build.rs 经 cc 顺带编 lmflow/cpp
+# 算子 → libflow_core)。本 CMake(仓库根)驱动 cargo,并拥有 C++/Python 侧。
+# **各组件的构建规则在各自文件夹的 CMakeLists**,根文件只做:公共基座 + 编排 + SDK 安装。
 #
 # 用法:
-#   cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build
-#   ctest --test-dir build
-#   cmake --install build --prefix /opt/lmflow      # 出 SDK(headers + lib + config)
-# ---------------------------------------------------------------------------
+#   cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build && ctest --test-dir build
+#   cmake --install build --prefix /opt/lmflow            # 出 C/C++ SDK
+#   -DLMFLOW_BUILD_PYTHON=ON   额外编 pybind11 扩展(scikit-build 出 wheel 时会开)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(LMFLOW_ROOT "${CMAKE_CURRENT_SOURCE_DIR}")   # 仓库根:cmake/ · third_party/ · pyproject
+set(LMFLOW_SRC  "${LMFLOW_ROOT}/lmflow")          # 源码根:flow-core/ · cpp/ · include/ · python/
 
-option(LMFLOW_BUILD_TESTS "Build C++ tests (flow.hpp unit test; CV test when OpenCV is found)" ON)
+option(LMFLOW_BUILD_TESTS  "Build C++ tests"                          ON)
+option(LMFLOW_BUILD_PYTHON "Build the pybind11 Python extension"      OFF)
+option(LMFLOW_WITH_CV_TEST "Compile the CV test kernel into _lmflow"  OFF)
 
-# CMake 构建类型 → cargo profile。默认 Debug。
-if(CMAKE_BUILD_TYPE MATCHES "^(Release|RelWithDebInfo|MinSizeRel)$")
-  set(_cargo_flags --release)
-  set(_cargo_dir release)
-else()
-  set(_cargo_flags "")
-  set(_cargo_dir debug)
-endif()
+include("${LMFLOW_ROOT}/cmake/engine.cmake")     # → lmflow::flow_core(cargo 驱动)
 
-set(FLOW_LIB "${CMAKE_CURRENT_SOURCE_DIR}/target/${_cargo_dir}/libflow_core.a")
-
-find_program(CARGO cargo REQUIRED)
-find_package(Threads REQUIRED)
-
-# cargo 驱动引擎构建(Rust + C++ 算子 → libflow_core.a)。
-add_custom_command(
-  OUTPUT "${FLOW_LIB}"
-  COMMAND ${CARGO} build ${_cargo_flags}
-  WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
-  COMMENT "cargo build ${_cargo_flags} — compiles the Rust engine + C++ kernels into libflow_core.a"
-  VERBATIM USES_TERMINAL)
-# flow_engine 用 ALL:让 `cmake --build` 默认就驱动 cargo 出 libflow_core.a ——
-# 否则(没有别的 target 依赖它时)install/consumer 会找不到这个库。
-add_custom_target(flow_engine ALL DEPENDS "${FLOW_LIB}")
-
-# 引擎作为 IMPORTED 静态库对外(带公共头 + 需要的系统库)。
-add_library(flow_core STATIC IMPORTED GLOBAL)
-set_target_properties(flow_core PROPERTIES IMPORTED_LOCATION "${FLOW_LIB}")
-target_include_directories(flow_core INTERFACE
-  "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"
-  "$<INSTALL_INTERFACE:include>")
-# 静态库内含 C++ 算子,链接方需 pthread / dl / m。
-target_link_libraries(flow_core INTERFACE Threads::Threads ${CMAKE_DL_LIBS} m)
-add_library(lmflow::flow_core ALIAS flow_core)
-
-# C++ 宿主示例是**独立工程**(examples/cpp/,自带 CMakeLists,经 find_package 消费本 SDK),
-# 不在这里当 target 建 —— 保持根工程聚焦「引擎 + 测试 + 装 SDK」。
-
-# ---- 测试 ----
-if(LMFLOW_BUILD_TESTS)
-  enable_testing()
-
-  # flow.hpp 糖层单元测试:纯头,不链引擎。
-  add_executable(flow_hpp_test cpp/tests/flow_hpp_test.cc)
-  target_include_directories(flow_hpp_test PRIVATE include)
-  add_test(NAME flow_hpp_test COMMAND flow_hpp_test)
-
-  # flow_cv.hpp 转换测试:仅当装了 OpenCV 才编(引擎本身不含 CV)。
-  find_package(OpenCV QUIET)
-  if(OpenCV_FOUND)
-    add_executable(flow_cv_test cpp/tests/flow_cv_test.cc)
-    target_include_directories(flow_cv_test PRIVATE include ${OpenCV_INCLUDE_DIRS})
-    target_link_libraries(flow_cv_test PRIVATE flow_core ${OpenCV_LIBS})
-    add_dependencies(flow_cv_test flow_engine)
-    add_test(NAME flow_cv_test COMMAND flow_cv_test)
-    message(STATUS "lmflow: OpenCV ${OpenCV_VERSION} found — building flow_cv_test")
-  else()
-    message(STATUS "lmflow: OpenCV not found — skipping flow_cv_test (engine needs no OpenCV)")
+if(LMFLOW_BUILD_PYTHON)
+  add_subdirectory(lmflow/python)                 # 只编 + 装 pybind11 扩展(供 wheel)
+elseif(CMAKE_SOURCE_DIR STREQUAL LMFLOW_ROOT)     # 作为顶层工程时:C++ 测试 + 装 C/C++ SDK
+  if(LMFLOW_BUILD_TESTS)
+    enable_testing()
+    add_subdirectory(lmflow/cpp/tests)
   endif()
+  include("${LMFLOW_ROOT}/cmake/install-sdk.cmake")
 endif()
-
-# ---- 安装:原生 SDK(headers + lib + find_package 配置)----
-install(FILES include/flow.h include/flow.hpp include/flow_cv.hpp include/flow_platform_log.hpp
-        DESTINATION include)
-install(FILES "${FLOW_LIB}" DESTINATION lib)
-
-include(CMakePackageConfigHelpers)
-configure_package_config_file(
-  cmake/lmflowConfig.cmake.in
-  "${CMAKE_CURRENT_BINARY_DIR}/lmflowConfig.cmake"
-  INSTALL_DESTINATION lib/cmake/lmflow)
-write_basic_package_version_file(
-  "${CMAKE_CURRENT_BINARY_DIR}/lmflowConfigVersion.cmake"
-  VERSION ${PROJECT_VERSION} COMPATIBILITY SameMajorVersion)
-install(FILES
-  "${CMAKE_CURRENT_BINARY_DIR}/lmflowConfig.cmake"
-  "${CMAKE_CURRENT_BINARY_DIR}/lmflowConfigVersion.cmake"
-  DESTINATION lib/cmake/lmflow)

@@ -7,7 +7,7 @@
 
 ```text
   宿主(Rust / C++ / Python) ── 驱动图
-        │  C ABI  (include/flow.h)
+        │  C ABI  (lmflow/include/flow.h)
         ▼
   引擎(Rust):调度器 · 执行器 · 边队列 · 拓扑 · YAML
         │  C ABI  (回调)
@@ -17,29 +17,33 @@
 
 ## 目录结构
 
+第一方源码都在 `lmflow/` 下;构建文件与 vendored 子模块在仓库根(仓库根同时也是 Python 项目根,
+打 wheel 时需要的东西都在项目内,不会丢)。
+
 ```text
 lm-flow/
-├── include/                   公共头(C ABI 权威定义 + 可选 C++ 糖层)
-│   ├── flow.h                 C ABI —— 唯一稳定接口
-│   └── flow.hpp               C++ 算子糖层(header-only,非 ABI)
-├── cpp/                       C++ 算子
-│   ├── kernels/               内置示例算子集(11 个,一文件一算子 + register.cc 聚合)
-│   ├── abi_assert.cc          跨界结构体布局的编译期校验
-│   └── tests/                 C++ 测试可执行(flow.hpp 单测、CV 转换测试)
-├── flow-core/                 引擎 —— Rust crate(lib + staticlib + cdylib)
-│   ├── build.rs               用 cc 编译 cpp/ 并链入
-│   ├── src/
-│   ├── tests/                 含 ABI 布局一致性测试
-│   └── examples/              Rust 宿主示例
-├── python/
-│   ├── src/bindings.cc        Python 绑定(pybind11)
-│   ├── lmflow/                Python 包(pip install lm-flow → import lmflow)
-│   └── build.py               免 pip 的本地构建脚本
-├── examples/                  每个示例是独立工程:examples/<lang>/<name>/
-│   ├── cpp/hello_world/       独立 C++ 工程(CMake:find_package 或从源码构建)
-│   ├── python/                hello_world/、realtime_pipeline/、opencv_pipeline/
-│   └── {android,ios,harmonyos}/hello_world/   移动端集成示例
-└── docs/design.md             设计方案(权威文档)
+├── lmflow/                    第一方源码
+│   ├── flow-core/             引擎 —— 独立 Rust crate(lib + staticlib + cdylib)
+│   │   ├── build.rs           用 cc 编译 ../cpp 并链入
+│   │   ├── Cargo.toml · Cargo.lock
+│   │   ├── src/ · tests/(ABI 布局一致性) · examples/(Rust 宿主)
+│   ├── include/               公共头(C ABI 权威定义 + 可选 C++ 糖层)
+│   │   ├── flow.h             C ABI —— 唯一稳定接口
+│   │   └── flow.hpp           C++ 算子糖层(header-only,非 ABI)
+│   ├── cpp/                    C++ 算子
+│   │   ├── kernels/            内置示例算子集(11 个,一文件一算子 + register.cc 聚合)
+│   │   ├── abi_assert.cc       跨界结构体布局的编译期校验
+│   │   └── tests/              C++ 测试可执行(flow.hpp 单测、CV 转换测试)
+│   ├── python/                pybind11 绑定(src/)+ lmflow 包 + CMakeLists
+│   └── examples/              每个示例是独立工程:examples/<lang>/<name>/
+│       ├── cpp/hello_world/    独立 C++ 工程(find_package 或从源码构建)
+│       ├── python/             hello_world/、realtime_pipeline/、opencv_pipeline/
+│       └── {android,ios,harmonyos}/hello_world/   移动端集成示例
+├── third_party/pybind11/      vendored git 子模块(仅用于构建 Python wheel)
+├── cmake/                     engine.cmake · install-sdk.cmake · find_package 配置
+├── docs/design.md             设计方案(权威文档)
+├── CMakeLists.txt             顶层构建(驱动 cargo;C/C++ SDK + Python 扩展)
+└── pyproject.toml             Python wheel(scikit-build-core → 同一份 CMake)
 ```
 
 ## 核心概念
@@ -56,7 +60,10 @@ lm-flow/
 
 ## 快速开始
 
+引擎是 `lmflow/flow-core` 下的独立 Rust crate(Rust 开发者直接在这里干活):
+
 ```bash
+cd lmflow/flow-core
 cargo build                       # 编译引擎 + C++ 算子
 cargo test                        # 单测 + ABI 布局一致性
 cargo run --example hello_world   # 两级直通管线,输出 0..9
@@ -91,8 +98,13 @@ print(out.next(timeout=5.0).as_int())   # 42
 g.close_all_inputs(); g.wait_done(timeout=5.0)
 ```
 
-> 没有对应平台的预编译 wheel 时,`pip` 会从源码构建 —— 需要本机装有 Rust 工具链与 C++ 编译器。
-> 不走 pip 也可以:`python python/build.py` 直接就地编出扩展。
+> 只发布预编译 wheel —— 装不到匹配平台的 wheel 时,`pip install` 直接失败,而**不会**在你机器上编译源码。
+> 想本地从源码构建,就带子模块克隆再装(需要 Rust 工具链 + CMake):
+>
+> ```bash
+> git clone --recursive https://github.com/laomou/lm-flow
+> pip install ./lm-flow          # scikit-build-core 驱动 CMake → cargo + pybind11
+> ```
 
 算子长这样(C++,用糖层):
 
@@ -141,13 +153,14 @@ g++ -std=c++17 -Iinclude my_host.cc lib/libflow_core.a -lpthread -ldl -lm -o my_
 本地自己出一份也行:
 
 ```bash
-cargo build --release          # → target/release/libflow_core.{a,so}
-# 头文件就是 include/ 下那三个
+cd lmflow/flow-core
+cargo build --release          # → lmflow/flow-core/target/release/libflow_core.{a,so}
+# 头文件就是 lmflow/include 下那几个
 ```
 
 ### 用 CMake 构建与消费
 
-C++/原生侧的顶层构建是 CMake。它**驱动 cargo**(由 cargo 把 Rust 引擎 + C++ 算子编成 `libflow_core`),再编 C++ 示例/测试,并安装出 `find_package` 配置:
+C++/原生侧的顶层构建是 CMake,它在仓库根,**驱动 cargo**(由 cargo 把 Rust 引擎 + C++ 算子编成 `libflow_core`),再编 C++ 示例/测试,并安装出 `find_package` 配置:
 
 ```bash
 cmake -B build -DCMAKE_BUILD_TYPE=Release
@@ -163,8 +176,9 @@ find_package(lmflow REQUIRED)
 target_link_libraries(my_app PRIVATE lmflow::flow_core)   # 头 + libflow_core.a + 系统库
 ```
 
-> Rust 开发者仍用 `cargo build`/`cargo test`;Python 仍走 pip / `python python/build.py`。CMake 不取代它们 —— 只是为 C++/SDK 这条路驱动 cargo。
+> Rust 开发者在 `lmflow/flow-core` 里用 `cargo`;Python 用户直接 `pip install lm-flow`(预编 wheel)。
+> wheel 由 **scikit-build-core 驱动这同一份根 CMake**(`-DLMFLOW_BUILD_PYTHON=ON`)构建 —— 一份构建定义,而非三份。
 
-C ABI 是唯一稳定接口(`include/flow.h`);`flow.hpp` 是可选的 C++ 算子糖层,`flow_cv.hpp` 是 OpenCV 互转,`flow_platform_log.hpp` 一行把引擎日志接到平台日志系统(logcat / os_log / HiLog)—— `lmflow::InstallPlatformLogSink()`。
+C ABI 是唯一稳定接口(`lmflow/include/flow.h`);`flow.hpp` 是可选的 C++ 算子糖层,`flow_cv.hpp` 是 OpenCV 互转,`flow_platform_log.hpp` 一行把引擎日志接到平台日志系统(logcat / os_log / HiLog)—— `lmflow::InstallPlatformLogSink()`。
 
-移动端集成示例:[`examples/android/hello_world`](examples/android/hello_world)(JNI)、[`examples/ios/hello_world`](examples/ios/hello_world)(Swift)、[`examples/harmonyos/hello_world`](examples/harmonyos/hello_world)(NAPI)。
+移动端集成示例:[`lmflow/examples/android/hello_world`](lmflow/examples/android/hello_world)(JNI)、[`lmflow/examples/ios/hello_world`](lmflow/examples/ios/hello_world)(Swift)、[`lmflow/examples/harmonyos/hello_world`](lmflow/examples/harmonyos/hello_world)(NAPI)。

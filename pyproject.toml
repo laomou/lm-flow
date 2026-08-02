@@ -1,6 +1,6 @@
 [build-system]
-requires = ["setuptools>=64", "pybind11>=2.10", "numpy>=1.20"]
-build-backend = "setuptools.build_meta"
+requires = ["scikit-build-core>=0.10", "numpy>=1.20"]
+build-backend = "scikit_build_core.build"
 
 [project]
 # 发布名(PyPI)是 lm-flow;导入名仍是 lmflow(pip install lm-flow → import lmflow)。
@@ -35,18 +35,20 @@ Homepage = "https://github.com/laomou/lm-flow"
 Repository = "https://github.com/laomou/lm-flow"
 Documentation = "https://github.com/laomou/lm-flow/blob/main/docs/design.md"
 
-[tool.setuptools]
-package-dir = { "" = "python" }
-packages = ["lmflow"]
-
-[tool.setuptools.package-data]
-# 只带类型标记;编译出的扩展(_lmflow.*.so / .pyd)由 build_ext 自动纳入 wheel。
-# 不要在这里用 "*.so" 通配 —— 会把开发目录里 build.py 顺带产出的旧 .so 一起打进去。
-lmflow = ["py.typed", "*.pyi"]
+# ---- scikit-build-core:调根 CMake 出 pybind11 扩展 _lmflow(pip install / wheel 同一条路)----
+# 引擎(cargo)+ C++ 算子 + 绑定都由 CMake 编;third_party/pybind11 子模块在仓库根(即项目根),
+# 直接在源码内,wheel 隔离构建时不会丢。
+[tool.scikit-build]
+minimum-version = "0.10"
+cmake.version = ">=3.18"
+cmake.define.LMFLOW_BUILD_PYTHON = "ON"     # 让根 CMake 只编 + 装 _lmflow 扩展(不建 C++ 测试/SDK)
+wheel.packages = ["lmflow/python/lmflow"]    # 纯 Python 包 lmflow/python/lmflow → wheel 的 lmflow/
+build-dir = "build/{wheel_tag}"              # 按 wheel tag 分目录,避免多 Python 版本互踩
 
 # ---- 构建 wheel 的矩阵(cibuildwheel,见 .github/workflows/release.yml)----
+# 只发预编 wheel,不提供可源码编译的分发(pip 装不到匹配 wheel 时直接失败,而非本地编译)。
 [tool.cibuildwheel]
-# 引擎是 Rust 编的:每个构建环境都得先有工具链。
+# build-frontend=build → `python -m build --wheel`:直接从源码出 wheel(third_party 子模块在源码内)。
 build-frontend = "build"
 # 显式钉死 CPython 3.9–3.12(不随 cibuildwheel 默认版本漂移)。
 build = ["cp39-*", "cp310-*", "cp311-*", "cp312-*"]

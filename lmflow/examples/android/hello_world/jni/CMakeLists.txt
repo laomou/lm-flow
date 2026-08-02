@@ -18,11 +18,11 @@ else()
   message(FATAL_ERROR "未支持的 ANDROID_ABI: ${ANDROID_ABI}")
 endif()
 
-get_filename_component(REPO_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../../../.." ABSOLUTE)
-set(FLOW_CORE "${REPO_ROOT}/target/${RUST_TARGET}/release/libflow_core.a"
+get_filename_component(LMFLOW_SRC "${CMAKE_CURRENT_SOURCE_DIR}/../../../.." ABSOLUTE)
+set(FLOW_CORE "${LMFLOW_SRC}/flow-core/target/${RUST_TARGET}/release/libflow_core.a"
     CACHE FILEPATH "为该 ABI 预编的 libflow_core.a")
 
 add_library(lmflow_jni SHARED lmflow_jni.cc)
-target_include_directories(lmflow_jni PRIVATE "${REPO_ROOT}/include")
+target_include_directories(lmflow_jni PRIVATE "${LMFLOW_SRC}/include")
 # log:Android 系统日志;引擎的 C++ 算子需要 C++ 运行时,NDK 默认已带。
 target_link_libraries(lmflow_jni "${FLOW_CORE}" log)
