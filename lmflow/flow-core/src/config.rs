@@ -62,6 +62,8 @@ impl Default for InputPolicyConfig {
 pub struct NodeConfig {
     #[serde(default)]
     pub name: String,
+    /// 算子名。与 `type` 二选一:算子节点填 `kernel`,子图实例节点填 `type`(见 expand)。
+    #[serde(default)]
     pub kernel: String,
     #[serde(default)]
     pub input_ports: Vec<String>,
@@ -76,7 +78,7 @@ pub struct NodeConfig {
     pub options: serde_yaml::Value,
     #[serde(default)]
     pub input_policy: InputPolicyConfig,
-    /// 预留给子图名(ADR #27)。本版本填了即报 UNSUPPORTED。
+    /// 子图名(ADR #27):非空 = 本节点是该子图的实例,建图期展开内联;与 `kernel` 二选一。
     #[serde(default)]
     pub r#type: String,
 }
@@ -88,6 +90,12 @@ pub struct GraphConfig {
     pub executors: Vec<ExecutorConfig>,
     #[serde(default)]
     pub nodes: Vec<NodeConfig>,
+    /// 其它 YAML 文件路径(相对本文件目录),引入其 `subgraphs` 定义。仅 `from_yaml_file` 生效。
+    #[serde(default)]
+    pub include: Vec<String>,
+    /// 可复用子图库:名字 → 一张小图;节点用 `type: <名字>` 实例化,建图期展开内联。
+    #[serde(default)]
+    pub subgraphs: std::collections::BTreeMap<String, SubgraphConfig>,
     /// 图输入口(外部送包的入口)
     #[serde(default)]
     pub input_ports: Vec<String>,
@@ -108,12 +116,53 @@ pub struct GraphConfig {
     pub watchdog_ms: u64,
 }
 
+/// 子图定义:一张可复用的小图(ADR #27)。**不声明 executor** —— 内部节点按名引用主图的执行器。
+/// 边界口按**位置**对应实例节点的 `input_ports` / `output_ports`(见 expand)。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SubgraphConfig {
+    #[serde(default)]
+    pub nodes: Vec<NodeConfig>,
+    /// 子图边界输入口:按位置对应实例节点的 `input_ports`。
+    #[serde(default)]
+    pub input_ports: Vec<String>,
+    /// 子图边界输出口:按位置对应实例节点的 `output_ports`。
+    #[serde(default)]
+    pub output_ports: Vec<String>,
+}
+
 impl GraphConfig {
+    /// 只做 serde 解析:不校验、不展开、不解析 include。管线内部用。
+    pub fn parse(text: &str) -> Result<Self> {
+        serde_yaml::from_str(text).map_err(|e| Error::InvalidArg(format!("YAML parse failed: {e}")))
+    }
+
+    /// 从 YAML 文本建图配置:解析 → 展开子图 → 校验,返回**展平**(无 `type:` 节点)的配置。
+    /// 文本入口不支持 `include`(相对路径无从解析);需要 include 请用 [`GraphConfig::from_yaml_file`]。
     pub fn from_yaml(text: &str) -> Result<Self> {
-        let cfg: GraphConfig = serde_yaml::from_str(text)
-            .map_err(|e| Error::InvalidArg(format!("YAML parse failed: {e}")))?;
-        cfg.check_supported()?;
-        Ok(cfg)
+        let cfg = Self::parse(text)?;
+        if !cfg.include.is_empty() {
+            return Err(Error::InvalidArg(
+                "`include` is only supported when loading from a file (from_yaml_file); \
+                 relative paths cannot be resolved from a text string"
+                    .into(),
+            ));
+        }
+        let flat = crate::expand::expand(cfg)?;
+        flat.check_supported()?;
+        Ok(flat)
+    }
+
+    /// 从 YAML 文件建图配置:读文件 → 按本文件目录递归解析 + 合并 `include` 的子图
+    /// → 展开子图 → 校验。返回展平的配置。
+    pub fn from_yaml_file(path: &str) -> Result<Self> {
+        let text = std::fs::read_to_string(path)
+            .map_err(|e| Error::InvalidArg(format!("failed to read `{path}`: {e}")))?;
+        let cfg = Self::parse(&text)?;
+        let merged = crate::expand::resolve_includes(cfg, std::path::Path::new(path))?;
+        let flat = crate::expand::expand(merged)?;
+        flat.check_supported()?;
+        Ok(flat)
     }
 
     /// 只检查「本版本是否支持」,拓扑合法性在 Graph::build 里查。
@@ -131,12 +180,6 @@ impl GraphConfig {
                     "node `{who}`: max_in_flight={} requires an executor (thread pool) as well -- \
                      the default executor is the host main thread, so there is no parallelism",
                     n.max_in_flight
-                )));
-            }
-            if !n.r#type.is_empty() {
-                return Err(Error::Unsupported(format!(
-                    "node `{who}`: type=`{}` -- subgraph not yet implemented",
-                    n.r#type
                 )));
             }
             if n.input_ports.is_empty() && n.executor.is_empty() {

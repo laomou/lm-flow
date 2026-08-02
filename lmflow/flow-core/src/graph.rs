@@ -514,9 +514,8 @@ impl Graph {
     }
 
     pub fn from_yaml_file(path: &str) -> Result<Self> {
-        let text = std::fs::read_to_string(path)
-            .map_err(|e| Error::InvalidArg(format!("failed to read `{path}`: {e}")))?;
-        Self::from_yaml(&text)
+        let cfg = GraphConfig::from_yaml_file(path)?;
+        Self::from_config(cfg)
     }
 
     pub fn from_config(cfg: GraphConfig) -> Result<Self> {

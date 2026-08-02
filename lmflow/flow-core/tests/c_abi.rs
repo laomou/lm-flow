@@ -395,15 +395,15 @@ fn errors_are_reported_with_readable_text() {
 }
 
 #[test]
-fn unsupported_config_is_rejected_not_ignored() {
+fn unknown_subgraph_is_rejected_not_ignored() {
     unsafe {
         let g = lmflow_graph_new();
-        // 子图(node 的 type 字段)尚未实现 —— 必须报 UNSUPPORTED,而不是静默忽略
-        let y = cs("nodes: [ { kernel: PassThroughKernel, type: SomeSubgraph } ]");
+        // 引用不存在的子图 —— 必须报错,而不是静默忽略(子图现已支持,但名字要存在)
+        let y = cs("nodes: [ { type: SomeSubgraph } ]");
         let rc = lmflow_graph_init_from_yaml(g, y.as_ptr());
-        assert_eq!(
-            rc, 10,
-            "should be LMFLOW_ERR_UNSUPPORTED, not silently ignored"
+        assert_ne!(
+            rc, 0,
+            "unknown subgraph must be rejected, not silently ignored"
         );
         assert!(last_error().contains("subgraph"), "{}", last_error());
         lmflow_graph_free(g);

@@ -15,6 +15,7 @@
 pub mod config;
 pub mod context;
 pub mod executor;
+mod expand;
 pub mod ffi;
 pub mod graph;
 pub mod kernel;

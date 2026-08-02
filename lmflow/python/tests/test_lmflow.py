@@ -190,6 +190,34 @@ output_ports: [out]
             g.wait_done(timeout=15.0)  # 没有输入口可喂,源自产
             self.assertEqual([p.as_int() for p in out], [0, 1, 2, 3, 4])
 
+    def test_subgraph_expands_and_runs(self):
+        # 子图是纯 YAML / 建图期展开,绑定无需改:一个 PassPair 实例展开成两级直通。
+        with graph(
+            """
+subgraphs:
+  PassPair:
+    nodes:
+      - { name: a, kernel: PassThroughKernel, input_ports: [sin], output_ports: [mid] }
+      - { name: b, kernel: PassThroughKernel, input_ports: [mid], output_ports: [sout] }
+    input_ports: [sin]
+    output_ports: [sout]
+nodes:
+  - { name: p, type: PassPair, input_ports: [in], output_ports: [out] }
+input_ports: [in]
+output_ports: [out]
+"""
+        ) as g:
+            out = g.add_poller("out")
+            g.start()
+            inp = g.input("in")
+            for i in range(5):
+                inp.send(i, ts=i)
+            g.close_all_inputs()
+            g.wait_done(timeout=5.0)
+            self.assertEqual([p.as_int() for p in out], [0, 1, 2, 3, 4])
+            # 展开后内部节点被命名空间化为 p/a、p/b
+            self.assertEqual(g.node_names(), ["p/a", "p/b"])
+
     def test_registered_kernels_includes_both_languages(self):
         names = lmflow.registered_kernels()
         self.assertIn("PassThroughKernel", names, "C++ built-in kernel")

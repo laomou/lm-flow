@@ -31,7 +31,9 @@
 
 **零输入口 source 节点(生成型算子)已支持**(见 §7.4):内核自产数据、`source_done()` 自报产完;源须挂线程池执行器(否则会独占宿主主线程)。内置 `RangeSourceKernel` 为样板。
 
-**仍明确不做**(且 `init` 时报错,**不静默忽略**):back-edge(成环)、子图(`node.type` 填了报 `LMFLOW_ERR_UNSUPPORTED`)。
+**子图(subgraph)+ 跨文件 `include` 已支持**(见 §7.11):纯**建图期**变换,把带 `subgraphs` / `node.type` 的配置展平成等价扁平图,运行时引擎 / 调度器不感知子图。
+
+**仍明确不做**(且 `init` 时报错,**不静默忽略**):back-edge(成环)。
 
 ### 0.3 非目标
 
@@ -73,7 +75,7 @@
 | 24 | **不做 stream header**,用 side packet 覆盖 | header 会引入「流上的第二种数据」及其生命周期问题;side packet 已能表达「整条流不变的属性」。少一个概念优于多一个 |
 | 25 | **不做程序化构图 API**,动态图由宿主生成 YAML | 保持单一真相源;builder API 是一大片表面积,应由真实需求驱动而非预先设计 |
 | 26 | **不启用 `LMFLOW_TYPE_HOST_OBJECT`** | 见 ADR #9;若将来启用,须配套「原生对象端口不得接异语言算子」的拓扑校验 |
-| 27 | **子图(subgraph)推迟,但预留扩展点** | node 的 `type:` 字段语义预留给子图名,遇未知值报 `LMFLOW_ERR_UNSUPPORTED`;将来加子图不必改 ABI |
+| 27 | **子图(subgraph)= 纯建图期展开,不进 ABI** | node 的 `type:` 填子图名;`subgraphs:` 段内联定义、`include:` 引外部子图库。建图期展平成扁平图(命名空间 `parent/inner` + 边界按位置重映射),引擎不感知子图。见 §7.11 |
 | 28 | **`max_in_flight > 1` 用 context 池 + 按序重排**,而非单纯放开并发 | 并行处理多个时间戳时,完成顺序 ≠ 时间戳顺序;必须按序号重排刷新,否则下游时间戳非单调。序号在认领时按「取最小就绪时间戳」的顺序分配,故序号序 = 时间戳序 |
 | 29 | **`max_in_flight > 1` 强制要求配 executor** | 默认执行器是宿主主线程,单线程下并行度恒为 1;配了才有意义,没配报错而非静默 |
 | 30 | **认领时即弹入输入(pop-at-claim)**,而非运行时 | 并行认领必须原子地「定时间戳 + 弹包」,否则两个并发认领会取到同一时间戳的包。副作用:空闲节点会立刻认领第一个包,故它不受 `fixed_size` 丢弃约束(在飞的包不算积压) |
@@ -755,6 +757,51 @@ WARN 日志。任何有损行为都必须可观测,否则「跑通了」和「�
 
 ---
 
+### 7.11 子图(subgraph)与跨文件 include
+
+子图把一张小图打包成「一个节点」复用;`include` 把子图库拆进独立 YAML。两者都是**纯建图期变换**(`GraphConfig → 展平的 GraphConfig`,见 `src/expand.rs`),插在 parse 与 `check_supported`/`build` 之间。**运行时引擎 / 调度器完全不感知子图** —— 连边纯按端口名字符串,展开只是多产出些节点和名字。
+
+**定义与实例化**:
+
+```yaml
+subgraphs:
+  Denoise:                 # 子图名
+    nodes:
+      - { name: a, kernel: BlurKernel,    input_ports: [sin], output_ports: [mid] }
+      - { name: b, kernel: SharpenKernel, input_ports: [mid], output_ports: [sout] }
+    input_ports: [sin]     # 边界输入口
+    output_ports: [sout]   # 边界输出口
+nodes:
+  - { name: d, type: Denoise, input_ports: [raw], output_ports: [clean] }   # 实例:type 填子图名
+  - { name: s, kernel: ScaleKernel, input_ports: [clean], output_ports: [out] }
+input_ports: [raw]
+output_ports: [out]
+```
+
+**展开规则**:实例节点 `d`(`type: Denoise`)被内联替换成子图内部节点:
+
+- **命名空间**:内部节点名 → `d/a`、`d/b`;内部边 → `d/<边名>`(如 `d/mid`)。用 `/` 分隔(`:` 是端口 tag 分隔符,不能用)。同一子图实例化多次(`d`、`e`)各自命名空间,内部边不串。
+- **边界按位置重映射**:子图 `input_ports[i]` ↔ 实例 `input_ports[i]`,`output_ports` 同(数目须一致,不齐报错)。上例 `sin→raw`、`sout→clean`,于是展平后 `d/a`(`raw`→`d/mid`)、`d/b`(`d/mid`→`clean`),与手写扁平图完全等价。
+- **递归 + 环检测**:子图内部节点还能是子图实例(`type:`),递归展开;`A→…→A` 报错。
+- **`kernel` 与 `type` 二选一**:实例节点填 `type`、算子节点填 `kernel`,两个都给或都不给都报错。
+
+**跨文件 `include`**:
+
+```yaml
+# main.yml
+include: ["lib.yml"]       # 相对本文件目录;可多个;可递归(被引文件也能 include)
+nodes:
+  - { name: d, type: Denoise, input_ports: [raw], output_ports: [clean] }   # Denoise 定义在 lib.yml
+```
+
+- 只并入被引文件的 `subgraphs`(它是子图库);其 `nodes` / `executors` / ports 忽略。子图内部节点按名引用**主图**的 executor。
+- 子图重名(跨不同文件)报错;同一文件被引多次(菱形)去重、不报错。
+- 相对路径需要基准目录,故 `include` **仅 `from_yaml_file` 支持**;`from_yaml`(文本入口)遇 `include` 明确报错。C ABI 的 `lmflow_graph_init_from_yaml_file` 自动受益。
+
+未知子图名 / 边界数不齐 / 环 / `kernel`+`type` 冲突,都在 `init` 时报错(`LMFLOW_ERR_INVALID_ARG`),不静默。
+
+---
+
 ## 8. Python 接口(已实现)
 
 ### 8.1 形态
@@ -937,7 +984,7 @@ lm-flow/                          仓库根
 
 ---
 
-## 13. 测试策略(已落地 193 个:Rust 164 + Python 29)
+## 13. 测试策略(已落地 219 个:Rust 186 + Python 33)
 
 | 测试文件 | 数量 | 覆盖 |
 |---|---|---|
@@ -1017,7 +1064,7 @@ lm-flow/                          仓库根
 | 生产可观测性 | 已落地:`LMFlowNodeStats`(含 running / running_for_us / 耗时统计)、`watchdog_ms`、算子自报计数器 |
 | 是否启用 `LMFLOW_TYPE_HOST_OBJECT` | **不启用**(ADR #26) |
 | stream header | **不做**,用 side packet 覆盖(ADR #24) |
-| subgraph 组合 | **推迟**,但预留 node `type:` 扩展点(ADR #27) |
+| subgraph 组合 | **已支持**:建图期展开 + `include:` 引外部库(ADR #27,§7.11) |
 
 另外明确**不做**的:程序化构图 API(ADR #25)、observer 注册后的移除(登记于 header)。
 
