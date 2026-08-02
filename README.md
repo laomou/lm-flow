@@ -25,12 +25,11 @@ lm-flow/
 │   ├── kernels/               Built-in sample kernels (11, one file per kernel + register.cc)
 │   ├── abi_assert.cc          Compile-time checks of the cross-boundary struct layout
 │   └── tests/                 C++ test executables (flow.hpp unit test, CV conversion test)
-├── crates/
-│   └── flow-core/             Engine (lib + staticlib + cdylib)
-│       ├── build.rs           Compiles cpp/ via `cc` and links it in
-│       ├── src/
-│       ├── tests/             Includes ABI layout-consistency tests
-│       └── examples/          Rust host examples
+├── flow-core/                 Engine — the Rust crate (lib + staticlib + cdylib)
+│   ├── build.rs               Compiles cpp/ via `cc` and links it in
+│   ├── src/
+│   ├── tests/                 Includes ABI layout-consistency tests
+│   └── examples/              Rust host examples
 ├── python/
 │   ├── src/bindings.cc        Python bindings (pybind11)
 │   ├── lmflow/                Python package (pip install lm-flow → import lmflow)

@@ -26,12 +26,11 @@ lm-flow/
 │   ├── kernels/               内置示例算子集(11 个,一文件一算子 + register.cc 聚合)
 │   ├── abi_assert.cc          跨界结构体布局的编译期校验
 │   └── tests/                 C++ 测试可执行(flow.hpp 单测、CV 转换测试)
-├── crates/
-│   └── flow-core/             引擎(lib + staticlib + cdylib)
-│       ├── build.rs           用 cc 编译 cpp/ 并链入
-│       ├── src/
-│       ├── tests/             含 ABI 布局一致性测试
-│       └── examples/          Rust 宿主示例
+├── flow-core/                 引擎 —— Rust crate(lib + staticlib + cdylib)
+│   ├── build.rs               用 cc 编译 cpp/ 并链入
+│   ├── src/
+│   ├── tests/                 含 ABI 布局一致性测试
+│   └── examples/              Rust 宿主示例
 ├── python/
 │   ├── src/bindings.cc        Python 绑定(pybind11)
 │   ├── lmflow/                Python 包(pip install lm-flow → import lmflow)

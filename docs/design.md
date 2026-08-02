@@ -87,7 +87,7 @@ back-edge、零输入口节点(source)、子图。
 │    new → init_from_yaml → add_poller → start                      │
 │    loop { input.send(pkt); poller.next() } → close → wait_done    │
 ├─────────────────────── C ABI (include/flow.h) ────────────────────┤ ← unsafe 边界①
-│  Rust 引擎 (crates/flow-core, lib + staticlib + cdylib)           │
+│  Rust 引擎 (flow-core, lib + staticlib + cdylib)                  │
 │    graph(索引 arena) · scheduler/executor · edge(FIFO)            │
 │    packet · timestamp · config(YAML) · registry · poller          │
 ├─────────────────────── C ABI (回调) ──────────────────────────────┤ ← unsafe 边界②
@@ -220,7 +220,7 @@ UNSET < UNSTARTED < PRE_STREAM < MIN … MAX < POST_STREAM < ONE_OVER_POST_STREA
 ```
 `PRE_STREAM`/`POST_STREAM` 是流首/流尾的单包位置;`DONE` 表示端口已关且不再有数据;
 `UNSET` 为默认值。算术用**饱和运算**,哨兵附近不会溢出回绕。
-已实现于 `crates/flow-core/src/timestamp.rs`(含 9 个单测)。
+已实现于 `flow-core/src/timestamp.rs`(含 9 个单测)。
 
 > 提交时 `timestamp == UNSET` 的包,引擎自动继承当前 `input_timestamp`(与 `Forward` 一致);
 > 在图输入口上提交 `UNSET` 视为非法。
@@ -856,7 +856,7 @@ cc.emit(0, packet)
 - **算子回调方向**:C++ 异常 / Python 异常同样不得逃出,由糖层 / pybind11 蹃床转错误码。
 - **ABI 版本**:`LMFLOW_ABI_VERSION` + `lmflow_abi_version()`;`lmflow_graph_new` 内部校验,
   不匹配返回 NULL 并置错误。动态链接时 header 与 `.so` 不一致会导致布局错乱。
-- **布局一致性**:`cpp/abi_assert.cc` 的 `static_assert` 与 `crates/flow-core/tests/abi_layout.rs`
+- **布局一致性**:`cpp/abi_assert.cc` 的 `static_assert` 与 `flow-core/tests/abi_layout.rs`
   钉在同一组常量上,任一侧改字段而忘同步 → **构建失败**(已实测能拦住)。
 - **ABI 演进**:`LMFlowBuffer` 留了 `reserved` 供未来加字段(最可能是 GPU 内存空间);
   一旦改变既有布局,必须提升 `LMFLOW_ABI_VERSION`,所有既有二进制都要重编。
@@ -895,13 +895,11 @@ lmflow/
 ├── cpp/                       C++ 算子
 │   ├── kernels/               内置算子集(11 个,一文件一算子)
 │   └── abi_assert.cc          跨界结构体布局的编译期校验
-├── crates/
-│   ├── flow-core/             引擎
-│   │   ├── build.rs           cc 编译 cpp/ 并链入
-│   │   ├── src/               timestamp / packet / edge / node / graph / scheduler / ffi …
-│   │   ├── tests/             abi_layout.rs 等
-│   │   └── examples/          hello_world.rs(Rust 宿主)
-│   └── flow-py/               (若最终由 CMake 编 pybind11,此处可空缺)
+├── flow-core/                 引擎(Rust crate)
+│   ├── build.rs               cc 编译 cpp/ 并链入
+│   ├── src/                   timestamp / packet / edge / node / graph / scheduler / ffi …
+│   ├── tests/                 abi_layout.rs 等
+│   └── examples/              hello_world.rs(Rust 宿主)
 ├── python/lmflow/             Python 包(@kernel 装饰器 / Kernel 基类)
 ├── examples/
 │   ├── cpp/hello_world_host.cc      外部 C++ 宿主示例
