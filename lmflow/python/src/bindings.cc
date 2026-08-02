@@ -780,7 +780,7 @@ void log_trampoline(void* /*user*/, LMFlowLogLevel level, const char* msg) {
 using namespace lmflow;
 
 PYBIND11_MODULE(_lmflow, m) {
-  m.doc() = "lmflow 引擎的 Python 绑定(pybind11)";
+  m.doc() = "Python bindings for the lmflow engine (pybind11)";
 
   m.attr("ABI_VERSION") = LMFLOW_ABI_VERSION;
   m.attr("TS_UNSET") = LMFLOW_TS_UNSET;
@@ -795,13 +795,13 @@ PYBIND11_MODULE(_lmflow, m) {
 
   m.def("abi_version", &lmflow_abi_version);
   m.def("register_builtin_kernels", &lmflow_register_builtin_kernels,
-        "注册内置 C++ 算子(幂等,必须在建图之前调用)");
+        "Register the C++ builtin kernels (idempotent; call before building a graph)");
 #ifdef LMFLOW_WITH_CV_TEST
   m.def("register_cv_test_kernels", &lmflow_register_cv_test_kernels,
-        "测试专用:注册 CV 算子(CvInvertTest);仅当扩展以 --with-cv-test 构建时存在");
+        "Test-only: register the CV kernel (CvInvertTest); present only when the extension is built with --with-cv-test");
 #endif
   m.def("register_kernel", &register_python_kernel, py::arg("name"), py::arg("cls"),
-        "把一个 Python 类注册成算子");
+        "Register a Python class as a kernel");
   m.def(
       "registered_kernels",
       [] {
@@ -811,7 +811,7 @@ PYBIND11_MODULE(_lmflow, m) {
         }
         return v;
       },
-      "已注册的算子名(含内置 C++ 算子)");
+      "Names of registered kernels (including the C++ builtins)");
   m.def(
       "set_log_callback",
       [](const py::object& cb) {
@@ -822,99 +822,125 @@ PYBIND11_MODULE(_lmflow, m) {
           lmflow_set_log_callback(&log_trampoline, nullptr);
         }
       },
-      py::arg("cb"), "设置日志回调 fn(level, msg);传 None 恢复静默");
+      py::arg("cb"), "Set the log callback fn(level, msg); pass None to go silent");
   m.def("type_name", [](uint64_t id) { return std::string(lmflow_type_name(id)); });
 
-  py::class_<Packet>(m, "Packet")
+  py::class_<Packet>(
+      m, "Packet",
+      "Immutable timestamped data packet; passed by reference across kernels "
+      "(clone only bumps the refcount, no data copy).")
       .def(py::init<>())
-      .def_property("timestamp", &Packet::timestamp, &Packet::set_timestamp)
-      .def_property_readonly("is_empty", &Packet::is_empty)
-      .def_property_readonly("type_id", &Packet::type_id)
-      .def_property_readonly("type_name", &Packet::type_name)
-      .def("as_int", &Packet::as_int)
-      .def("as_float", &Packet::as_float)
-      .def("as_bool", &Packet::as_bool)
-      .def("as_str", &Packet::as_str)
-      .def("as_bytes", &Packet::as_bytes)
+      .def_property("timestamp", &Packet::timestamp, &Packet::set_timestamp, "Packet timestamp (int).")
+      .def_property_readonly("is_empty", &Packet::is_empty, "Whether this is an empty packet.")
+      .def_property_readonly("type_id", &Packet::type_id, "Payload type id.")
+      .def_property_readonly("type_name", &Packet::type_name, "Human-readable payload type name.")
+      .def("as_int", &Packet::as_int, "Read the int payload; None on type mismatch.")
+      .def("as_float", &Packet::as_float, "Read the float payload; None on type mismatch.")
+      .def("as_bool", &Packet::as_bool, "Read the bool payload; None on type mismatch.")
+      .def("as_str", &Packet::as_str, "Read the str payload; None on type mismatch.")
+      .def("as_bytes", &Packet::as_bytes, "Read the bytes payload; None on type mismatch.")
       .def(
           "as_numpy", [](const py::object& self) { return self.cast<Packet&>().as_numpy(self); },
-          "只读 numpy 视图(零拷贝);仅在本包存活期间有效")
+          "Read-only numpy view (zero-copy); valid only while this packet is alive")
       .def(
           "make_mutable",
           [](const py::object& self) { return self.cast<Packet&>().make_mutable(self); },
-          "可写 numpy 视图(写时复制:独占则零拷贝)")
+          "Writable numpy view (copy-on-write: zero-copy when exclusively owned)")
       .def("__repr__", &Packet::repr)
-      .def_static("from_int", &Packet::from_int, py::arg("value"), py::arg("ts") = LMFLOW_TS_UNSET)
+      .def_static("from_int", &Packet::from_int, py::arg("value"), py::arg("ts") = LMFLOW_TS_UNSET,
+                  "Make a packet from an int.")
       .def_static("from_float", &Packet::from_float, py::arg("value"),
-                  py::arg("ts") = LMFLOW_TS_UNSET)
+                  py::arg("ts") = LMFLOW_TS_UNSET, "Make a packet from a float.")
       .def_static("from_bool", &Packet::from_bool, py::arg("value"),
-                  py::arg("ts") = LMFLOW_TS_UNSET)
-      .def_static("from_str", &Packet::from_str, py::arg("value"), py::arg("ts") = LMFLOW_TS_UNSET)
+                  py::arg("ts") = LMFLOW_TS_UNSET, "Make a packet from a bool.")
+      .def_static("from_str", &Packet::from_str, py::arg("value"), py::arg("ts") = LMFLOW_TS_UNSET,
+                  "Make a packet from a str.")
       .def_static("from_bytes", &Packet::from_bytes, py::arg("value"),
-                  py::arg("ts") = LMFLOW_TS_UNSET)
+                  py::arg("ts") = LMFLOW_TS_UNSET, "Make a packet from bytes.")
       .def_static("from_numpy", &Packet::from_numpy, py::arg("array"),
                   py::arg("ts") = LMFLOW_TS_UNSET,
-                  "从 numpy **拷贝**一份进引擎;想省这次拷贝请用 new_buffer");
+                  "Copy a numpy array into the engine; to skip this copy use new_buffer");
 
-  py::class_<Contract>(m, "Contract")
+  py::class_<Contract>(
+      m, "Contract",
+      "Kernel port contract; declare port types and required side packets in get_contract(c).")
       .def_property_readonly("num_inputs", &Contract::num_inputs)
       .def_property_readonly("num_outputs", &Contract::num_outputs)
       .def("input_id", &Contract::input_id, py::arg("tag"), py::arg("index") = 0)
       .def("output_id", &Contract::output_id, py::arg("tag"), py::arg("index") = 0)
       .def("input_name", &Contract::input_name)
       .def("output_name", &Contract::output_name)
-      .def("input_set_any", &Contract::input_set_any)
-      .def("output_set_any", &Contract::output_set_any)
-      .def("input_set_type", &Contract::input_set_type)
-      .def("output_set_type", &Contract::output_set_type)
-      .def("require_side_packet", &Contract::require_side_packet);
+      .def("input_set_any", &Contract::input_set_any, "Declare an input port accepts any type.")
+      .def("output_set_any", &Contract::output_set_any, "Declare an output port emits any type.")
+      .def("input_set_type", &Contract::input_set_type, "Declare an input port's type constraint.")
+      .def("output_set_type", &Contract::output_set_type, "Declare an output port's type.")
+      .def("require_side_packet", &Contract::require_side_packet,
+           "Declare a required side-packet name.");
 
-  py::class_<Context>(m, "Context")
+  py::class_<Context>(
+      m, "Context",
+      "Per-invocation context for a kernel's open/process/close: read inputs and options, write outputs.")
       .def_property_readonly("num_inputs", &Context::num_inputs)
       .def_property_readonly("num_outputs", &Context::num_outputs)
       .def_property_readonly("node_name", &Context::node_name)
       .def_property_readonly("kernel_name", &Context::kernel_name)
-      .def_property_readonly("close_reason", &Context::close_reason)
-      .def_property_readonly("input_timestamp", &Context::input_timestamp)
+      .def_property_readonly("close_reason", &Context::close_reason, "Why close fired (see CloseReason).")
+      .def_property_readonly("input_timestamp", &Context::input_timestamp,
+                             "The aligned timestamp of this invocation.")
       .def("input_id", &Context::input_id, py::arg("tag"), py::arg("index") = 0)
       .def("output_id", &Context::output_id, py::arg("tag"), py::arg("index") = 0)
       .def("input_index", &Context::input_index)
       .def("input_name", &Context::input_name)
       .def("output_name", &Context::output_name)
-      .def("input_is_empty", &Context::input_is_empty)
-      .def("input_is_done", &Context::input_is_done)
-      .def("input", &Context::input, py::arg("index"))
-      .def("take_input", &Context::take_input, py::arg("index"))
-      .def("emit", &Context::emit, py::arg("index"), py::arg("value"),
-           py::arg("ts") = std::nullopt)
-      .def("forward", &Context::forward, py::arg("in_index"), py::arg("out_index"))
+      .def("input_is_empty", &Context::input_is_empty, "Whether this input port has no packet this round.")
+      .def("input_is_done", &Context::input_is_done, "Whether this input port is closed and drained.")
+      .def("input", &Context::input, py::arg("index"), "Borrow the input packet at index (does not take it).")
+      .def("take_input", &Context::take_input, py::arg("index"),
+           "Take the input packet at index (enables zero-copy in-place rewrite).")
+      .def("emit", &Context::emit, py::arg("index"), py::arg("value"), py::arg("ts") = std::nullopt,
+           "Emit a packet on output port index (defaults to the input timestamp).")
+      .def("forward", &Context::forward, py::arg("in_index"), py::arg("out_index"),
+           "Zero-copy forward an input packet to an output port.")
       .def("set_next_timestamp_bound", &Context::set_next_timestamp_bound)
-      .def("new_buffer", &Context::new_buffer, py::arg("shape"), py::arg("dtype"))
+      .def("new_buffer", &Context::new_buffer, py::arg("shape"), py::arg("dtype"),
+           "Engine-side buffer allocation; returns (packet, writable numpy view) (zero-copy).")
       .def("has_option", &Context::has_option)
-      .def("option_int", &Context::option_int, py::arg("key"), py::arg("default") = 0)
-      .def("option_float", &Context::option_float, py::arg("key"), py::arg("default") = 0.0)
-      .def("option_bool", &Context::option_bool, py::arg("key"), py::arg("default") = false)
-      .def("option_str", &Context::option_str, py::arg("key"), py::arg("default") = "")
+      .def("option_int", &Context::option_int, py::arg("key"), py::arg("default") = 0,
+           "Read an int node option.")
+      .def("option_float", &Context::option_float, py::arg("key"), py::arg("default") = 0.0,
+           "Read a float node option.")
+      .def("option_bool", &Context::option_bool, py::arg("key"), py::arg("default") = false,
+           "Read a bool node option.")
+      .def("option_str", &Context::option_str, py::arg("key"), py::arg("default") = "",
+           "Read a str node option.")
       .def("option_int_array", &Context::option_int_array)
       .def("option_float_array", &Context::option_float_array)
-      .def("options_json", &Context::options_json)
+      .def("options_json", &Context::options_json, "The whole options block as a raw JSON string.")
       .def("require_option_int", &Context::require_option_int)
       .def("require_option_float", &Context::require_option_float)
       .def("require_option_str", &Context::require_option_str)
       .def("has_side_packet", &Context::has_side_packet)
-      .def("side_packet", &Context::side_packet)
-      .def("log", &Context::log, py::arg("level"), py::arg("msg"))
-      .def("set_error", &Context::set_error)
-      .def("counter_add", &Context::counter_add, py::arg("name"), py::arg("delta") = 1);
+      .def("side_packet", &Context::side_packet, "Get a side packet (constant input).")
+      .def("log", &Context::log, py::arg("level"), py::arg("msg"), "Write an engine log line.")
+      .def("set_error", &Context::set_error, "Mark this invocation as failed, with a reason.")
+      .def("counter_add", &Context::counter_add, py::arg("name"), py::arg("delta") = 1,
+           "Add to a self-reported counter (for diagnostics).");
 
-  py::class_<Input>(m, "Input")
-      .def("send", &Input::send, py::arg("value"), py::arg("ts") = std::nullopt)
-      .def("try_send", &Input::try_send, py::arg("value"), py::arg("ts") = std::nullopt)
-      .def("close", &Input::close);
+  py::class_<Input>(m, "Input",
+                    "Graph input-port handle (avoids per-packet name lookup on the hot path).")
+      .def("send", &Input::send, py::arg("value"), py::arg("ts") = std::nullopt,
+           "Send a packet (blocking: waits at the watermark). ts defaults to auto-increment; "
+           "releases the GIL while waiting.")
+      .def("try_send", &Input::try_send, py::arg("value"), py::arg("ts") = std::nullopt,
+           "Non-blocking send; raises at the watermark instead of blocking.")
+      .def("close", &Input::close, "Close this input port.");
 
-  py::class_<Poller>(m, "Poller")
-      .def("next", &Poller::next, py::arg("timeout") = std::nullopt)
-      .def("try_next", &Poller::try_next);
+  py::class_<Poller>(m, "Poller",
+                     "Pull-mode output handle; iterable directly (stops when the graph ends).")
+      .def("next", &Poller::next, py::arg("timeout") = std::nullopt,
+           "Get the next output packet; None when the graph ends, raises Timeout on timeout. "
+           "Releases the GIL while waiting.")
+      .def("try_next", &Poller::try_next, "Non-blocking get; returns None if empty.");
 
   py::class_<Graph>(m, "Graph")
       .def(py::init<>())

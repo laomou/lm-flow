@@ -5,6 +5,8 @@
 一个数据流图计算框架:把计算描述成**有向图**,节点是**算子(Kernel)**,边上流动**带时间戳的数据包(Packet)**。
 引擎用 Rust 实现(调度、线程、队列、拓扑),对外只暴露一层稳定的 **C ABI**;算子可以用 **C++** 或 **Python** 编写。
 
+📖 **Python API 文档**:<https://laomou.github.io/lm-flow/> —— 由 docstring 自动生成。
+
 ```text
   宿主(Rust / C++ / Python) ── 驱动图
         │  C ABI  (lmflow/include/flow.h)

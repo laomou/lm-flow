@@ -1,10 +1,11 @@
-"""lmflow —— 数据流图计算框架的 Python 接口。
+"""lmflow — Python interface to the dataflow-graph engine.
 
-把计算描述成**有向图**:节点是**算子(Kernel)**,边上流动**带时间戳的数据包(Packet)**。
-算子可以用 Python 写,也可以用 C++ 写,在 YAML 里平等引用 —— 引擎不区分。
+Computation is described as a **directed graph**: nodes are **kernels**, and
+**timestamped packets** flow along the edges. Kernels may be written in Python
+or C++ and are referenced identically in YAML — the engine does not distinguish.
 
-最小例子
---------
+Minimal example
+---------------
 >>> import lmflow
 >>> @lmflow.kernel("Double")
 ... class Double(lmflow.Kernel):
@@ -22,22 +23,27 @@
 ...     print(out.next().as_int())
 42
 
-三件必须知道的事
-----------------
-**生命周期** —— 图必须在解释器开始销毁**之前**停掉,否则引擎线程可能回调进一个正在
-析构的解释器而崩溃。请始终用 ``with lmflow.Graph.from_yaml(...) as g:``,或显式
-``g.close()``。``__del__`` 只作兜底,不保证时机。
+Three things you must know
+--------------------------
+**Lifecycle** — the graph must be stopped *before* the interpreter begins tearing
+down, otherwise engine threads may call back into a dying interpreter and crash.
+Always use ``with lmflow.Graph.from_yaml(...) as g:``, or call ``g.close()``
+explicitly. ``__del__`` is only a fallback and its timing is not guaranteed.
 
-**GIL** —— 节点未指定 ``executor`` 时跑在**宿主主线程**上,此时 Python 算子之间
-根本不存在 GIL 争抢。只有显式把 Python 算子放进线程池才需要考虑:那时它们无法真并行,
-重计算应交给 C++ 算子(或让 Python 算子留在主线程、把 C++ 算子放进池里)。
-所有可能阻塞的接口(``poller.next`` / ``wait_done`` / ``send``)在等待期间都会释放 GIL。
+**GIL** — a node with no ``executor`` runs on the **host main thread**, where
+Python kernels never contend for the GIL. It only matters once you put a Python
+kernel on a thread pool: there they cannot truly run in parallel, so heavy compute
+belongs in C++ kernels (or keep the Python kernels on the main thread and put the
+C++ kernels on the pool). Every potentially blocking call (``poller.next`` /
+``wait_done`` / ``send``) releases the GIL while waiting.
 
-**数据类型** —— Python 算子只能收发**内建类型**:int / float / bool / str / bytes,
-以及 N 维数值缓冲(``as_numpy()`` / ``new_buffer()``)。不支持把 dict、list 或自定义
-类实例直接放进数据流 —— 那样的包只能在纯 Python 子图里流动,接到 C++ 算子上就成了
-无法解读的指针。结构化数据请用:数值集合 → N×K 的 numpy 缓冲(零拷贝,C++ 侧可直读);
-任意元数据 → JSON 字符串;配置参数 → node ``options``。
+**Data types** — Python kernels may only send/receive **builtin types**: int /
+float / bool / str / bytes, plus N-dimensional numeric buffers (``as_numpy()`` /
+``new_buffer()``). You cannot put a dict, list, or custom class instance straight
+into the dataflow — such a packet can only travel within a pure-Python subgraph;
+reaching a C++ kernel it becomes an unreadable pointer. For structured data use:
+numeric collections → an N×K numpy buffer (zero-copy, readable directly by C++);
+arbitrary metadata → a JSON string; config parameters → node ``options``.
 """
 
 from __future__ import annotations
@@ -90,10 +96,12 @@ INVALID_ID = _native.INVALID_ID
 
 
 class Timeout(TimeoutError):
-    """带超时的接口在超时时抛出。"""
+    """Raised by timeout-bearing calls when they time out."""
 
 
 class LogLevel:
+    """Log level constants (matching the C ABI)."""
+
     ERROR = 0
     WARN = 1
     INFO = 2
@@ -101,7 +109,7 @@ class LogLevel:
 
 
 class CloseReason:
-    """算子 ``close`` 的触发原因 —— 据此决定是否提交结果。"""
+    """Why a kernel's ``close`` fired — use it to decide whether to emit results."""
 
     NORMAL = _native.CLOSE_NORMAL
     ERROR = _native.CLOSE_ERROR
@@ -109,6 +117,8 @@ class CloseReason:
 
 
 class GraphState:
+    """Graph state constants (see :attr:`Graph.state`)."""
+
     CREATED = 0
     INITIALIZED = 1
     RUNNING = 2
@@ -120,36 +130,39 @@ class GraphState:
 
 
 class Kernel:
-    """Python 算子基类。
+    """Base class for Python kernels.
 
-    子类实现 ``process``(必需),可选实现 ``open`` / ``close``,
-    以及可选的静态 ``get_contract(c)`` 用于声明端口类型与必需的 side packet。
+    Subclasses implement ``process`` (required), optionally ``open`` / ``close``,
+    and optionally a static ``get_contract(c)`` to declare port types and required
+    side packets.
 
-    生命周期由引擎管理:每个图节点一个实例;``open`` 在图启动时调用一次,
-    ``process`` 每个数据包(或每个对齐后的时刻)调用一次,``close`` 在关流时调用一次。
+    Lifecycle is engine-managed: one instance per graph node; ``open`` runs once at
+    graph start, ``process`` once per packet (or per aligned timestamp), ``close``
+    once at input-close.
 
-    方法里抛出的异常会被捕获、转成算子失败,并把异常文本并入图级错误 ——
-    不会穿越 FFI 边界导致崩溃。
+    Exceptions raised in these methods are caught, turned into a kernel failure, and
+    folded into the graph-level error — they never cross the FFI boundary and crash.
     """
 
     def open(self, cc: Context) -> None:
-        """图启动时调用一次。适合读 options、准备资源。"""
+        """Called once at graph start. Read options and acquire resources here."""
 
     def process(self, cc: Context) -> None:
-        """每个数据包调用一次。必须实现。"""
+        """Called once per packet. Must be implemented."""
         raise NotImplementedError(
             f"{type(self).__name__} must implement process(self, cc)"
         )
 
     def close(self, cc: Context) -> None:
-        """关流时调用一次。可在此产出汇总结果 —— 但先看 ``cc.close_reason``。"""
+        """Called once at input-close. Emit summary results here — but check ``cc.close_reason`` first."""
 
 
 def kernel(name: str) -> Callable[[type], type]:
-    """把一个 :class:`Kernel` 子类注册到引擎,供 YAML 里按 ``name`` 引用。
+    """Register a :class:`Kernel` subclass so YAML can reference it by ``name``.
 
-    注册发生在**装饰器执行时**(即模块 import 时),所以务必在
-    :meth:`Graph.from_yaml` 之前完成 import。同名重复注册会抛异常。
+    Registration happens **when the decorator runs** (i.e. at import time), so make
+    sure the import completes before :meth:`Graph.from_yaml`. Registering a duplicate
+    name raises.
     """
 
     def decorator(cls: type) -> type:
@@ -162,26 +175,26 @@ def kernel(name: str) -> Callable[[type], type]:
 
 
 def registered_kernels() -> Sequence[str]:
-    """已注册的算子名(含 C++ 内置算子)。"""
+    """Names of registered kernels (including the C++ builtins)."""
     return _native.registered_kernels()
 
 
 def register_builtin_kernels() -> None:
-    """注册捆绑的 C++ 内置算子(幂等)。必须在建图之前调用。"""
+    """Register the bundled C++ builtin kernels (idempotent). Call before building a graph."""
     _native.register_builtin_kernels()
 
 
 def has_cv_test_kernels() -> bool:
-    """扩展是否带 CV 测试算子(以 ``python build.py --with-cv-test`` 构建)。
+    """Whether the extension bundles the CV test kernel (built with ``python build.py --with-cv-test``).
 
-    生产扩展默认**不含** OpenCV(ADR #14),故默认返回 False;带开关构建后才有
-    ``CvInvertTest`` 供从 Python 调用。
+    The production extension ships **without** OpenCV (ADR #14), so this is False by
+    default; only a switch-built extension exposes ``CvInvertTest`` for Python.
     """
     return hasattr(_native, "register_cv_test_kernels")
 
 
 def register_cv_test_kernels() -> None:
-    """测试专用:注册 CV 算子 ``CvInvertTest``。仅当扩展带 ``--with-cv-test`` 构建时可用。"""
+    """Test-only: register the CV kernel ``CvInvertTest``. Available only when the extension was built with ``--with-cv-test``."""
     fn = getattr(_native, "register_cv_test_kernels", None)
     if fn is None:
         raise RuntimeError("extension was not built with CV test kernels. Use: python python/build.py --with-cv-test")
@@ -189,15 +202,16 @@ def register_cv_test_kernels() -> None:
 
 
 def set_log_callback(fn: Callable[[int, str], Any] | None) -> None:
-    """设置日志回调 ``fn(level, message)``;传 ``None`` 恢复静默。
+    """Set the log callback ``fn(level, message)``; pass ``None`` to go silent.
 
-    回调可能在任意工作线程被调用(调用时引擎不持有内部锁)。
+    The callback may run on any worker thread (the engine holds no internal lock
+    while calling it).
     """
     _native.set_log_callback(fn)
 
 
 def type_name(type_id: int) -> str:
-    """type_id 的可读名字(用于诊断)。"""
+    """Human-readable name of a type_id (for diagnostics)."""
     return _native.type_name(type_id)
 
 
@@ -205,9 +219,10 @@ def type_name(type_id: int) -> str:
 
 
 class Graph:
-    """一张计算图。
+    """A computation graph.
 
-    **务必用作上下文管理器**:图需要在解释器销毁前停掉(见模块文档)。
+    **Always use it as a context manager**: the graph must be stopped before the
+    interpreter is destroyed (see the module docstring).
     """
 
     def __init__(self) -> None:
@@ -218,12 +233,14 @@ class Graph:
 
     @classmethod
     def from_yaml(cls, text: str) -> Graph:
+        """Build a graph from YAML text."""
         g = cls()
         g._g.init_from_yaml(text)
         return g
 
     @classmethod
     def from_yaml_file(cls, path: str | os.PathLike[str]) -> Graph:
+        """Build a graph from a YAML file."""
         g = cls()
         g._g.init_from_yaml_file(os.fspath(path))
         return g
@@ -237,7 +254,7 @@ class Graph:
         self.close()
 
     def close(self) -> None:
-        """停掉图并释放资源。幂等。"""
+        """Stop the graph and release resources. Idempotent."""
         if not self._closed:
             self._closed = True
             self._g.close()
@@ -251,63 +268,69 @@ class Graph:
     # ---- 启动前 ----
 
     def set_side_packet(self, name: str, value: Any) -> None:
-        """注入常量输入(模型句柄、标定参数…)。必须在 :meth:`start` 之前。"""
+        """Inject a constant input (model handle, calibration params…). Must be before :meth:`start`."""
         self._g.set_side_packet(name, value)
 
     def add_poller(self, port: str) -> Poller:
-        """拉模式订阅一个图输出口。必须在 :meth:`start` 之前。"""
+        """Pull-mode subscription to a graph output port. Must be before :meth:`start`."""
         return self._g.add_poller(port)
 
     def observe(self, port: str, fn: Callable[[Packet], Any]) -> None:
-        """推模式订阅。回调在**派发该包的线程**上执行,包为借用、回调返回后失效。"""
+        """Push-mode subscription. The callback runs on **the thread that dispatched the packet**; the packet is borrowed and invalid after the callback returns."""
         self._g.observe(port, fn)
 
     def start(self) -> None:
+        """Start the graph and begin scheduling. After this you cannot add_poller / set_side_packet / observe."""
         self._g.start()
 
     # ---- 运行时 ----
 
     def input(self, port: str) -> Input:
-        """取图输入口句柄(热路径免按名字查表)。"""
+        """Get an input-port handle (avoids per-packet name lookup on the hot path)."""
         return self._g.input(port)
 
     def send(self, port: str, value: Any, ts: int | None = None) -> None:
-        """便捷送包(内部查表)。高频场景请改用 :meth:`input` 拿句柄。"""
+        """Convenience send (looks the port up internally). For high frequency, get a handle via :meth:`input`."""
         self._g.input(port).send(value, ts)
 
     def new_buffer(self, shape: Sequence[int], dtype: Any) -> tuple[Packet, Any]:
-        """让**引擎**分配缓冲,返回 ``(packet, 可写 numpy 视图)``。
+        """Have the **engine** allocate a buffer; returns ``(packet, writable numpy view)``.
 
-        这是零拷贝的推荐入口:直接把结果写进引擎内存,避免
-        ``send(ndarray)`` 那次整帧拷贝,也避免引擎持有 PyObject(见模块文档的 GIL 一节)。
+        This is the recommended zero-copy entry point: write results straight into
+        engine memory, avoiding the whole-frame copy of ``send(ndarray)`` and avoiding
+        the engine holding a PyObject (see the module docstring's GIL note).
         """
         return self._g.new_buffer(list(shape), dtype)
 
     def close_input(self, port: str) -> None:
+        """Close one input port (tell upstream there is no more data on it)."""
         self._g.close_input(port)
 
     def close_all_inputs(self) -> None:
+        """Close all input ports — lets the graph drain, finish, and terminate."""
         self._g.close_all_inputs()
 
     def cancel(self) -> None:
-        """立即取消:停止调度、丢弃在途包。**不会中断**已在执行的算子回调。"""
+        """Cancel immediately: stop scheduling, drop in-flight packets. Does **not** interrupt a kernel callback already running."""
         self._g.cancel()
 
     def pause(self) -> None:
+        """Pause scheduling: in-flight packets stop dispatching; ``send`` can still enqueue."""
         self._g.pause()
 
     def resume(self) -> None:
+        """Resume scheduling paused by :meth:`pause`."""
         self._g.resume()
 
     def wait_done(self, timeout: float | None = None) -> None:
-        """等待图跑完(需先关闭输入口)。等待期间会释放 GIL。"""
+        """Wait for the graph to finish (close the inputs first). Releases the GIL while waiting."""
         try:
             self._g.wait_done(timeout)
         except TypeError as e:  # 原生层用 TypeError 表示超时
             raise Timeout(str(e)) from None
 
     def wait_until_idle(self, timeout: float | None = None) -> None:
-        """等到在途包都处理完,但**不结束图**(批处理模式)。"""
+        """Wait until in-flight packets are all processed, but **do not end the graph** (batch mode)."""
         try:
             self._g.wait_until_idle(timeout)
         except TypeError as e:
@@ -317,35 +340,39 @@ class Graph:
 
     @property
     def state(self) -> int:
+        """Current graph state (values in :class:`GraphState`)."""
         return self._g.state
 
     def dump(self) -> str:
-        """拓扑与状态的可读快照(节点表含 running/耗时,便于定位卡死)。"""
+        """Human-readable snapshot of topology and state (node table shows running/elapsed — handy for locating a stall)."""
         return self._g.dump()
 
     def last_error(self) -> str:
-        """图级错误文本 —— 工作线程上算子的失败原因只能从这里拿到。"""
+        """Graph-level error text — the only place to get a worker-thread kernel's failure reason."""
         return self._g.last_error()
 
     def queue_depth(self, port: str) -> int:
+        """Number of packets currently queued on that input port."""
         return self._g.queue_depth(port)
 
     def dropped_count(self, port: str) -> int:
-        """该边累计被丢弃的包数(仅 fixed_size 策略会丢)。"""
+        """Cumulative packets dropped on that edge (only the fixed_size policy drops)."""
         return self._g.dropped_count(port)
 
     def counter_value(self, name: str) -> int:
-        """算子自报计数器的当前值。"""
+        """Current value of a kernel-reported counter."""
         return self._g.counter_value(name)
 
     def total_queued(self) -> int:
+        """Total in-flight (enqueued but unconsumed) packets across the graph."""
         return self._g.total_queued()
 
     def node_names(self) -> list[str]:
+        """All node names (in declaration order)."""
         return self._g.node_names()
 
     def node_stats(self, index: int) -> dict[str, Any]:
-        """节点统计:running / running_for_us / processed / errors / 耗时 / queued。"""
+        """Node stats: running / running_for_us / processed / errors / elapsed / queued."""
         return self._g.node_stats(index)
 
     def __repr__(self) -> str:
@@ -354,7 +381,7 @@ class Graph:
 
 
 def _poller_iter(self: Poller) -> Iterator[Packet]:
-    """让 poller 可以直接 for 循环:图结束时自然停止。"""
+    """Let a poller be iterated directly with ``for``: it stops when the graph ends."""
     while True:
         pkt = self.next()
         if pkt is None:

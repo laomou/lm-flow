@@ -4,6 +4,8 @@
 
 A dataflow-graph engine: computation is described as a **directed graph** — nodes are **kernels**, and **timestamped packets** flow along the edges. The engine is written in Rust (scheduling, threads, queues, topology) and exposes a single stable **C ABI**; kernels can be written in **C++** or **Python**.
 
+📖 **API reference (Python)**: <https://laomou.github.io/lm-flow/> — auto-generated from docstrings.
+
 ```text
   Host (Rust / C++ / Python) ── drives the graph
         │  C ABI  (lmflow/include/flow.h)
