@@ -120,6 +120,12 @@ fn inline(
             nn.input_ports = inputs;
             nn.output_ports = outputs;
             nn.r#type = String::new();
+            // back_edges 是输入口名,随端口名一并重映射(边界 → 外部边名 / 内部 → 命名空间前缀)。
+            nn.back_edges = n
+                .back_edges
+                .iter()
+                .map(|b| remap_name(b, prefix, rename))
+                .collect();
             out.push(nn);
         } else {
             // 子图实例节点:递归内联。
@@ -179,6 +185,14 @@ fn remap_ports(
             Ok(reassemble(&spec, &name))
         })
         .collect()
+}
+
+/// 把一个裸端口名按边界重映射规则映射(back_edges 用;逻辑同 [`remap_ports`] 的 name 分量)。
+fn remap_name(name: &str, prefix: &str, rename: &BTreeMap<String, String>) -> String {
+    match rename.get(name) {
+        Some(edge) => edge.clone(),
+        None => format!("{prefix}{name}"),
+    }
 }
 
 /// 把边界口声明与实例节点已重映射的外部口声明按位置绑定:边界 name → 外部 name。
@@ -252,6 +266,7 @@ mod tests {
             options: serde_yaml::Value::Null,
             input_policy: Default::default(),
             r#type: String::new(),
+            back_edges: Vec::new(),
         };
         n.name = name.to_string();
         n

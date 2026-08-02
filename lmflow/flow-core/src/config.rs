@@ -81,6 +81,11 @@ pub struct NodeConfig {
     /// 子图名(ADR #27):非空 = 本节点是该子图的实例,建图期展开内联;与 `kernel` 二选一。
     #[serde(default)]
     pub r#type: String,
+    /// 反馈环(back-edge):本节点哪些**输入口名**是「最新值反馈寄存器」—— 容量 1、留最新
+    /// 反馈值、消费一次,且**不参与就绪 / 终止 / 时间戳对齐**(见 docs/design.md)。
+    /// 用它才能让边成环:未被 back_edge 打断的拓扑环仍在建图期报错。
+    #[serde(default)]
+    pub back_edges: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -213,6 +218,40 @@ impl GraphConfig {
                     return Err(Error::InvalidArg(format!(
                     "node `{who}`: unknown input_policy `{other}` (valid: sync / immediate / fixed_size / sync_set)"
                 )))
+                }
+            }
+
+            // 反馈环:back_edges 名字须是本节点输入口;须留至少一个正向输入口驱动;不得与 sync_set 冲突。
+            if !n.back_edges.is_empty() {
+                let port_names: Vec<String> = n
+                    .input_ports
+                    .iter()
+                    .map(|d| parse_port_spec(d).map(|s| s.name))
+                    .collect::<Result<_>>()?;
+                for be in &n.back_edges {
+                    if !port_names.contains(be) {
+                        return Err(Error::InvalidArg(format!(
+                            "node `{who}`: back_edge `{be}` is not one of this node's input ports"
+                        )));
+                    }
+                }
+                let forward = port_names
+                    .iter()
+                    .filter(|p| !n.back_edges.contains(p))
+                    .count();
+                if forward == 0 {
+                    return Err(Error::InvalidArg(format!(
+                        "node `{who}`: every input port is a back_edge -- a node needs at least one forward input to ever fire"
+                    )));
+                }
+                if n.input_policy.r#type == "sync_set" {
+                    for set in &n.input_policy.sets {
+                        if let Some(name) = set.iter().find(|p| n.back_edges.contains(p)) {
+                            return Err(Error::InvalidArg(format!(
+                                "node `{who}`: back_edge `{name}` must not appear in a sync_set group"
+                            )));
+                        }
+                    }
                 }
             }
         }

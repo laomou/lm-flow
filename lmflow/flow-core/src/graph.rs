@@ -334,6 +334,9 @@ pub struct Node {
     /// 每个输入口一条独立队列(见模块头注释)
     input_queues: Vec<Mutex<VecDeque<Packet>>>,
     input_closed: Vec<AtomicBool>,
+    /// 每个输入口是否为 back-edge(反馈寄存器):true 的口不参与就绪 / 终止 / 对齐,
+    /// 入队走 cap-1 drop-old(只留最新反馈)。长度恒 = 输入口数(无 back-edge 则全 false)。
+    input_is_back_edge: Vec<bool>,
     /// 源节点(0 输入口)自报「已产完」。置位后 readiness 不再放行、节点可关流终止。
     source_done: AtomicBool,
     /// 每个输入口的**时间戳边界**:保证「不会再有时间戳 < bound 的包到来」。
@@ -390,6 +393,12 @@ impl Node {
         self.input_queues.is_empty()
     }
 
+    /// 正向(非 back-edge)输入口下标。back-edge 是反馈寄存器,不参与就绪 / 终止 / 对齐判定 ——
+    /// **核心不变式:back-edge 口永不触发 readiness**,故反馈包不会自激无限重跑。
+    fn forward_ports(&self) -> impl Iterator<Item = usize> + '_ {
+        (0..self.input_queues.len()).filter(move |&i| !self.input_is_back_edge[i])
+    }
+
     /// 就绪判定。返回本次的**触发计划**(处理时间戳 + 参与的输入口);`None` 表示还不能跑。
     ///
     /// `Sync` 采用时间戳对齐:
@@ -410,10 +419,10 @@ impl Node {
         }
         match &self.policy {
             InputPolicy::Immediate => {
-                // 不做对齐:任一口有数据就跑
+                // 不做对齐:任一**正向**口有数据就跑(back-edge 口不触发)
                 let mut min = Timestamp::done();
                 let mut any = false;
-                for i in 0..n {
+                for i in self.forward_ports() {
                     if let Some(ts) = self.front_ts(i) {
                         any = true;
                         min = min.min(ts);
@@ -424,9 +433,9 @@ impl Node {
                     ports: None,
                 })
             }
-            InputPolicy::Sync | InputPolicy::FixedSize { .. } => {
-                self.sync_align(0..n).map(|ts| Ready { ts, ports: None })
-            }
+            InputPolicy::Sync | InputPolicy::FixedSize { .. } => self
+                .sync_align(self.forward_ports())
+                .map(|ts| Ready { ts, ports: None }),
             InputPolicy::SyncSet { sets } => {
                 // 每组独立对齐;取**最早就绪**的那组,本次只带该组的口。
                 let mut best: Option<Ready> = None;
@@ -470,7 +479,9 @@ impl Node {
             // 源节点没有输入口;只有内核自报完成才算「排空」(否则 (0..0).all() 空真会开图即关)。
             return self.source_done.load(Ordering::SeqCst);
         }
-        (0..self.input_queues.len())
+        // 只看正向口:back-edge 口是反馈寄存器,不参与终止判定 —— 否则 A→B→A 里两节点
+        // 互等对方关闭,谁也关不了(终止死锁)。节点靠正向输入排空即可关闭,级联绕环拆解。
+        self.forward_ports()
             .all(|i| self.input_closed[i].load(Ordering::SeqCst) && self.queue_len(i) == 0)
     }
 }
@@ -923,8 +934,24 @@ impl GraphInner {
             }
         }
 
-        // ---- 校验 4:成环 ----
-        check_acyclic(&cfg, &edges)?;
+        // 每节点每输入口是否为 back-edge(按口名匹配 config.back_edges)。反馈寄存器口不参与
+        // 拓扑成环判定 / 就绪 / 终止 / 对齐。
+        let back_edge_mask: Vec<Vec<bool>> = cfg
+            .nodes
+            .iter()
+            .enumerate()
+            .map(|(idx, nc)| {
+                node_port_tables[idx]
+                    .0
+                    .names()
+                    .iter()
+                    .map(|name| nc.back_edges.contains(name))
+                    .collect()
+            })
+            .collect();
+
+        // ---- 校验 4:成环(back-edge 打断的环放行)----
+        check_acyclic(&cfg, &edges, &back_edge_mask)?;
 
         // ---- 校验 5 + 建执行器 ----
         let mut executors: Vec<ThreadPool> = Vec::new();
@@ -1033,6 +1060,7 @@ impl GraphInner {
                     .map(|_| Mutex::new(VecDeque::new()))
                     .collect(),
                 input_closed: (0..ins.len()).map(|_| AtomicBool::new(false)).collect(),
+                input_is_back_edge: back_edge_mask[idx].clone(),
                 source_done: AtomicBool::new(false),
                 input_bounds: (0..ins.len())
                     .map(|_| Mutex::new(Timestamp::pre_stream()))
@@ -1077,14 +1105,18 @@ fn node_label(n: &crate::config::NodeConfig, idx: usize) -> String {
     }
 }
 
-/// 拓扑成环检测。本版本不支持 back-edge,成环会直接死锁,故 init 阶段就拒绝。
-fn check_acyclic(cfg: &GraphConfig, edges: &[Edge]) -> Result<()> {
+/// 拓扑成环检测。back-edge(反馈寄存器口)标记的消费边**不算进拓扑** —— 它正是用来打断环的;
+/// 未被 back-edge 打断的环仍报错(会死锁/无法终止)。`back_edge_mask[node][port]` = 该口是否 back-edge。
+fn check_acyclic(cfg: &GraphConfig, edges: &[Edge], back_edge_mask: &[Vec<bool>]) -> Result<()> {
     let n = cfg.nodes.len();
     // 邻接:生产者 → 消费者
     let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n];
     for e in edges {
         if let Some(p) = e.producer {
-            for &(c, _) in &e.consumers {
+            for &(c, port) in &e.consumers {
+                if back_edge_mask[c][port] {
+                    continue; // back-edge:反馈方向不计入拓扑,故不成环
+                }
                 adj[p].push(c);
             }
         }
@@ -1112,7 +1144,7 @@ fn check_acyclic(cfg: &GraphConfig, edges: &[Edge]) -> Result<()> {
                 match mark[next] {
                     ON_STACK => {
                         return Err(Error::InvalidArg(format!(
-                            "topology cycle: node `{}` -> ... -> `{}` (back-edges are not supported in this version; a cycle would deadlock)",
+                            "topology cycle: node `{}` -> ... -> `{}` -- break it by marking a feedback input with `back_edges` (an unbroken cycle would never terminate)",
                             node_label(&cfg.nodes[next], next),
                             node_label(&cfg.nodes[node], node)
                         )));
@@ -1323,9 +1355,13 @@ impl GraphInner {
 
         // 内部消费者:每个输入口一份(仅克隆引用计数)
         for &(node, port) in &edge.consumers {
-            let cap = match &self.nodes[node].policy {
-                InputPolicy::FixedSize { capacity } => Some(*capacity),
-                _ => None,
+            let cap = if self.nodes[node].input_is_back_edge[port] {
+                Some(1) // 反馈寄存器:cap-1 drop-old,只留最新一包
+            } else {
+                match &self.nodes[node].policy {
+                    InputPolicy::FixedSize { capacity } => Some(*capacity),
+                    _ => None,
+                }
             };
             let mut dropped = 0u64;
             let mut q = self.nodes[node].input_queues[port]
@@ -1502,6 +1538,21 @@ impl GraphInner {
         let ctx = unsafe { node.ctx_slot(slot) };
         ctx.reset();
         for port in 0..node.input_queues.len() {
+            if node.input_is_back_edge[port] {
+                // 反馈寄存器:取最新一包(队列 cap-1),不参与 ts 对齐、不推进 bound。
+                // 首拍(尚无反馈)队列为空 → ctx.inputs[port] = None,内核看到空反馈,自处理。
+                if let Some(p) = node.input_queues[port]
+                    .lock()
+                    .expect("queue lock poisoned")
+                    .pop_front()
+                {
+                    self.shared.on_dequeue(p.byte_size());
+                    ctx.inputs[port] = Some(p);
+                }
+                ctx.inputs_done[port] =
+                    node.input_closed[port].load(Ordering::SeqCst) && node.queue_len(port) == 0;
+                continue;
+            }
             // 只处理「参与本次触发」的口(SyncSet:就绪组;其余策略:全部口)。
             // 非参与口原样不动:不弹包、不推进 bound —— 它的包(可能属别的组)留给下次。
             let participates = ready.ports.as_ref().is_none_or(|set| set.contains(&port));

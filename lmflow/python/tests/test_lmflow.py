@@ -107,6 +107,18 @@ class TCollect(lmflow.Kernel):
             cc.counter_add("closed_normally")
 
 
+@lmflow.kernel("PyFeedbackAdd")
+class PyFeedbackAdd(lmflow.Kernel):
+    """反馈相加:out = 正向输入 + 上一拍反馈(back-edge,空按 0)。"""
+
+    def process(self, cc):
+        v = cc.input(0).as_int()
+        if v is None:
+            return  # 无正向输入不产出
+        fb = cc.input(1).as_int() or 0  # 反馈可空(首拍)→ 0
+        cc.emit(0, v + fb)
+
+
 def graph(yaml: str) -> lmflow.Graph:
     return lmflow.Graph.from_yaml(yaml)
 
@@ -217,6 +229,30 @@ output_ports: [out]
             self.assertEqual([p.as_int() for p in out], [0, 1, 2, 3, 4])
             # 展开后内部节点被命名空间化为 p/a、p/b
             self.assertEqual(g.node_names(), ["p/a", "p/b"])
+
+    def test_back_edge_feedback_loop(self):
+        # 反馈自环:out 经 back_edge 回灌;out(t)=in(t)+out(t-1)。输入关闭后正常终止。
+        with graph(
+            """
+nodes:
+  - name: acc
+    kernel: PyFeedbackAdd
+    input_ports: [in, out]
+    output_ports: [out]
+    back_edges: [out]
+input_ports: [in]
+output_ports: [out]
+"""
+        ) as g:
+            out = g.add_poller("out")
+            g.start()
+            inp = g.input("in")
+            for i in range(5):
+                inp.send(1, ts=i)
+            g.close_all_inputs()
+            g.wait_done(timeout=5.0)
+            self.assertEqual([p.as_int() for p in out], [1, 2, 3, 4, 5])
+            self.assertEqual(g.state, lmflow.GraphState.TERMINATED)
 
     def test_registered_kernels_includes_both_languages(self):
         names = lmflow.registered_kernels()
