@@ -18,3 +18,12 @@ serde_json = "1"
 
 [build-dependencies]
 cc = "1"
+
+[dev-dependencies]
+# 仅基准用(不进发布库/wheel)。见 benches/throughput.rs。
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "throughput"
+harness = false
+

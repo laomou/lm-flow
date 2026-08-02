@@ -67,6 +67,7 @@ cd lmflow/flow-core
 cargo build                       # 编译引擎 + C++ 算子
 cargo test                        # 单测 + ABI 布局一致性
 cargo run --example hello_world   # 两级直通管线,输出 0..9
+cargo bench                       # Criterion 吞吐基准(调度 / 队列 / 跨界)→ target/criterion/
 ```
 
 Python:

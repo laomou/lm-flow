@@ -65,6 +65,7 @@ cd lmflow/flow-core
 cargo build                       # build the engine + C++ kernels
 cargo test                        # unit tests + ABI layout consistency
 cargo run --example hello_world   # two-stage passthrough pipeline, prints 0..9
+cargo bench                       # Criterion throughput suite (scheduling / queue / cross-boundary) → target/criterion/
 ```
 
 Python:
