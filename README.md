@@ -133,7 +133,7 @@ See [`docs/design.md`](docs/design.md) for the full design.
 
 ## Native SDK (C / C++ / mobile)
 
-C/C++ and mobile hosts don't use pip — they use the **headers + library** directly. Each tagged GitHub Release ships per-platform `lmflow-<version>-<platform>.tar.gz` (Linux x86_64/aarch64, macOS arm64/x86_64, iOS arm64, Android arm64):
+C/C++ and mobile hosts don't use pip — they use the **headers + library** directly. Each tagged GitHub Release ships per-platform `lmflow-<version>-<platform>.tar.gz` (Linux x86_64/aarch64, macOS arm64, iOS arm64, Android arm64):
 
 ```text
 lmflow-v0.1.0-linux-x86_64/

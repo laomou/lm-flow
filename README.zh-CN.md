@@ -137,7 +137,7 @@ output_ports: ["out"]
 ## 原生 SDK(C / C++ / 移动端)
 
 C/C++ 或移动端宿主不走 pip —— 直接用**头文件 + 库**。每个 tag 的 GitHub Release 会附带各平台的
-`lmflow-<版本>-<平台>.tar.gz`(Linux x86_64/aarch64、macOS arm64/x86_64、iOS arm64、Android arm64):
+`lmflow-<版本>-<平台>.tar.gz`(Linux x86_64/aarch64、macOS arm64、iOS arm64、Android arm64):
 
 ```text
 lmflow-v0.1.0-linux-x86_64/
