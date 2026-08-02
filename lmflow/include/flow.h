@@ -697,6 +697,10 @@ const char* lmflow_graph_counter_name(LMFlowGraph*, size_t idx);
  * 返回值存放于**线程局部**缓冲,生命周期至本线程下次调用本函数 ——
  * 故多线程同时调用不会互相踩踏。 */
 const char* lmflow_graph_dump(LMFlowGraph*);
+/* 拓扑的 Graphviz DOT 导出(`dot -Tsvg` 可渲染):子图命名空间还原成 cluster,
+ * 节点填色 = 所在执行器(线程池),图例列线程数 / 绑定核 / 实时优先级。
+ * 返回值同 dump:存放于线程局部缓冲,生命周期至本线程下次调用本函数,调用方不得 free。 */
+const char* lmflow_graph_to_dot(LMFlowGraph*);
 /* 指定边的当前积压包数;端口不存在返回 LMFLOW_INVALID_ID。 */
 size_t lmflow_graph_queue_depth(LMFlowGraph*, const char* port);
 

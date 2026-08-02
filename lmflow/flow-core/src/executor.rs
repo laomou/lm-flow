@@ -147,6 +147,14 @@ impl ThreadPool {
     pub fn num_threads(&self) -> usize {
         self.num_threads
     }
+    /// CPU 亲和力核列表(空 = 不绑)。仅用于内省 / 可视化。
+    pub fn affinity(&self) -> &[usize] {
+        &self.affinity
+    }
+    /// 实时优先级(0 = 普通分时)。仅用于内省 / 可视化。
+    pub fn priority(&self) -> i32 {
+        self.priority
+    }
 
     /// 拉起工作线程。必须在 `Arc<GraphInner>` 已存在之后调用(需要 `Weak`)。
     pub fn start(&self, graph: Weak<GraphInner>) {

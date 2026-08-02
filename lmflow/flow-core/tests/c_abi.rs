@@ -411,6 +411,19 @@ fn unknown_subgraph_is_rejected_not_ignored() {
 }
 
 #[test]
+fn to_dot_on_uninitialized_graph_is_valid_empty_digraph() {
+    unsafe {
+        let g = lmflow_graph_new();
+        // 没 init 也不能崩:返回合法的空 digraph,可直接喂 graphviz
+        let dot = CStr::from_ptr(lmflow_graph_to_dot(g))
+            .to_string_lossy()
+            .into_owned();
+        assert!(dot.contains("digraph"), "{dot}");
+        lmflow_graph_free(g);
+    }
+}
+
+#[test]
 fn introspection_through_c_abi() {
     flow_core::register_builtin_kernels();
     unsafe {
@@ -445,6 +458,14 @@ fn introspection_through_c_abi() {
             .to_string_lossy()
             .into_owned();
         assert!(dump.contains("n1") && dump.contains("n2"), "{dump}");
+
+        let dot = CStr::from_ptr(lmflow_graph_to_dot(g))
+            .to_string_lossy()
+            .into_owned();
+        assert!(
+            dot.contains("digraph lmflow") && dot.contains("n1") && dot.contains("n2"),
+            "{dot}"
+        );
 
         // struct_size 太小必须被拒(前向兼容契约)
         let mut st = LMFlowNodeStats {

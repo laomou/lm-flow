@@ -550,6 +550,28 @@ input_ports: [in]
             self.assertIn("node", g.dump())
             self.assertEqual(g.node_names(), ["c"])
 
+    def test_to_dot_exports_graphviz(self):
+        # 纯拓扑快照:digraph 头 + 子图命名空间还原成 cluster + 执行器落位标注。
+        with graph(
+            """
+subgraphs:
+  Pair:
+    nodes:
+      - { name: a, kernel: PassThroughKernel, input_ports: [sin], output_ports: [mid] }
+      - { name: b, kernel: PassThroughKernel, input_ports: [mid], output_ports: [sout] }
+    input_ports: [sin]
+    output_ports: [sout]
+nodes:
+  - { name: p, type: Pair, input_ports: [in], output_ports: [out] }
+input_ports: [in]
+output_ports: [out]
+"""
+        ) as g:
+            dot = g.to_dot()
+            self.assertIn("digraph lmflow", dot)
+            self.assertIn("subgraph cluster_", dot)
+            self.assertIn("@main", dot)
+
     def test_fixed_size_policy_drops_and_reports(self):
         with graph(
             """

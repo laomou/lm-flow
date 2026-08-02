@@ -347,6 +347,16 @@ class Graph:
         """Human-readable snapshot of topology and state (node table shows running/elapsed — handy for locating a stall)."""
         return self._g.dump()
 
+    def to_dot(self) -> str:
+        """Graphviz DOT of the topology (pipe to ``dot -Tsvg``).
+
+        Subgraph namespaces are restored as nested clusters; each node is
+        coloured by the thread pool it runs on, and a legend lists every
+        executor's thread count, pinned CPU cores (affinity), and realtime
+        priority.
+        """
+        return self._g.to_dot()
+
     def last_error(self) -> str:
         """Graph-level error text — the only place to get a worker-thread kernel's failure reason."""
         return self._g.last_error()

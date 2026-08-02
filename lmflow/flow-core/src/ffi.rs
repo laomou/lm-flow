@@ -1926,6 +1926,24 @@ pub unsafe extern "C" fn lmflow_graph_dump(g: *mut LMFlowGraph) -> *const c_char
     })
 }
 
+/// 拓扑的 Graphviz DOT 导出。返回值同 `dump`:线程局部缓冲,调用方不得 free。
+#[no_mangle]
+pub unsafe extern "C" fn lmflow_graph_to_dot(g: *mut LMFlowGraph) -> *const c_char {
+    guard_val(c"".as_ptr(), || {
+        thread_local! {
+            static BUF: std::cell::RefCell<std::ffi::CString> =
+                std::cell::RefCell::new(std::ffi::CString::default());
+        }
+        // 未初始化图 → 合法的空 digraph(而非文本占位符),便于直接喂 graphviz。
+        let text =
+            graph_of(g).map_or_else(|| "digraph lmflow {\n}\n".to_string(), |gr| gr.to_dot());
+        BUF.with(|b| {
+            *b.borrow_mut() = std::ffi::CString::new(text).unwrap_or_default();
+            b.borrow().as_ptr()
+        })
+    })
+}
+
 #[repr(C)]
 pub struct LMFlowNodeStats {
     pub struct_size: u32,

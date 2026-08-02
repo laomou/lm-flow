@@ -281,7 +281,7 @@ bool       lmflow_ctx_has_side_packet(const LMFlowContext*, const char* name);
 | 全局水位 | `lmflow_graph_total_queued` `…_total_queued_bytes`;YAML `max_queued_packets/bytes` |
 | 统计 | `lmflow_graph_node_stats`(`LMFlowNodeStats`)、`lmflow_graph_counter_value`;YAML `watchdog_ms` |
 | 状态 / 拓扑 | `lmflow_graph_state` `…_num_input_ports/output_ports/num_nodes` `lmflow_registered_kernel_*` |
-| 内省 | `lmflow_graph_dump` `lmflow_graph_queue_depth` `lmflow_graph_dropped_count` `lmflow_graph_last_error` `lmflow_packet_debug_string` |
+| 内省 | `lmflow_graph_dump` `lmflow_graph_to_dot`(Graphviz DOT) `lmflow_graph_queue_depth` `lmflow_graph_dropped_count` `lmflow_graph_last_error` `lmflow_packet_debug_string` |
 
 **接口设计要点**
 
@@ -292,6 +292,7 @@ bool       lmflow_ctx_has_side_packet(const LMFlowContext*, const char* name);
 - `lmflow_last_error()` 是**线程局部**的:算子在工作线程失败时,其文本不会出现在宿主线程。
   要拿那条信息用 `lmflow_graph_last_error(graph)`。
 - `lmflow_graph_dump` 返回**线程局部**缓冲,多线程同时调用不会互相踩踏。
+- `lmflow_graph_to_dot` 导出 Graphviz DOT(`dot -Tsvg` 可渲染):子图命名空间还原成嵌套 cluster,节点填色 = 所在执行器,图例列各线程池的线程数 / 绑定核(亲和力)/ 实时优先级。返回值同 dump(线程局部,不得 free)。
 - 日志回调:引擎保证调用时**不持有任何内部锁**,故回调里可安全抢 GIL / 加锁。
 
 ---
@@ -984,7 +985,7 @@ lm-flow/                          仓库根
 
 ---
 
-## 13. 测试策略(已落地 219 个:Rust 186 + Python 33)
+## 13. 测试策略(已落地 223 个:Rust 189 + Python 34)
 
 | 测试文件 | 数量 | 覆盖 |
 |---|---|---|

@@ -187,3 +187,86 @@ output_ports: ["out"]
         "text-mode include must point users at from_yaml_file: {err:?}"
     );
 }
+
+/// DOT 导出:子图命名空间还原成 cluster,执行器上色 + 绑核进图例。
+#[test]
+fn to_dot_renders_subgraph_clusters_and_executor_affinity() {
+    init();
+    let graph = Graph::from_yaml(
+        r#"
+executors:
+  - { name: cpu, type: ThreadPoolExecutor, num_threads: 2, affinity: [0, 1] }
+subgraphs:
+  PassPair:
+    nodes:
+      - { name: a, kernel: PassThroughKernel, executor: cpu, input_ports: ["sin"], output_ports: ["mid"] }
+      - { name: b, kernel: PassThroughKernel, input_ports: ["mid"], output_ports: ["sout"] }
+    input_ports: ["sin"]
+    output_ports: ["sout"]
+nodes:
+  - { name: p, type: PassPair, input_ports: ["in"], output_ports: ["out"] }
+input_ports: ["in"]
+output_ports: ["out"]
+"#,
+    )
+    .unwrap();
+    let dot = graph.to_dot();
+
+    assert!(dot.contains("digraph lmflow"), "{dot}");
+    assert!(dot.contains("rankdir=LR"), "{dot}");
+    // 子图 p 还原成 cluster,标签为命名空间名 p
+    assert!(
+        dot.contains("subgraph cluster_"),
+        "expected a namespace cluster:\n{dot}"
+    );
+    assert!(
+        dot.contains("label=\"p\""),
+        "cluster should be labelled p:\n{dot}"
+    );
+    // 执行器落位:p/a 在 cpu,p/b 在主线程
+    assert!(dot.contains("@cpu"), "{dot}");
+    assert!(dot.contains("@main"), "{dot}");
+    // 图例含线程数与绑定核(线程亲和度可视化)
+    assert!(dot.contains("cluster_legend"), "{dot}");
+    assert!(
+        dot.contains("cores[0,1]"),
+        "affinity cores must be shown:\n{dot}"
+    );
+    assert!(dot.contains("2t"), "thread count must be shown:\n{dot}");
+    // 内部边被命名空间化为 p/mid,并作为边标注出现
+    assert!(
+        dot.contains("label=\"p/mid\""),
+        "namespaced internal edge label:\n{dot}"
+    );
+    // 图输入 / 输出口
+    assert!(
+        dot.contains("shape=cds"),
+        "graph ports drawn as distinct shape:\n{dot}"
+    );
+}
+
+/// 无子图、无执行器的普通图:不产生任何 cluster(聚簇仅在有命名空间时出现)。
+#[test]
+fn to_dot_plain_graph_has_no_clusters() {
+    init();
+    let graph = Graph::from_yaml(
+        r#"
+nodes:
+  - { name: n1, kernel: PassThroughKernel, input_ports: ["in"], output_ports: ["mid"] }
+  - { name: n2, kernel: PassThroughKernel, input_ports: ["mid"], output_ports: ["out"] }
+input_ports: ["in"]
+output_ports: ["out"]
+"#,
+    )
+    .unwrap();
+    let dot = graph.to_dot();
+    assert!(dot.contains("digraph lmflow"), "{dot}");
+    assert!(
+        !dot.contains("cluster_"),
+        "plain graph must have no clusters:\n{dot}"
+    );
+    assert!(
+        dot.contains("@main"),
+        "nodes run on the host main thread:\n{dot}"
+    );
+}
