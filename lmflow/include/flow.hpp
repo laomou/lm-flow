@@ -266,6 +266,8 @@ class Context {
   }
   /// close 的触发原因:正常排空 / 图内出错 / 被取消。
   LMFlowCloseReason CloseReason() const { return lmflow_ctx_close_reason(c_); }
+  /// 源算子(0 输入)自报「已产完」:引擎停止再触发本节点、关其输出边,图随之终止。
+  void SourceDone() const { lmflow_ctx_source_done(c_); }
 
   /* 按 tag 定位端口,避免依赖 YAML 书写顺序 */
   size_t InputId(const char* tag, size_t index = 0) const { return lmflow_ctx_input_id(c_, tag, index); }

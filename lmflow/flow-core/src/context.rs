@@ -144,6 +144,8 @@ pub struct Context {
     pub error_msg: Option<String>,
     /// 供 `lmflow_ctx_close_reason` 返回;进入 close 前由引擎写入。
     pub close_reason: i32,
+    /// 源算子经 `source_done()` 自报「已产完」;引擎在 process 返回后读取。
+    pub source_done: bool,
     names: CStrArena,
 }
 
@@ -174,6 +176,7 @@ impl Context {
             inputs_done: vec![false; ni],
             error_msg: None,
             close_reason: crate::runtime::CLOSE_NORMAL,
+            source_done: false,
             names: CStrArena::default(),
         }
     }
@@ -191,6 +194,7 @@ impl Context {
         }
         self.input_ts = Timestamp::unset();
         self.error_msg = None;
+        self.source_done = false;
     }
 
     /// 处理结束后**立即释放**本次输入的引用。

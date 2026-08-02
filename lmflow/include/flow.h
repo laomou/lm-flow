@@ -401,6 +401,10 @@ void lmflow_ctx_set_error(const LMFlowContext*, const char* msg);
  * 这类业务指标,宿主经 lmflow_graph_counter_value 读取。名字建议加节点名前缀以免撞车。 */
 void lmflow_ctx_counter_add(const LMFlowContext*, const char* name, int64_t delta);
 
+/* 源算子(0 输入口的生成型算子)自报「已产完」。调用后引擎不再触发本节点的 process,
+ * 并关闭其输出边(下游据此收流),图随之正常终止。仅对源节点有意义。 */
+void lmflow_ctx_source_done(const LMFlowContext*);
+
 /* ---------- 关闭原因 ----------
  * 算子在 close 里据此决定是否写出结果 / 提交事务 / 落盘。 */
 typedef enum {

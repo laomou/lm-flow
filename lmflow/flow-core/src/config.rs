@@ -139,6 +139,14 @@ impl GraphConfig {
                     n.r#type
                 )));
             }
+            if n.input_ports.is_empty() && n.executor.is_empty() {
+                // 源节点(0 输入)由内核自产,process 常会阻塞(等帧 / 读下一条);跑在宿主
+                // 主线程会独占单线程、拖垮全图。必须挂线程池 executor。
+                return Err(Error::InvalidArg(format!(
+                    "node `{who}`: a source node (no input ports) requires an executor (thread pool) -- \
+                     it would otherwise block the host main thread and stall the whole graph"
+                )));
+            }
             match n.input_policy.r#type.as_str() {
                 "sync" | "immediate" => {}
                 "fixed_size" => {

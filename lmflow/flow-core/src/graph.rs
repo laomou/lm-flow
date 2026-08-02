@@ -334,6 +334,8 @@ pub struct Node {
     /// 每个输入口一条独立队列(见模块头注释)
     input_queues: Vec<Mutex<VecDeque<Packet>>>,
     input_closed: Vec<AtomicBool>,
+    /// 源节点(0 输入口)自报「已产完」。置位后 readiness 不再放行、节点可关流终止。
+    source_done: AtomicBool,
     /// 每个输入口的**时间戳边界**:保证「不会再有时间戳 < bound 的包到来」。
     /// 这是多输入口对齐的依据 —— 只有确知某口不会再来更早的包,
     /// 才能安全地在当前最小时间戳上组一次 Process。
@@ -383,6 +385,11 @@ impl Node {
             .map(|p| p.timestamp())
     }
 
+    /// 源节点:没有输入口,由内核自行产出(见 docs/design.md §7.4)。
+    fn is_source(&self) -> bool {
+        self.input_queues.is_empty()
+    }
+
     /// 就绪判定。返回本次的**触发计划**(处理时间戳 + 参与的输入口);`None` 表示还不能跑。
     ///
     /// `Sync` 采用时间戳对齐:
@@ -394,6 +401,13 @@ impl Node {
     /// 这条判据是多输入口正确性的核心:没有它,Zip 之类算子会把不同时刻的数据配到一起。
     fn readiness(&self) -> Option<Ready> {
         let n = self.input_queues.len();
+        if n == 0 {
+            // 源节点:无输入口。未自报完成即「可产出」;ts 占位(try_claim 用 seq 覆盖成单调时间戳)。
+            return (!self.source_done.load(Ordering::SeqCst)).then_some(Ready {
+                ts: Timestamp::unset(),
+                ports: None,
+            });
+        }
         match &self.policy {
             InputPolicy::Immediate => {
                 // 不做对齐:任一口有数据就跑
@@ -452,6 +466,10 @@ impl Node {
     }
 
     fn all_inputs_closed_and_drained(&self) -> bool {
+        if self.is_source() {
+            // 源节点没有输入口;只有内核自报完成才算「排空」(否则 (0..0).all() 空真会开图即关)。
+            return self.source_done.load(Ordering::SeqCst);
+        }
         (0..self.input_queues.len())
             .all(|i| self.input_closed[i].load(Ordering::SeqCst) && self.queue_len(i) == 0)
     }
@@ -849,12 +867,8 @@ impl GraphInner {
         for (idx, n) in cfg.nodes.iter().enumerate() {
             let who = node_label(n, idx);
             let ins = node_port_tables[idx].0.clone();
-            if ins.is_empty() {
-                // 零输入节点在 B 阶段的就绪规则下恒就绪,会被无限调度成自旋
-                return Err(Error::Unsupported(format!(
-                    "node `{who}` has no input ports -- source nodes are not yet supported (see docs/design.md §7.4)"
-                )));
-            }
+            // 0 输入 = 源节点(生成型算子):内核自产,无需连消费边。执行器必需性在
+            // config.check_supported 校验;源的输出边已在生产者环节连好。
             for (port, name) in ins.names().iter().enumerate() {
                 let id = *edge_by_name.get(name).ok_or_else(|| {
                     Error::InvalidArg(format!(
@@ -1015,6 +1029,7 @@ impl GraphInner {
                     .map(|_| Mutex::new(VecDeque::new()))
                     .collect(),
                 input_closed: (0..ins.len()).map(|_| AtomicBool::new(false)).collect(),
+                source_done: AtomicBool::new(false),
                 input_bounds: (0..ins.len())
                     .map(|_| Mutex::new(Timestamp::pre_stream()))
                     .collect(),
@@ -1168,6 +1183,13 @@ impl GraphInner {
         let weak = Arc::downgrade(self);
         for pool in &self.executors {
             pool.start(weak.clone());
+        }
+        // 源节点(0 输入)无输入触发,须在此显式起调度 —— start 里唯一主动调度的一处。
+        // 之后由 finish→schedule_node 自我续产,直到内核 source_done() 或图被 cancel。
+        for i in 0..self.nodes.len() {
+            if self.nodes[i].is_source() {
+                self.schedule_node(i);
+            }
         }
         Ok(())
     }
@@ -1498,7 +1520,12 @@ impl GraphInner {
             ctx.inputs_done[port] =
                 node.input_closed[port].load(Ordering::SeqCst) && node.queue_len(port) == 0;
         }
-        ctx.input_ts = ts;
+        // 源节点无输入包,用认领序号当单调时间戳(auto-emit 继承 → 下游单调,复用 seq 重排)。
+        ctx.input_ts = if node.is_source() {
+            Timestamp(seq as i64)
+        } else {
+            ts
+        };
         true
     }
 
@@ -1560,6 +1587,10 @@ impl GraphInner {
             }
             Ok(()) => {
                 let rc = self.call_kernel(n, slot, KernelPhase::Process);
+                // 源节点:内核调了 source_done() → 记下,readiness 不再放行、随后关流终止。
+                if node.is_source() && unsafe { node.ctx_slot(slot) }.source_done {
+                    node.source_done.store(true, Ordering::SeqCst);
+                }
                 if rc != 0 {
                     let e = unsafe { node.ctx_slot(slot) }.take_error(rc);
                     node.stats.lock().expect("stats lock poisoned").errors += 1;

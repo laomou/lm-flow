@@ -429,16 +429,51 @@ input_ports: ["in"]
 }
 
 #[test]
-fn rejects_source_node() {
+fn source_node_requires_executor() {
     init();
+    // 0 输入 = 源节点:必须挂线程池 executor(否则会独占宿主主线程、拖垮全图)。
     let err = Graph::from_yaml(
         r#"
 nodes:
-  - { name: "src", kernel: "PassThroughKernel", input_ports: [], output_ports: ["out"] }
+  - { name: "src", kernel: "RangeSourceKernel", input_ports: [], output_ports: ["out"] }
+output_ports: ["out"]
 "#,
     )
     .unwrap_err();
-    assert!(err.to_string().contains("no input ports"), "{err}");
+    assert!(err.to_string().contains("requires an executor"), "{err}");
+}
+
+#[test]
+fn source_node_produces_and_terminates() {
+    init();
+    // 源算子(0 输入)产 0..count,发完 SourceDone → 图自然终止;源挂线程池。
+    let graph = Graph::from_yaml(
+        r#"
+executors:
+  - { name: "cpu", type: "ThreadPoolExecutor", num_threads: 2 }
+nodes:
+  - { name: "src", kernel: "RangeSourceKernel", input_ports: [], output_ports: ["out"], executor: "cpu", options: { count: 5 } }
+output_ports: ["out"]
+"#,
+    )
+    .unwrap();
+    let out = graph.add_poller("out").unwrap();
+    graph.start().unwrap();
+    // 没有输入口可喂 —— 源自产。等图跑完(有限源会自报完成)。
+    graph
+        .wait_done_timeout(std::time::Duration::from_secs(30))
+        .unwrap();
+    assert_eq!(graph.state(), State::Terminated);
+
+    let mut got = Vec::new();
+    while let Some(p) = out.try_next() {
+        got.push(p.as_i64().expect("i64 packet"));
+    }
+    assert_eq!(
+        got,
+        vec![0, 1, 2, 3, 4],
+        "source should emit 0..count in order"
+    );
 }
 
 #[test]

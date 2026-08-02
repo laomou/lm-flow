@@ -19,5 +19,6 @@ void RegisterSinkKernel();
 void RegisterInvertKernel();
 void RegisterNormalizeKernel();
 void RegisterMuxKernel();
+void RegisterRangeSourceKernel();
 
 #endif  // LMFLOW_CPP_KERNELS_BUILTINS_HPP_

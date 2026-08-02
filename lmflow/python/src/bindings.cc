@@ -397,6 +397,7 @@ class Context {
     lmflow_ctx_log(c_, static_cast<LMFlowLogLevel>(level), msg.c_str());
   }
   void set_error(const std::string& msg) const { lmflow_ctx_set_error(c_, msg.c_str()); }
+  void source_done() const { lmflow_ctx_source_done(c_); }
   void counter_add(const std::string& n, int64_t d) const {
     lmflow_ctx_counter_add(c_, n.c_str(), d);
   }
@@ -923,6 +924,9 @@ PYBIND11_MODULE(_lmflow, m) {
       .def("side_packet", &Context::side_packet, "Get a side packet (constant input).")
       .def("log", &Context::log, py::arg("level"), py::arg("msg"), "Write an engine log line.")
       .def("set_error", &Context::set_error, "Mark this invocation as failed, with a reason.")
+      .def("source_done", &Context::source_done,
+           "Source kernel (0 inputs): signal it has produced all its data -- the engine stops "
+           "invoking it and closes its outputs, ending the graph.")
       .def("counter_add", &Context::counter_add, py::arg("name"), py::arg("delta") = 1,
            "Add to a self-reported counter (for diagnostics).");
 

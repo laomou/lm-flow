@@ -1018,6 +1018,15 @@ pub unsafe extern "C" fn lmflow_ctx_set_error(c: *const LMFlowContext, msg: *con
     });
 }
 #[no_mangle]
+pub unsafe extern "C" fn lmflow_ctx_source_done(c: *const LMFlowContext) {
+    guard_val((), || {
+        // 源算子自报「已产完」;上下文在回调期间由算子独占,可变转换安全。
+        if let Some(x) = ctx_mut(c as *mut LMFlowContext) {
+            x.source_done = true;
+        }
+    });
+}
+#[no_mangle]
 pub unsafe extern "C" fn lmflow_ctx_close_reason(c: *const LMFlowContext) -> i32 {
     guard_val(0, || ctx_ref(c).map_or(0, |x| x.close_reason))
 }

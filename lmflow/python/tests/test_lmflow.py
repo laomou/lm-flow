@@ -174,6 +174,22 @@ output_ports: [out]
             g.wait_done(timeout=15.0)
             self.assertEqual([p.as_int() for p in out], [i * 2 for i in range(10)])
 
+    def test_source_node_produces_and_terminates(self):
+        # 源算子(0 输入,内置 RangeSourceKernel)产 0..count,发完自报完成 → 图自然终止。
+        with graph(
+            """
+executors:
+  - { name: cpu, type: ThreadPoolExecutor, num_threads: 2 }
+nodes:
+  - { name: src, kernel: RangeSourceKernel, executor: cpu, input_ports: [], output_ports: [out], options: { count: 5 } }
+output_ports: [out]
+"""
+        ) as g:
+            out = g.add_poller("out")
+            g.start()
+            g.wait_done(timeout=15.0)  # 没有输入口可喂,源自产
+            self.assertEqual([p.as_int() for p in out], [0, 1, 2, 3, 4])
+
     def test_registered_kernels_includes_both_languages(self):
         names = lmflow.registered_kernels()
         self.assertIn("PassThroughKernel", names, "C++ built-in kernel")
