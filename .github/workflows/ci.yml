@@ -109,6 +109,12 @@ jobs:
           out=$(/tmp/ex/hello_world_host)
           expected=$(for i in $(seq 0 9); do echo "out: $i @ ts=$i"; done)
           [ "$out" = "$expected" ] || { echo "consumer 输出不符:"; echo "$out"; exit 1; }
+      - name: custom_type 示例(自定义类型端到端)也用 find_package 构建 + 运行
+        run: |
+          cmake -S lmflow/examples/cpp/custom_type -B /tmp/ex_ct -Dlmflow_DIR=/tmp/sdk/lib/cmake/lmflow
+          cmake --build /tmp/ex_ct
+          out=$(/tmp/ex_ct/custom_type_host)
+          echo "$out" | grep -q "round-tripped through the graph OK" || { echo "custom_type 输出不符:"; echo "$out"; exit 1; }
 
   # ================================ safety (memory / concurrency) ================================
 
