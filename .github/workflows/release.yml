@@ -111,7 +111,6 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [wheels]
     runs-on: ubuntu-latest
-    environment: pypi
     permissions:
       id-token: write        # 可信发布(OIDC),不用 token
     steps:
