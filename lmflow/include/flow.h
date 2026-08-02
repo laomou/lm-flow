@@ -368,6 +368,10 @@ bool lmflow_ctx_input_is_empty(const LMFlowContext*, size_t in_idx);
  * 与 is_empty 的区别:is_empty 只说此刻没有,is_done 说的是永远不会再有。 */
 bool lmflow_ctx_input_is_done(const LMFlowContext*, size_t in_idx);
 LMFlowPacket lmflow_ctx_input(const LMFlowContext*, size_t in_idx); /* 借用,勿 drop */
+/* 本次调用某输入口的包数:单包策略恒 0/1;`batch` 策略为该批实际大小。 */
+size_t lmflow_ctx_input_count(const LMFlowContext*, size_t in_idx);
+/* 借用某输入口的第 k 个包(语义同 lmflow_ctx_input)。`batch` 策略下配合 input_count 遍历一批。 */
+LMFlowPacket lmflow_ctx_input_at(const LMFlowContext*, size_t in_idx, size_t k); /* 借用,勿 drop */
 /* 快路径:只要数据指针,省去按值返回整个结构体 */
 const void* lmflow_ctx_input_payload(const LMFlowContext*, size_t in_idx);
 int64_t lmflow_ctx_input_timestamp(const LMFlowContext*);

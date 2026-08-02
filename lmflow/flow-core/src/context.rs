@@ -125,6 +125,8 @@ impl Options {
 pub struct Context {
     /// 本次的输入。`None` 表示已被 `take_input` 取走(CoW 省拷贝的前提)。
     pub inputs: Vec<Option<Packet>>,
+    /// 批处理(`batch` 策略)时本口的多个包;单包策略下恒空、走 `inputs`。见 `input_count`/`input_at`。
+    pub input_batches: Vec<Vec<Packet>>,
     /// 每个输出口的暂存队列;`process` 返回后由引擎分发。
     pub staging: Vec<Vec<Packet>>,
     /// 算子显式推进的时间戳边界(不产出时用它告知下游)。
@@ -163,6 +165,7 @@ impl Context {
         let no = out_ports.len();
         Self {
             inputs: vec![None; ni],
+            input_batches: (0..ni).map(|_| Vec::new()).collect(),
             staging: (0..no).map(|_| Vec::new()).collect(),
             next_bounds: vec![None; no],
             input_ts: Timestamp::unset(),
@@ -186,6 +189,9 @@ impl Context {
         for slot in &mut self.inputs {
             *slot = None;
         }
+        for b in &mut self.input_batches {
+            b.clear();
+        }
         for s in &mut self.staging {
             s.clear();
         }
@@ -206,6 +212,9 @@ impl Context {
     pub fn clear_inputs(&mut self) {
         for slot in &mut self.inputs {
             *slot = None;
+        }
+        for b in &mut self.input_batches {
+            b.clear();
         }
     }
 
@@ -230,7 +239,24 @@ impl Context {
     }
 
     pub fn input(&self, idx: usize) -> Option<&Packet> {
-        self.inputs.get(idx)?.as_ref()
+        self.input_at(idx, 0)
+    }
+
+    /// 本次调用某输入口的包数(单包策略恒 0/1;`batch` 策略为该批实际大小)。
+    pub fn input_count(&self, idx: usize) -> usize {
+        match self.input_batches.get(idx) {
+            Some(b) if !b.is_empty() => b.len(),
+            _ => self.inputs.get(idx).map_or(0, |s| s.is_some() as usize),
+        }
+    }
+
+    /// 借用某输入口的第 `k` 个包(单包策略仅 `k==0` 有效)。统一单包 / 批两种交付。
+    pub fn input_at(&self, idx: usize, k: usize) -> Option<&Packet> {
+        match self.input_batches.get(idx) {
+            Some(b) if !b.is_empty() => b.get(k),
+            _ if k == 0 => self.inputs.get(idx)?.as_ref(),
+            _ => None,
+        }
     }
 
     /// 取走输入包:所有权移交算子,槽位变空。这是 CoW 零拷贝的前提 ——

@@ -205,6 +205,20 @@ impl GraphConfig {
                         )));
                     }
                 }
+                "batch" => {
+                    // batch:攒够 capacity 个包一次交给算子。v1 仅单输入口。
+                    if n.input_policy.capacity == 0 {
+                        return Err(Error::InvalidArg(format!(
+                            "node `{who}`: batch policy capacity (the batch size) must be >= 1"
+                        )));
+                    }
+                    if n.input_ports.len() != 1 {
+                        return Err(Error::InvalidArg(format!(
+                            "node `{who}`: batch policy requires exactly one input port (multi-input batching is not supported yet), got {}",
+                            n.input_ports.len()
+                        )));
+                    }
+                }
                 // sync_set 的分组合法性(名字存在、完整划分)在 Graph::build 里查 ——
                 // 那里才有输入口名表。这里只放行类型名。
                 "sync_set" => {
@@ -216,7 +230,7 @@ impl GraphConfig {
                 }
                 other => {
                     return Err(Error::InvalidArg(format!(
-                    "node `{who}`: unknown input_policy `{other}` (valid: sync / immediate / fixed_size / sync_set)"
+                    "node `{who}`: unknown input_policy `{other}` (valid: sync / immediate / fixed_size / sync_set / batch)"
                 )))
                 }
             }

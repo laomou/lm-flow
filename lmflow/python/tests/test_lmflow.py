@@ -119,6 +119,15 @@ class PyFeedbackAdd(lmflow.Kernel):
         cc.emit(0, v + fb)
 
 
+@lmflow.kernel("PyBatchSum")
+class PyBatchSum(lmflow.Kernel):
+    """每批求和(batch 策略):用 input_count / input_at 读整批。"""
+
+    def process(self, cc):
+        n = cc.input_count(0)
+        cc.emit(0, sum(cc.input_at(0, k).as_int() for k in range(n)))
+
+
 def graph(yaml: str) -> lmflow.Graph:
     return lmflow.Graph.from_yaml(yaml)
 
@@ -253,6 +262,30 @@ output_ports: [out]
             g.wait_done(timeout=5.0)
             self.assertEqual([p.as_int() for p in out], [1, 2, 3, 4, 5])
             self.assertEqual(g.state, lmflow.GraphState.TERMINATED)
+
+    def test_batch_policy(self):
+        # 攒够 capacity 个包一次交给算子;关流时余批刷出。
+        with graph(
+            """
+nodes:
+  - name: b
+    kernel: PyBatchSum
+    input_ports: [in]
+    output_ports: [out]
+    input_policy: { type: batch, capacity: 3 }
+input_ports: [in]
+output_ports: [out]
+"""
+        ) as g:
+            out = g.add_poller("out")
+            g.start()
+            inp = g.input("in")
+            for i in range(1, 8):  # 1..7
+                inp.send(i, ts=i)
+            g.close_all_inputs()
+            g.wait_done(timeout=5.0)
+            # 批 [1,2,3]=6、[4,5,6]=15,关流余 [7]=7
+            self.assertEqual([p.as_int() for p in out], [6, 15, 7])
 
     def test_registered_kernels_includes_both_languages(self):
         names = lmflow.registered_kernels()

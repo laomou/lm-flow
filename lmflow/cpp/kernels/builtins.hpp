@@ -21,5 +21,6 @@ void RegisterNormalizeKernel();
 void RegisterMuxKernel();
 void RegisterRangeSourceKernel();
 void RegisterFeedbackAddKernel();
+void RegisterBatchSumKernel();
 
 #endif  // LMFLOW_CPP_KERNELS_BUILTINS_HPP_

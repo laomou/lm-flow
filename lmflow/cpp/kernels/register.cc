@@ -18,6 +18,7 @@
  *  Mux               多路选择                      读控制值转发选中数据口            mux.cc
  *  RangeSource       源(0 输入)产 0..count        SourceDone、生成型算子            range_source.cc
  *  FeedbackAdd       反馈相加 out=正向+反馈(或0)  back-edge(最新值反馈寄存器)      feedback_add.cc
+ *  BatchSum          每批求和(batch 策略)         input_policy batch、InputCount/At  batch_sum.cc
  *
  * 由 Rust 侧 C ABI 包装 lmflow_register_builtin_kernels(见 crates/flow-core/src/lib.rs)
  * 调用一次。用**显式聚合**而非静态初始化:静态库会裁剪未被引用的静态初始化对象(ADR #14),
@@ -39,4 +40,5 @@ extern "C" void lmflow_register_builtin_kernels_impl(void) {
   RegisterMuxKernel();
   RegisterRangeSourceKernel();
   RegisterFeedbackAddKernel();
+  RegisterBatchSumKernel();
 }

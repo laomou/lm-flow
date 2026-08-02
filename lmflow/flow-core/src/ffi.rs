@@ -1063,6 +1063,23 @@ pub unsafe extern "C" fn lmflow_ctx_input(c: *const LMFlowContext, idx: usize) -
     })
 }
 #[no_mangle]
+pub unsafe extern "C" fn lmflow_ctx_input_count(c: *const LMFlowContext, idx: usize) -> usize {
+    // 本次调用某输入口的包数:单包策略恒 0/1;batch 策略为该批实际大小。
+    guard_val(0, || ctx_ref(c).map_or(0, |x| x.input_count(idx)))
+}
+#[no_mangle]
+pub unsafe extern "C" fn lmflow_ctx_input_at(
+    c: *const LMFlowContext,
+    idx: usize,
+    k: usize,
+) -> LMFlowPacket {
+    // 借用第 k 个输入包(语义同 lmflow_ctx_input,不转移引用计数)。batch 策略下遍历一批。
+    guard_val(LMFlowPacket::default(), || match ctx_ref(c) {
+        Some(x) => x.input_at(idx, k).map(borrow_packet).unwrap_or_default(),
+        None => LMFlowPacket::default(),
+    })
+}
+#[no_mangle]
 pub unsafe extern "C" fn lmflow_ctx_input_payload(
     c: *const LMFlowContext,
     idx: usize,

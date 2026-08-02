@@ -323,6 +323,13 @@ class Context {
   /// 借用输入包 —— 回调返回后失效,不要留存。
   Packet* input(size_t i) const { return new Packet(lmflow_ctx_input(c_, i), /*owned=*/false); }
 
+  /// 本次某输入口的包数(单包策略恒 0/1;`batch` 策略为该批大小)。
+  size_t input_count(size_t i) const { return lmflow_ctx_input_count(c_, i); }
+  /// 借用某输入口的第 k 个包(`batch` 策略下配合 input_count 遍历一批)。
+  Packet* input_at(size_t i, size_t k) const {
+    return new Packet(lmflow_ctx_input_at(c_, i, k), /*owned=*/false);
+  }
+
   /// 取走输入包(所有权移交)。写时复制省拷贝的第一步。
   Packet* take_input(size_t i) { return new Packet(lmflow_ctx_take_input(c_, i), true); }
 
@@ -900,6 +907,10 @@ PYBIND11_MODULE(_lmflow, m) {
       .def("input_is_empty", &Context::input_is_empty, "Whether this input port has no packet this round.")
       .def("input_is_done", &Context::input_is_done, "Whether this input port is closed and drained.")
       .def("input", &Context::input, py::arg("index"), "Borrow the input packet at index (does not take it).")
+      .def("input_count", &Context::input_count, py::arg("index"),
+           "Number of packets at this input port this call (1 normally; the batch size under the `batch` policy).")
+      .def("input_at", &Context::input_at, py::arg("index"), py::arg("k"),
+           "Borrow the k-th packet at this input port (iterate a batch together with input_count).")
       .def("take_input", &Context::take_input, py::arg("index"),
            "Take the input packet at index (enables zero-copy in-place rewrite).")
       .def("emit", &Context::emit, py::arg("index"), py::arg("value"), py::arg("ts") = std::nullopt,

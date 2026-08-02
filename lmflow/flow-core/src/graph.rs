@@ -40,6 +40,9 @@ pub enum InputPolicy {
     /// 且本次只带上该组的口(其余口留空)。分组是输入口的一个**完整划分**(每口恰属一组)。
     /// 用于「A、B 该配对,C 独立」这类图。存的是输入口序号(建图时由端口名解析)。
     SyncSet { sets: Vec<Vec<usize>> },
+    /// **批处理**:攒够 `size` 个包一次交给算子(`process()` 按批读 `input_count`/`input_at`);
+    /// 关流时不足一批也刷出。v1 仅单输入口。用于批推理 / 窗口聚合。见 docs/design.md §7.10。
+    Batch { size: usize },
 }
 
 impl InputPolicy {
@@ -52,6 +55,9 @@ impl InputPolicy {
             "immediate" => InputPolicy::Immediate,
             "fixed_size" => InputPolicy::FixedSize {
                 capacity: c.capacity.max(1),
+            },
+            "batch" => InputPolicy::Batch {
+                size: c.capacity.max(1),
             },
             "sync_set" => {
                 if c.sets.is_empty() {
@@ -450,6 +456,16 @@ impl Node {
                     }
                 }
                 best
+            }
+            InputPolicy::Batch { size } => {
+                // 单口:攒够一批就跑;或关流时把不足一批的余量刷出(不丢数据)。
+                let have = self.queue_len(0);
+                let fire =
+                    have >= *size || (have > 0 && self.input_closed[0].load(Ordering::SeqCst));
+                fire.then(|| Ready {
+                    ts: self.front_ts(0).unwrap_or_else(Timestamp::unset),
+                    ports: None,
+                })
             }
         }
     }
@@ -1537,6 +1553,24 @@ impl GraphInner {
         // 仍持 sched 锁弹入输入 —— 保证 readiness+pop 原子。该槽此刻独占(刚从 free 取出)。
         let ctx = unsafe { node.ctx_slot(slot) };
         ctx.reset();
+        // 批处理:从 0 号口整批弹给算子(单口)。input_ts = 末包 ts,下游单调。
+        if let InputPolicy::Batch { size } = &node.policy {
+            let mut last_ts = ts;
+            {
+                let mut q = node.input_queues[0].lock().expect("queue lock poisoned");
+                for _ in 0..*size {
+                    let Some(p) = q.pop_front() else { break };
+                    self.shared.on_dequeue(p.byte_size());
+                    last_ts = p.timestamp();
+                    ctx.input_batches[0].push(p);
+                }
+            }
+            node.advance_bound(0, last_ts.next_allowed_in_stream());
+            ctx.inputs_done[0] =
+                node.input_closed[0].load(Ordering::SeqCst) && node.queue_len(0) == 0;
+            ctx.input_ts = last_ts;
+            return true;
+        }
         for port in 0..node.input_queues.len() {
             if node.input_is_back_edge[port] {
                 // 反馈寄存器:取最新一包(队列 cap-1),不参与 ts 对齐、不推进 bound。

@@ -282,6 +282,10 @@ class Context {
   /// 该口是否已终结(上游已关且排空,永远不会再有数据)。
   bool InputIsDone(size_t i) const { return lmflow_ctx_input_is_done(c_, i); }
   Packet Input(size_t i) const { return Packet::Borrow(lmflow_ctx_input(c_, i)); }
+  /// 本次某输入口的包数(单包策略恒 0/1;`batch` 策略为该批大小)。
+  size_t InputCount(size_t i) const { return lmflow_ctx_input_count(c_, i); }
+  /// 借用某输入口的第 k 个包(`batch` 策略下配合 InputCount 遍历一批)。
+  Packet InputAt(size_t i, size_t k) const { return Packet::Borrow(lmflow_ctx_input_at(c_, i, k)); }
   /* 快路径:已知类型时直取指针,省一次结构体按值返回 */
   template <typename T>
   const T* InputPtr(size_t i) const {
