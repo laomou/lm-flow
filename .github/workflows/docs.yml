@@ -38,6 +38,7 @@ jobs:
       - name: pdoc 生成 API 文档(内省已装的 lmflow 包)
         run: python -m pdoc lmflow -o site
       - uses: actions/configure-pages@v5
+        with: { enablement: true }   # 未手动开 Pages 时尝试自动开(需 pages: write)
       - uses: actions/upload-pages-artifact@v3
         with: { path: site }
       - id: deploy
