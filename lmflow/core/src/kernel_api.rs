@@ -112,6 +112,18 @@ impl KernelCtx<'_> {
         Error::Kernel(msg.to_string())
     }
 
+    // ---- 日志与计数器(与 C++ 侧 `cc.Log` / `cc.CounterAdd` 对应)----
+    /// 写一条引擎日志(级别见 [`crate::runtime`] 的 `LOG_*`)。走引擎的日志回调,
+    /// 不抢占宿主 stdout。
+    pub fn log(&self, level: i32, msg: &str) {
+        self.inner.log(level, msg);
+    }
+    /// 累加一个**按图**的命名计数器。比日志更适合被测试断言 ——
+    /// 跑完用 [`crate::Graph::counter_value`] 读回。
+    pub fn counter_add(&self, name: &str, delta: i64) {
+        self.inner.shared.counter_add(name, delta);
+    }
+
     // ---- node options(路径支持点号嵌套,如 "roi.x")----
     pub fn has_option(&self, key: &str) -> bool {
         self.inner.options.has(key)

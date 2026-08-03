@@ -1,8 +1,8 @@
 # lmflow 设计方案
 
 > 状态:**成品**。Rust 引擎、C ABI、C++ 糖层(含 OpenCV 互转)、18 个内置算子、
-> Python 绑定(pybind11)、原生 SDK 发布(各平台头文件+库)全部就位;**248 个测试**
-> (Rust 210 + Python 38)全绿,TSan 硬门禁 0 竞态。Rust / C++ / Python 三种宿主的
+> Python 绑定(pybind11)、原生 SDK 发布(各平台头文件+库)全部就位;**250 个测试**
+> (Rust 212 + Python 38)全绿,TSan 硬门禁 0 竞态。Rust / C++ / Python 三种宿主的
 > hello_world 都输出正确;支持线程池绑核 + 实时优先级(Linux/Android),可交叉编到
 > Android / iOS / 鸿蒙。
 > 定位:一个数据流图计算框架 —— 把计算描述成**有向图**,节点是**算子(Kernel)**,
@@ -329,9 +329,13 @@ LMFLOW_REGISTER_KERNEL(PassThroughKernel)    // 或 LMFLOW_REGISTER_KERNEL_AS(T,
   `kernel::register`,引擎不知道算子是什么语言写的。内置的 18 个 C++ 算子因此只是**捆绑的
   算子库**、不是引擎的一部分 —— 它们放在 crate 之外(`lmflow/cpp/`,见 §11),**不随发布的
   crate 分发**;由 `builtin-kernels` feature(**默认关**)编入,只在本仓库内可用。
-- **引擎自带默认 Rust 算子**(`src/builtin.rs`):`PassThrough` 等,建图时(`Graph::from_config`)
-  自动注册一次,任何配置下都在、零 C++。名字刻意不带 `Kernel` 后缀,以免与 C++ 内置算子
-  (`PassThroughKernel` …)重名 —— 注册表按名字唯一,重名注册直接报错。
+- **引擎自带默认 Rust 算子**(`src/builtin.rs`,建图时 `Graph::from_config` 自动注册一次、
+  零 C++、任何配置下都在)—— **刻意只有两个**,且都纯结构性、零 payload 假设:
+  `PassThrough`(直通接线)与 `Sink`(只消费,让分支自行终结;计 `sink.packets`)。
+  名字**不带 `Kernel` 后缀**,以免与 C++ 内置算子重名(注册表按名字唯一,重名直接报错)。
+  **为什么不多放**:`Scale`/`Sum`/`Zip`/`Filter` 之类必须假设 payload 是 i64,与 ADR #6
+  「引擎不解释 payload」相悖;演示引擎语义是 `cpp/kernels/` 那 18 个与 `examples/` 的职责。
+  扇出也不需要算子 —— **一条边可直接挂多个消费者**是原生能力(见 §7.5),故不放 `Split`。
 - 内置算子清单见 `cpp/kernels/register.cc` 表头。其中**张量前处理组**(纯数值 BUFFER):
   `Cast`(dtype 转换)、`Affine`(`x*scale+shift`)、`Clamp`、`Reduce`(→F64 标量)——
   统一走 double 做 dtype 分派,连续缓冲、暂不支持 F16。示例见
@@ -1057,7 +1061,7 @@ lm-flow/                          仓库根
 
 ---
 
-## 13. 测试策略(已落地 248 个:Rust 210 + Python 38)
+## 13. 测试策略(已落地 250 个:Rust 212 + Python 38)
 
 | 测试文件 | 数量 | 覆盖 |
 |---|---|---|

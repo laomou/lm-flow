@@ -31,6 +31,21 @@ cargo add lmflow
 (`lmflow_register_kernel`) — the registry is language-agnostic, and the engine neither knows nor
 cares what language a kernel is written in.
 
+### Built-in Rust kernels
+
+Two, registered automatically on graph construction — no setup call needed:
+
+| Name | What it does | Ports |
+|---|---|---|
+| `PassThrough` | zero-copy forward (wiring / placeholder) | 1 → 1, any type |
+| `Sink` | consume only, so a branch can terminate itself | 1 → 0, any type |
+
+Deliberately only these two: both are **purely structural, with no assumptions about the payload**.
+Kernels like `Scale`/`Sum`/`Zip`/`Filter` would have to assume a concrete payload type (i64), which
+contradicts the engine's design rule that it never interprets payloads. Fan-out needs no kernel
+either — one edge can feed several consumers natively. Compute is yours to write; the engine
+provides structure.
+
 The same engine is also consumed from C/C++ (`#include "lmflow/flow.h"`, link `liblmflow.a`),
 Python (`pip install lm-lmflow`), and mobile (Android / iOS / HarmonyOS bridges). See the
 [repository](https://github.com/laomou/lm-flow) for the native SDK and the 18 bundled C++ kernels —
