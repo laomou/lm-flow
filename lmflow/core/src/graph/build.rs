@@ -23,7 +23,7 @@ use crate::runtime::{self, GraphShared};
 use crate::status::{Error, Result};
 use crate::timestamp::Timestamp;
 
-use super::{Edge, EdgeId, GraphInner, InputPolicy, Node, NodeSched, NodeStats, State};
+use super::{Activity, Edge, EdgeId, GraphInner, InputPolicy, Node, NodeSched, NodeStats, State};
 
 // ---------------------------------------------------------------- 构建与校验
 
@@ -299,7 +299,7 @@ impl GraphInner {
             main_queue: Mutex::new(VecDeque::new()),
             executors,
             in_flight: AtomicUsize::new(0),
-            activity: (Mutex::new(0), Condvar::new()),
+            activity: (Mutex::new(Activity::default()), Condvar::new()),
             paused: AtomicBool::new(false),
             side_packets: Mutex::new(BTreeMap::new()),
             required_side_packets: required,

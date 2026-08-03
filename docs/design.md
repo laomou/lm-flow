@@ -1,8 +1,8 @@
 # lmflow 设计方案
 
 > 状态:**成品**。Rust 引擎、C ABI、C++ 糖层(含 OpenCV 互转)、18 个内置算子、
-> Python 绑定(pybind11)、原生 SDK 发布(各平台头文件+库)全部就位;**255 个测试**
-> (Rust 217 + Python 38)全绿,TSan 硬门禁 0 竞态。Rust / C++ / Python 三种宿主的
+> Python 绑定(pybind11)、原生 SDK 发布(各平台头文件+库)全部就位;**256 个测试**
+> (Rust 218 + Python 38)全绿,TSan 硬门禁 0 竞态。Rust / C++ / Python 三种宿主的
 > hello_world 都输出正确;支持线程池绑核 + 实时优先级(Linux/Android),可交叉编到
 > Android / iOS / 鸿蒙。
 > 定位:一个数据流图计算框架 —— 把计算描述成**有向图**,节点是**算子(Kernel)**,
@@ -74,6 +74,7 @@
 | 21 | **节点级统计 + watchdog**,但**不做抢占中断** | 卡死必须能定位到具体节点;而中断一个正在跑的算子无法安全实现(同 `cancel` 语义),故只做可观测 |
 | 31 | **节点统计全用原子、不用 `Mutex`** | 每包每节点都要更新,放锁里就是在热路径加锁(改造前每包 4 次加锁:计时进/出 + 耗时 + processed)。改原子后实测端到端 **-4~5%**,且顺带满足 R1「调算子时不持任何引擎锁」。计数器用 `Relaxed`(不参与 happens-before);`started_us` 归零时**不清**,读侧按 `in_flight > 0` 判断,从而避开「清零 vs 新一次开始」的覆盖竞争 |
 | 32 | **内存序分两类**:纯计数器 `Relaxed`,同步标志一律 `SeqCst` | 已逐个审过 39 处。降为 `Relaxed` 的只有 8 处 —— 全局水位(`total_queued`/`_bytes`,**每包每消费者 4 次 RMW**)与 `dropped`,它们除了跟阈值比一下不承载任何 happens-before。其余 31 处**有意保留**:终止判定的两段式检查(`input_closed[i] && queue_len(i)==0`)、`has_error`/`cancelled`/`source_done` 的发布、执行器 stop 标志、边与 poller 的 `closed` —— 降级会坏掉终止正确性。收益是 **arm64 专属**:实测 codegen,aarch64 上 SeqCst RMW 走 `__aarch64_ldadd8_acq_rel`、Relaxed 走 `__aarch64_ldadd8_relax`,而 x86_64 两者都是同一条 `lock incq`(故本机 bench 量不出),Android / iOS arm64 是发布目标 |
+| 33 | **`notify_activity` 只在真有等待者时才 wake**(waiters 计数与 gen 同锁) | `notify_activity` 在 `dispatch` 里是**每包每条边**调一次,而 `Condvar::notify_all` **即使没有任何等待者也会走一次 futex 系统调用**。代数递增必须保留(那是防丢唤醒的本体),但 wake 可以跳过:notifier 持锁时读到 `waiters == 0`,则任何「正要等待」的线程都还没拿到那把锁 —— 它随后会看到递增后的 `gen` 而根本不进入等待,故不丢唤醒。实测每跳边际派发成本 **763 → 279 ns(-63%)**;线程池模式只降 5~7%,因为那时宿主确实在等、那些 wake 是必要的 —— 只省掉了无用的那些 |
 | 22 | **`type_id` = FNV-1a(修饰名)**,而非 `typeid().hash_code()` | 后者实现定义、不保证跨动态库一致;而本项目 C++ 算子在 core、Python 绑定在另一 `.so`,天然跨产物。事后再改需全量重编,故一开始就用稳定方案 + `LMFLOW_DECLARE_TYPE_NAME` 逃生口 |
 | 23 | **时间戳单调性:图输入口强制校验,内部边仅 debug 构建校验** | 外部数据进入的唯一门校验一次即可挡住绝大多数乱序;内部边逐包校验是热路径开销,且算子产出乱序属算子 bug,用 `debug_assertions` 捕获即可 |
 | 24 | **不做 stream header**,用 side packet 覆盖 | header 会引入「流上的第二种数据」及其生命周期问题;side packet 已能表达「整条流不变的属性」。少一个概念优于多一个 |
@@ -1064,7 +1065,7 @@ lm-flow/                          仓库根
 
 ---
 
-## 13. 测试策略(已落地 255 个:Rust 217 + Python 38)
+## 13. 测试策略(已落地 256 个:Rust 218 + Python 38)
 
 | 测试文件 | 数量 | 覆盖 |
 |---|---|---|

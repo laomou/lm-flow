@@ -526,6 +526,22 @@ impl Node {
 
 // ---------------------------------------------------------------- 图
 
+/// 「有进展」的通知状态:活动代数 + **当前阻塞在 condvar 上的宿主线程数**。
+///
+/// `waiters` 与 `gen` 同锁保护,这是能安全跳过 `notify_all` 的依据:notifier 在持锁时
+/// 读到 `waiters == 0`,则任何「正要等待」的线程此刻都还没拿到这把锁 —— 它随后会看到
+/// 递增后的 `gen`(≠ 它捕获的 `before`)从而根本不进入等待。故**不会丢唤醒**。
+///
+/// 为什么值得为此加一个计数:`notify_activity` 在 `dispatch` 里是**每包每条边**调一次,
+/// 而 `Condvar::notify_all` 即使没有任何等待者也会走一次 futex 系统调用
+/// (本机实测约 372 ns,与 `getpid()` 的 329 ns 同量级 —— 该机器系统调用被放大约 5 倍,
+/// 裸机约 60~80 ns)。没人在等的时候这纯属白付。
+#[derive(Debug, Default)]
+struct Activity {
+    gen: u64,
+    waiters: usize,
+}
+
 pub struct GraphInner {
     pub shared: Arc<GraphShared>,
     nodes: Vec<Node>,
@@ -543,7 +559,7 @@ pub struct GraphInner {
     /// 已投递到线程池、尚未跑完的任务数。用于「是否空闲」与终止判定。
     in_flight: AtomicUsize,
     /// 有任何进展时唤醒阻塞中的宿主线程(取到输出、节点关闭、出错、主线程任务入队)
-    activity: (Mutex<u64>, Condvar),
+    activity: (Mutex<Activity>, Condvar),
     /// 暂停调度(调试/限速)。已在执行的算子不受影响。
     paused: AtomicBool,
     side_packets: Mutex<BTreeMap<String, Packet>>,
@@ -1191,26 +1207,41 @@ impl GraphInner {
     /// 否则阻塞中的宿主线程会白等到超时。
     fn notify_activity(&self) {
         let (m, cv) = &self.activity;
-        let mut gen = m.lock().unwrap_or_else(|e| e.into_inner());
-        *gen = gen.wrapping_add(1);
-        drop(gen);
-        cv.notify_all();
+        let mut a = m.lock().unwrap_or_else(|e| e.into_inner());
+        a.gen = a.gen.wrapping_add(1);
+        // 代数**必须**递增(防丢唤醒的本体);但没人在等时就别去做那次 futex 唤醒。
+        let wake = a.waiters > 0;
+        drop(a);
+        if wake {
+            cv.notify_all();
+        }
     }
 
     /// 读取当前活动代数。**必须在判断 is_idle/is_done 之前读取**,再据此 `wait_activity_since`,
     /// 否则会丢唤醒:若在「判断非空闲」与「开始等待」之间任务恰好全部完成,
     /// 等待会一直睡到超时(那 55ms 的假慢就是这么来的)。
     fn activity_gen(&self) -> u64 {
-        *self.activity.0.lock().unwrap_or_else(|e| e.into_inner())
+        self.activity
+            .0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .gen
     }
 
     /// 等到活动代数不等于 `before`(即有新进展)或超时。
     fn wait_activity_since(&self, before: u64, timeout: std::time::Duration) {
         let (m, cv) = &self.activity;
-        let gen = m.lock().unwrap_or_else(|e| e.into_inner());
-        let (guard, _res) = cv
-            .wait_timeout_while(gen, timeout, |g| *g == before)
+        let mut a = m.lock().unwrap_or_else(|e| e.into_inner());
+        if a.gen != before {
+            return; // 已有进展,不必等(也就不必登记为等待者)
+        }
+        // 在**持锁**期间登记:notifier 要么看见它(会 wake),要么还没拿到锁
+        // (那它递增的 gen 会让下面的谓词立刻为假)。见 `Activity` 的说明。
+        a.waiters += 1;
+        let (mut guard, _res) = cv
+            .wait_timeout_while(a, timeout, |x| x.gen == before)
             .unwrap_or_else(|e| e.into_inner());
+        guard.waiters -= 1;
         drop(guard);
     }
 
