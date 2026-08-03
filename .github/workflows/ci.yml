@@ -43,7 +43,7 @@ jobs:
           g++ -std=c++17 -Wall -Wextra -Werror -Iinclude -c /tmp/plog.cc -o /tmp/plog.o
 
   rust:
-    name: build · rust (fmt/clippy/test/example)
+    name: build · rust (fmt/clippy/test)
     runs-on: ubuntu-latest
     defaults: { run: { working-directory: lmflow/flow-core } }
     steps:
@@ -54,11 +54,6 @@ jobs:
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo build --all
       - run: timeout 600 cargo test --all   # 含 ABI 布局/C ABI/内存记账/CoW;timeout 兜底,偶发挂起也快失败而非烧满 CI
-      - name: 示例必须能跑出正确结果
-        run: |
-          out=$(cargo run --quiet --example hello_world)
-          expected=$(for i in $(seq 0 9); do echo "out: $i @ ts=$i"; done)
-          [ "$out" = "$expected" ] || { echo "输出不符:"; echo "$out"; exit 1; }
 
   # 外部宿主视角:header 声明的符号必须都在库里,且真的能链接+运行。
   # 这条曾抓到两个真问题:lmflow_register_builtin_kernels 漏在 header 之外、

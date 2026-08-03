@@ -1,0 +1,14 @@
+# examples/rust/hello_world —— 完整、可独立编译的 Rust 宿主示例,演示如何消费 lmflow 引擎。
+# 与 examples/cpp/hello_world 对应:C++ 宿主走 C ABI,Rust 宿主直接用 flow-core crate。
+#
+#   cargo run --manifest-path lmflow/examples/rust/hello_world/Cargo.toml   # 输出 out: 0..9
+#
+# 引擎是独立 crate,这里用 path 依赖消费(外部工程可改成 git 依赖)。
+[package]
+name = "hello_world"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+flow-core = { path = "../../../flow-core" }
