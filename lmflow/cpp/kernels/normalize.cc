@@ -29,9 +29,8 @@ class NormalizeKernel : public lmflow::Kernel {
 
   lmflow::Status Open(lmflow::Context& cc) override {
     // 必需参数:拼错 key 或漏配会当场失败,并带上可读原因(不是静默用默认值跑歪)
-    if (cc.RequireOption("scale", &scale_) != LMFLOW_OK) {
-      return cc.Fail("options.scale missing or type mismatch (required option)");
-    }
+    LMFLOW_RET_CHECK_MSG(cc, cc.RequireOption("scale", &scale_) == LMFLOW_OK,
+                         "options.scale missing or type mismatch (required option)");
 
     // 数组参数:归一化均值/标准差这类配置的常见形态
     n_mean_ = cc.OptionArray("mean", mean_, 4);

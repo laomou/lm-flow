@@ -16,7 +16,7 @@ class FilterKernel : public lmflow::Kernel {
   }
   lmflow::Status Process(lmflow::Context& cc) override {
     int64_t v = 0;
-    if (!cc.Input(0).AsI64(&v)) return cc.Fail("input is not an integer packet");
+    LMFLOW_RET_CHECK_MSG(cc, cc.Input(0).AsI64(&v), "input is not an integer packet");
     if (v >= threshold_) {
       cc.Forward(0, 0);
     } else {

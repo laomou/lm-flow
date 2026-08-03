@@ -18,15 +18,16 @@ class AffineKernel : public lmflow::Kernel {
     const char* dt = cc.OptionStr("dtype", "");
     if (dt[0] != '\0') {
       out_dt_ = lmflow_bufutil::dtype_from_name(dt);
-      if (out_dt_ < 0) return cc.Fail("options.dtype unknown/unsupported");
+      LMFLOW_RET_CHECK_MSG(cc, out_dt_ >= 0, "options.dtype unknown/unsupported");
     }
     return lmflow::Status::Ok();
   }
   lmflow::Status Process(lmflow::Context& cc) override {
     LMFlowBuffer in{};
-    if (!cc.Input(0).AsBuffer(&in)) return cc.Fail("input is not a buffer");
-    if (!lmflow_bufutil::is_math_dtype(in.dtype)) return cc.Fail("input dtype unsupported (F16?)");
-    if (!lmflow_bufutil::is_contiguous(in)) return cc.Fail("input buffer must be contiguous");
+    LMFLOW_RET_CHECK_MSG(cc, cc.Input(0).AsBuffer(&in), "input is not a buffer");
+    LMFLOW_RET_CHECK_MSG(cc, lmflow_bufutil::is_math_dtype(in.dtype),
+                         "input dtype unsupported (F16 needs half conversion)");
+    LMFLOW_RET_CHECK_MSG(cc, lmflow_bufutil::is_contiguous(in), "input buffer must be contiguous");
 
     const int32_t out_dt = out_dt_ >= 0 ? out_dt_ : in.dtype;  // 默认同输入 dtype
     LMFlowBuffer out{};

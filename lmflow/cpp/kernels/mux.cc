@@ -25,9 +25,11 @@ class MuxKernel : public lmflow::Kernel {
   }
   lmflow::Status Process(lmflow::Context& cc) override {
     int64_t k = 0;
-    if (!cc.Input(0).AsI64(&k)) return cc.Fail("mux control port (input 0) must be an I64 selector");
+    LMFLOW_RET_CHECK_MSG(cc, cc.Input(0).AsI64(&k),
+                         "mux control port (input 0) must be an I64 selector");
     const int64_t ndata = static_cast<int64_t>(cc.NumInputs()) - 1;  // 除控制口外
-    if (k < 0 || k >= ndata) return cc.Fail("mux selector out of range (not enough data ports)");
+    LMFLOW_RET_CHECK_MSG(cc, k >= 0 && k < ndata,
+                         "mux selector out of range (not enough data ports)");
     cc.Forward(static_cast<size_t>(1 + k), 0);  // 转发第 k 个数据口(零拷贝)
     return lmflow::Status::Ok();
   }

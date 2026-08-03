@@ -14,9 +14,8 @@ class CastKernel : public lmflow::Kernel {
   }
   lmflow::Status Open(lmflow::Context& cc) override {
     out_dt_ = lmflow_bufutil::dtype_from_name(cc.OptionStr("dtype", "f32"));
-    if (out_dt_ < 0) {
-      return cc.Fail("options.dtype unknown/unsupported (u8/i8/u16/i16/i32/i64/f32/f64)");
-    }
+    LMFLOW_RET_CHECK_MSG(cc, out_dt_ >= 0,
+                         "options.dtype unknown/unsupported (u8/i8/u16/i16/i32/i64/f32/f64)");
     return lmflow::Status::Ok();
   }
   lmflow::Status Process(lmflow::Context& cc) override {
