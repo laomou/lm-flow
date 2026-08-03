@@ -55,7 +55,32 @@ lm-flow/
 
 ## Quick start
 
-The engine is a standalone Rust crate under `lmflow/core` (Rust developers work there directly):
+Rust — from crates.io, **no C++ toolchain needed**:
+
+```bash
+cargo add lmflow
+```
+
+```rust
+use lmflow::{register_kernel, Graph, Kernel, KernelCtx, Packet};
+
+#[derive(Default)]
+struct Double;
+impl Kernel for Double {
+    fn process(&mut self, cc: &mut KernelCtx) -> lmflow::Result<()> {
+        let v = cc.input(0).and_then(|p| p.as_i64()).unwrap_or(0);
+        cc.emit(0, Packet::from_i64(v * 2))
+    }
+}
+
+register_kernel::<Double>("Double")?;          // your own kernel
+let g = Graph::from_yaml(yaml)?;               // `PassThrough` / `Sink` need no registration
+```
+
+The published crate is the **pure-Rust engine**. The 18 bundled C++ kernels live outside it and are
+not distributed with it — see the `builtin-kernels` feature below if you build from this repo.
+
+Working in this repo instead (the engine crate is `lmflow/core`):
 
 ```bash
 cd lmflow/core

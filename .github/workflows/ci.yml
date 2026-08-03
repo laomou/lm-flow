@@ -66,8 +66,14 @@ jobs:
           eh=$(nm -u "$A" | grep -cE '__gxx_personality|__cxa_begin_catch|__cxa_throw' || true)
           [ "$eh" = 0 ] || { echo "默认构建里仍引用 C++ 异常运行时($eh 处)"; exit 1; }
           echo "默认构建校验通过:无内置算子符号 / 无 C++ 目标文件 / 无 C++ 异常运行时"
+      # 守住「crate 可发布」这个性质。它极易被无声破坏:`cpp/` 与 `include/` **在 crate 目录
+      # 之外**(故不随发布的 crate 分发),任何把它们挪回 crate 内、或让默认构建依赖它们的
+      # 改动,都会让 `cargo publish` 失败 —— 而那原本只有真发版时才会发现。
+      # dry-run 会真打包并在解包出的副本里编一遍,等价于发版前的最后一道检查。
+      - name: crate 仍可发布(publish --dry-run)
+        run: cargo publish --dry-run
       # 仓库内的完整路径:开 builtin-kernels 编 ../cpp 的 18 个内置 C++ 算子,
-      # 跑全部 208 个测试(含 C ABI / 内存记账 / CoW / 调度策略 …)。
+      # 跑全部测试(含 C ABI / 内存记账 / CoW / 调度策略 …)。
       - name: 带内置 C++ 算子(仓库内完整路径)
         run: |
           cargo clippy --features builtin-kernels --all-targets -- -D warnings

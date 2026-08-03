@@ -118,3 +118,6 @@ jobs:
       - uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist
+          # 让发布幂等:PyPI 拒绝重复版本,若该版本已在(例如重跑本工作流、
+          # 或某平台 wheel 补传)就跳过而不是让整条发布失败。
+          skip-existing: true

@@ -57,7 +57,32 @@ lm-flow/
 
 ## 快速开始
 
-引擎是 `lmflow/core` 下的独立 Rust crate(Rust 开发者直接在这里干活):
+Rust —— 直接从 crates.io 装,**不需要 C++ 工具链**:
+
+```bash
+cargo add lmflow
+```
+
+```rust
+use lmflow::{register_kernel, Graph, Kernel, KernelCtx, Packet};
+
+#[derive(Default)]
+struct Double;
+impl Kernel for Double {
+    fn process(&mut self, cc: &mut KernelCtx) -> lmflow::Result<()> {
+        let v = cc.input(0).and_then(|p| p.as_i64()).unwrap_or(0);
+        cc.emit(0, Packet::from_i64(v * 2))
+    }
+}
+
+register_kernel::<Double>("Double")?;          // 自己的算子
+let g = Graph::from_yaml(yaml)?;               // 自带的 `PassThrough` / `Sink` 无需注册
+```
+
+发布出去的 crate 是**纯 Rust 引擎**;18 个内置 C++ 算子在 crate 之外、不随它分发 ——
+在本仓库里构建才有(见下面的 `builtin-kernels` feature)。
+
+在本仓库里开发(引擎 crate 在 `lmflow/core`):
 
 ```bash
 cd lmflow/core
