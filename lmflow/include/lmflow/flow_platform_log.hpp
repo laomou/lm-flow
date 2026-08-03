@@ -4,7 +4,7 @@
  * **不属于 ABI,也不进 core。** 引擎只认 lmflow_set_log_callback(那是抽象层);
  * core 与算子的日志都经它透出。本头只提供一个**现成的平台 sink** 并帮你装上:
  *
- *     #include "flow_platform_log.hpp"
+ *     #include "lmflow/flow_platform_log.hpp"
  *     lmflow::InstallPlatformLogSink();   // 之后 core + 算子日志都进平台日志
  *
  * 平台选择发生在**宿主编译期**(下面的 #ifdef),所以 libflow_core 仍然零平台依赖 ——

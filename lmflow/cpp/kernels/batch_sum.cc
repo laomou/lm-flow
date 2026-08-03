@@ -2,7 +2,7 @@
 // 配 input_policy: { type: batch, capacity: N }:引擎攒够 N 个包一次交给本算子;
 // 用 InputCount + InputAt 遍历整批(关流时余批可能不足 N)。演示 batch 输入策略。
 // 输出时间戳继承 input_ts(= 批内最后一个包的时间戳),下游单调。
-#include "flow.hpp"
+#include "lmflow/flow.hpp"
 
 #include "builtins.hpp"
 

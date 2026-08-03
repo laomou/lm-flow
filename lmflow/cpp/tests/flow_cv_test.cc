@@ -12,7 +12,7 @@
 #include <cstdint>
 #include <cstdio>
 
-#include "flow_cv.hpp"
+#include "lmflow/flow_cv.hpp"
 
 int main() {
   // 1) 引擎分配缓冲 -> cv::Mat 写入 -> 只读视图读回

@@ -13,7 +13,7 @@
 //       roi:   { x: 8, y: 8 }  # 嵌套:用点号路径读
 #include <cstdio>
 
-#include "flow.hpp"
+#include "lmflow/flow.hpp"
 
 #include "builtins.hpp"
 

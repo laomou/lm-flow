@@ -3,11 +3,11 @@
 # 配置模板在仓库根 cmake/。
 
 install(FILES
-    "${LMFLOW_SRC}/include/flow.h"
-    "${LMFLOW_SRC}/include/flow.hpp"
-    "${LMFLOW_SRC}/include/flow_cv.hpp"
-    "${LMFLOW_SRC}/include/flow_platform_log.hpp"
-    DESTINATION include)
+    "${LMFLOW_SRC}/include/lmflow/flow.h"
+    "${LMFLOW_SRC}/include/lmflow/flow.hpp"
+    "${LMFLOW_SRC}/include/lmflow/flow_cv.hpp"
+    "${LMFLOW_SRC}/include/lmflow/flow_platform_log.hpp"
+    DESTINATION include/lmflow)
 install(FILES "${FLOW_LIB}" DESTINATION lib)
 
 include(CMakePackageConfigHelpers)

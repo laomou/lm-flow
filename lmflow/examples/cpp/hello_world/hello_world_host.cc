@@ -10,7 +10,7 @@
 #include <cstdio>
 #include <cstdlib>
 
-#include "flow.h"
+#include "lmflow/flow.h"
 
 /* 两个节点都未指定 executor → 都跑在主线程,任务在 poller_next / wait_done 期间被抽取。 */
 static const char* kConfig = R"(

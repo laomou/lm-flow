@@ -16,8 +16,8 @@
 #include <string>
 #include <vector>
 
-#include "flow.h"
-#include "flow_platform_log.hpp"  // 可选:把引擎日志接到 logcat
+#include "lmflow/flow.h"
+#include "lmflow/flow_platform_log.hpp"  // 可选:把引擎日志接到 logcat
 
 namespace {
 

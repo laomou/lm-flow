@@ -10,7 +10,7 @@
 #include <cstdio>
 #include <stdexcept>
 
-#include "flow.hpp"
+#include "lmflow/flow.hpp"
 
 namespace {
 

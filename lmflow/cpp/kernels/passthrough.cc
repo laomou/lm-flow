@@ -1,5 +1,5 @@
 // passthrough.cc —— 零拷贝直通:把输入原样转发到输出(复用同一 payload,不拷贝)。
-#include "flow.hpp"
+#include "lmflow/flow.hpp"
 
 #include "builtins.hpp"
 

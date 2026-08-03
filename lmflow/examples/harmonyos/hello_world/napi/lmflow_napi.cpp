@@ -11,8 +11,8 @@
 
 #include <string>
 
-#include "flow.h"
-#include "flow_platform_log.hpp"  // 可选:把引擎日志接到 HiLog
+#include "lmflow/flow.h"
+#include "lmflow/flow_platform_log.hpp"  // 可选:把引擎日志接到 HiLog
 
 namespace {
 

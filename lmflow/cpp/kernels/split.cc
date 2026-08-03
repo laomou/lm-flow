@@ -1,5 +1,5 @@
 // split.cc —— 扇出:1 进 N 出,把同一输入 Forward 到每个输出口(共享同一 payload)。
-#include "flow.hpp"
+#include "lmflow/flow.hpp"
 
 #include "builtins.hpp"
 

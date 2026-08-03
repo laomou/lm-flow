@@ -3,7 +3,7 @@
 // 注意:源节点必须挂线程池 executor(见 config 校验);无限源须自定速(阻塞)或由 host cancel。
 #include <cstdint>
 
-#include "flow.hpp"
+#include "lmflow/flow.hpp"
 
 #include "builtins.hpp"
 

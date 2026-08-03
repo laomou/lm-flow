@@ -18,7 +18,7 @@
 ### 0.1 做什么
 
 - 引擎(调度、线程、边队列、拓扑、YAML 解析)用 **Rust** 实现。
-- 对外**只暴露一层 C ABI**(`include/flow.h`)。这是唯一的稳定接口。
+- 对外**只暴露一层 C ABI**(`include/lmflow/flow.h`)。这是唯一的稳定接口。
 - 算子可用 **C++**(经 `flow.hpp` 糖层)或 **Python**(经 pybind11)编写,YAML 中平等引用。
 - 图的拓扑与参数由 **YAML** 描述,含每节点的 `options`。
 
@@ -91,7 +91,7 @@
 │  宿主(驱动图):Rust / C++ / Python                                │
 │    new → init_from_yaml → add_poller → start                      │
 │    loop { input.send(pkt); poller.next() } → close → wait_done    │
-├─────────────────────── C ABI (include/flow.h) ────────────────────┤ ← unsafe 边界①
+├─────────────────────── C ABI (include/lmflow/flow.h) ────────────────────┤ ← unsafe 边界①
 │  Rust 引擎 (flow-core, lib + staticlib + cdylib)                  │
 │    graph(索引 arena) · scheduler/executor · edge(FIFO)            │
 │    packet · timestamp · config(YAML) · registry · poller          │
@@ -256,7 +256,7 @@ bool       lmflow_ctx_has_side_packet(const LMFlowContext*, const char* name);
 
 ## 4. 对外 C 接口
 
-> **权威定义见 `include/flow.h`**(手写,已通过 `gcc -std=c11 -Wall -Wextra` 与
+> **权威定义见 `include/lmflow/flow.h`**(手写,已通过 `gcc -std=c11 -Wall -Wextra` 与
 > `g++ -std=c++17` 双向验证)。本节只列分组,避免文档与 header 双份漂移。
 
 | 分组 | 主要函数 |
@@ -866,7 +866,7 @@ output_ports: [out]
 ### 8.1 形态
 
 pybind11 模块 `lmflow._lmflow`(`python/src/bindings.cc`)链接 `libflow_core`,
-只调用 `include/flow.h` 这一层 C ABI —— 和 C++ 算子走同一条路。
+只调用 `include/lmflow/flow.h` 这一层 C ABI —— 和 C++ 算子走同一条路。
 Python 包 `lmflow`(`python/lmflow/__init__.py`)在其上提供 `@kernel` 装饰器、
 `Kernel` 基类、`Graph` 上下文管理器与类型常量。
 Python 既可**注册算子**,也可**驱动图**。
@@ -1002,20 +1002,22 @@ lm-flow/                          仓库根
 │   ├── flow-core/                引擎(独立 Rust crate)
 │   │   ├── build.rs              cc 编译 ../cpp 并链入
 │   │   ├── Cargo.toml · Cargo.lock
-│   │   ├── src/                  timestamp / packet / edge / node / graph / scheduler / ffi …
+│   │   ├── src/                  timestamp / packet / edge / node / graph / scheduler / ffi / kernel_api …
 │   │   ├── tests/                abi_layout.rs 等
-│   │   └── examples/             hello_world.rs(Rust 宿主)
-│   ├── include/                  公共头
-│   │   ├── flow.h                C ABI —— 唯一稳定接口(权威定义)
-│   │   ├── flow.hpp              C++ 算子糖层(header-only,非 ABI)
-│   │   ├── flow_cv.hpp           可选:LMFlowBuffer ↔ cv::Mat(仅需 OpenCV 者 include)
-│   │   └── flow_platform_log.hpp 可选:引擎日志接平台日志(logcat/os_log/HiLog)
+│   │   └── benches/              throughput.rs(Criterion)
+│   ├── include/                  公共头(消费者 #include "lmflow/xxx.h")
+│   │   └── lmflow/
+│   │       ├── flow.h            C ABI —— 唯一稳定接口(权威定义)
+│   │       ├── flow.hpp          C++ 算子糖层(header-only,非 ABI)
+│   │       ├── flow_cv.hpp       可选:LMFlowBuffer ↔ cv::Mat(仅需 OpenCV 者 include)
+│   │       └── flow_platform_log.hpp  可选:引擎日志接平台日志(logcat/os_log/HiLog)
 │   ├── cpp/                      C++ 算子
 │   │   ├── kernels/              内置算子集(18 个,一文件一算子 + register.cc)
 │   │   ├── abi_assert.cc         跨界结构体布局的编译期校验
 │   │   └── tests/                flow_hpp_test.cc / flow_cv_test.cc + CMakeLists
 │   ├── python/                   src/bindings.cc(pybind11)+ lmflow 包 + CMakeLists
-│   └── examples/                 examples/<lang>/<name>/:cpp · python · android · ios · harmonyos
+│   ├── rust/                     lmflow 门面 crate(re-export flow-core,外部 use lmflow::)
+│   └── examples/                 examples/<lang>/<name>/:cpp · python · rust · android · ios · harmonyos
 ├── third_party/pybind11/         vendored 子模块(仅构建 Python wheel 用)
 ├── cmake/                        engine.cmake · install-sdk.cmake · find_package 配置
 ├── CMakeLists.txt                顶层构建(驱动 cargo;C/C++ SDK + Python 扩展)

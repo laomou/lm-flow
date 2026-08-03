@@ -2,7 +2,7 @@
 // options: min(默认 -inf)、max(默认 +inf)—— 只设一侧即单侧钳位。
 #include <limits>
 
-#include "flow.hpp"
+#include "lmflow/flow.hpp"
 
 #include "buffer_util.hpp"
 #include "builtins.hpp"

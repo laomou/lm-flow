@@ -10,7 +10,7 @@
 #include <cstddef>
 #include <cstdint>
 
-#include "flow.hpp"
+#include "lmflow/flow.hpp"
 
 /* 只在 64 位平台断言具体数值;其它平台仅校验相对关系 */
 #if UINTPTR_MAX == 0xFFFFFFFFFFFFFFFFu

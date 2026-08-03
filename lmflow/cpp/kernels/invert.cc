@@ -2,7 +2,7 @@
 // 独占时零拷贝就地取反;被上游 Split 共享时才复制,保证不污染其它分支。
 #include <cstdint>
 
-#include "flow.hpp"
+#include "lmflow/flow.hpp"
 
 #include "builtins.hpp"
 

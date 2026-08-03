@@ -1,6 +1,6 @@
 // affine.cc —— 逐元素仿射:输出 = 输入 * scale + shift(归一化的核心)。
 // options: scale(默认 1)、shift(默认 0)、可选 dtype(输出 dtype,默认同输入)。
-#include "flow.hpp"
+#include "lmflow/flow.hpp"
 
 #include "buffer_util.hpp"
 #include "builtins.hpp"

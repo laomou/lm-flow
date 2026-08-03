@@ -5,7 +5,7 @@
  * 本文件只为 CI:用 iOS SDK 编译它、并链接交叉编好的 libflow_core.a,证明
  * 「头文件在 iOS 下能解析 + 符号能解析 + C++ 运行时能链」。CI 只编+链不跑(无真机)。
  */
-#include "flow.h"
+#include "lmflow/flow.h"
 
 int main(void) {
   if (lmflow_abi_version() != LMFLOW_ABI_VERSION) return 1;

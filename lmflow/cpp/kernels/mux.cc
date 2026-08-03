@@ -12,7 +12,7 @@
 //     kernel: "MuxKernel"
 //     input_ports: ["select", "a", "b"]   # select=控制口;a=数据口0, b=数据口1
 //     output_ports: ["out"]
-#include "flow.hpp"
+#include "lmflow/flow.hpp"
 
 #include "builtins.hpp"
 

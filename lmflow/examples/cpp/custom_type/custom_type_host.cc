@@ -21,8 +21,8 @@
 #include <cstdio>
 #include <cstdlib>
 
-#include "flow.h"
-#include "flow.hpp"
+#include "lmflow/flow.h"
+#include "lmflow/flow.hpp"
 
 // ---- 一个任意的 C++ 类型 + 稳定的跨工具链名字 ----
 struct Detection {

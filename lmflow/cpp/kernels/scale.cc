@@ -1,5 +1,5 @@
 // scale.cc —— 参数化数值变换:读 options.factor,输出 输入×factor(示范读参数 + 类型声明)。
-#include "flow.hpp"
+#include "lmflow/flow.hpp"
 
 #include "builtins.hpp"
 

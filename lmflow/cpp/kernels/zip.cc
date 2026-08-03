@@ -1,5 +1,5 @@
 // zip.cc —— 汇合:2 进 1 出,按 tag(A/B)定位端口,时间戳对齐后两口都有值才产出和。
-#include "flow.hpp"
+#include "lmflow/flow.hpp"
 
 #include "builtins.hpp"
 

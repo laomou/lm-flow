@@ -1,6 +1,6 @@
 // cast.cc —— dtype 转换:输出 = 输入按 options.dtype 重新量化(如 u8 → f32)。
 // BUFFER 数值算子:读输入(任意受支持 dtype)统一走 double,再写成目标 dtype(整型 clamp+round)。
-#include "flow.hpp"
+#include "lmflow/flow.hpp"
 
 #include "buffer_util.hpp"
 #include "builtins.hpp"

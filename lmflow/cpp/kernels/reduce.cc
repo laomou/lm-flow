@@ -2,7 +2,7 @@
 #include <cstring>
 #include <limits>
 
-#include "flow.hpp"
+#include "lmflow/flow.hpp"
 
 #include "buffer_util.hpp"
 #include "builtins.hpp"

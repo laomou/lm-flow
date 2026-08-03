@@ -11,7 +11,7 @@
 #include <cstring>
 #include <limits>
 
-#include "flow.h"
+#include "lmflow/flow.h"
 
 namespace lmflow_bufutil {
 

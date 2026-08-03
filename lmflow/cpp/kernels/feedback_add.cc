@@ -1,7 +1,7 @@
 // feedback_add.cc —— 反馈相加:out = 正向输入 + 反馈(back-edge 回灌,空则按 0)。
 // 演示 back-edge(最新值反馈寄存器):端口 1 由图标为 back_edges,首拍(尚无反馈)为空按 0。
 // 接成自环(out 回灌到本节点)时即「运行累加」:out(t) = in(t) + out(t-1)。
-#include "flow.hpp"
+#include "lmflow/flow.hpp"
 
 #include "builtins.hpp"
 

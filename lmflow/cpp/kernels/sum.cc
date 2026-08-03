@@ -1,5 +1,5 @@
 // sum.cc —— 有状态累加:跨包保持 total,Close 时在流尾单包位置吐出总和。
-#include "flow.hpp"
+#include "lmflow/flow.hpp"
 
 #include "builtins.hpp"
 

@@ -1,5 +1,5 @@
 // filter.cc —— 条件过滤:>= threshold 才转发;丢弃时必须推进时间戳边界,否则下游会一直等。
-#include "flow.hpp"
+#include "lmflow/flow.hpp"
 
 #include "builtins.hpp"
 

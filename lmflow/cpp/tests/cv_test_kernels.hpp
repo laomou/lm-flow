@@ -8,8 +8,8 @@
 #ifndef LMFLOW_CPP_TESTS_CV_TEST_KERNELS_HPP_
 #define LMFLOW_CPP_TESTS_CV_TEST_KERNELS_HPP_
 
-#include "flow.hpp"
-#include "flow_cv.hpp"
+#include "lmflow/flow.hpp"
+#include "lmflow/flow_cv.hpp"
 
 namespace lmflow_test {
 

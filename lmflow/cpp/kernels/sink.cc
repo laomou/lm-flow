@@ -1,7 +1,7 @@
 // sink.cc —— 汇点:只消费不产出(零输出口),走引擎日志与按图计数器,不抢宿主 stdout。
 #include <cstdio>
 
-#include "flow.hpp"
+#include "lmflow/flow.hpp"
 
 #include "builtins.hpp"
 

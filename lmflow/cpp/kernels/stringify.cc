@@ -1,7 +1,7 @@
 // stringify.cc —— 类型转换:int64 输入 -> UTF-8 字符串输出(异类型输入输出示范)。
 #include <string>
 
-#include "flow.hpp"
+#include "lmflow/flow.hpp"
 
 #include "builtins.hpp"
 

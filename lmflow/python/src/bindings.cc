@@ -32,7 +32,7 @@
 #include <string>
 #include <vector>
 
-#include "flow.h"
+#include "lmflow/flow.h"
 
 namespace py = pybind11;
 
