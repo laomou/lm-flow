@@ -274,6 +274,12 @@ impl GraphInner {
                     .collect(),
                 input_closed: (0..ins.len()).map(|_| AtomicBool::new(false)).collect(),
                 on_error: OnError::from_config(&n.on_error),
+                min_period: if n.rate > 0.0 {
+                    Some(std::time::Duration::from_secs_f64(1.0 / n.rate))
+                } else {
+                    None
+                },
+                last_fire: Mutex::new(None),
                 input_is_back_edge: back_edge_mask[idx].clone(),
                 source_done: AtomicBool::new(false),
                 input_bounds: (0..ins.len())

@@ -389,6 +389,11 @@ pub struct Node {
     input_closed: Vec<AtomicBool>,
     /// 算子失败时的处理策略(见 [`OnError`])。建图期定下,之后不变。
     on_error: OnError,
+    /// 源节点定速:相邻两次 `process` 的最小间隔。`None` = 不限速(见 `NodeConfig::rate`)。
+    min_period: Option<std::time::Duration>,
+    /// 上次 `process` 的开始时刻,配合 `min_period` 节流。仅源节点用到 ——
+    /// 源本就串行自续产(一个包跑完才排下一个),故一把 Mutex 足够、无竞争压力。
+    last_fire: Mutex<Option<Instant>>,
     /// 每个输入口是否为 back-edge(反馈寄存器):true 的口不参与就绪 / 终止 / 对齐,
     /// 入队走 cap-1 drop-old(只留最新反馈)。长度恒 = 输入口数(无 back-edge 则全 false)。
     input_is_back_edge: Vec<bool>,
@@ -1880,6 +1885,29 @@ impl GraphInner {
             if let Some(t) = started {
                 let since_epoch = t.saturating_duration_since(self.epoch).as_micros() as i64;
                 node.stats.started_us.store(since_epoch, Ordering::Relaxed);
+            }
+        }
+
+        // 源节点定速(见 `NodeConfig::rate`):在**调算子之前**、于本节点的池线程里
+        // sleep 到点,保证相邻两次 process 至少隔 min_period。R1 未被破坏 —— 此刻不持任何
+        // 引擎锁(last_fire 那把在 sleep 前已释放)。只有源节点会设 min_period;它本就串行
+        // 自续产(finish→schedule_node→try_claim 紧循环),故这里节流就等于给整条产出限速。
+        if matches!(phase, KernelPhase::Process) {
+            if let Some(period) = node.min_period {
+                let now = Instant::now();
+                let wait = {
+                    let mut last = node.last_fire.lock().expect("last_fire lock poisoned");
+                    let w = match *last {
+                        Some(prev) => period.checked_sub(now.duration_since(prev)),
+                        None => None, // 首次不等
+                    };
+                    // 预支下一次的基准:按「本次实际放行时刻」记,避免累积漂移。
+                    *last = Some(now + w.unwrap_or_default());
+                    w
+                }; // 锁在此释放,再 sleep —— 不持锁阻塞
+                if let Some(w) = wait {
+                    std::thread::sleep(w);
+                }
             }
         }
 
