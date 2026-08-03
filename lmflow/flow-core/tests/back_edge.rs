@@ -3,10 +3,10 @@
 //! 关键断言:标记了 back_edges 的环能建、能跑、值正确,且**正向输入关闭后能正常终止**
 //! (不再撞 wait_done 的 stuck 错误);未标记的环仍在建图期被拒。
 
-use flow_core::{Graph, Packet, State, Timestamp};
+use lmflow::{Graph, Packet, State, Timestamp};
 
 fn init() {
-    flow_core::register_builtin_kernels();
+    lmflow::register_builtin_kernels();
 }
 
 /// 自环运行累加:acc 的输出 out 经 back-edge 回灌到自己的 fb 口。

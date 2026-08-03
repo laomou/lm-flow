@@ -2,7 +2,7 @@
  * lmflow_jni.cc —— Android JNI 桥:把引擎的 C ABI(flow.h)暴露给 Kotlin/Java。
  *
  * 关键点:引擎是可移植的 Rust + C++,交叉编到 aarch64-linux-android 后就是一个
- * 普通静态库 libflow_core.a。JNI 层只依赖 flow.h 这一层 C ABI —— 不碰引擎内部,
+ * 普通静态库 liblmflow.a。JNI 层只依赖 flow.h 这一层 C ABI —— 不碰引擎内部,
  * 也不需要引擎认识 JVM。数据在跨界处一律用**内建类型**(这里是 I64),故 Kotlin
  * 送进来的 long 能被 C++ 的 ScaleKernel 直接读。
  *

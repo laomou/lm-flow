@@ -2,7 +2,7 @@ package com.lmflow.demo
 
 /**
  * 引擎的 Kotlin 门面。native 库 "lmflow_jni" 由 jni/CMakeLists.txt 产出为
- * liblmflow_jni.so,内部静态链入交叉编好的 libflow_core.a(见 examples/android/README.md)。
+ * liblmflow_jni.so,内部静态链入交叉编好的 liblmflow.a(见 examples/android/README.md)。
  *
  * 设计上 Kotlin 侧只看见「送 long、取 long」这类内建类型 —— 与 C++/Python 侧完全一致,
  * 因为跨界数据是语言中立的内建类型(这里是 I64),不是某语言的原生对象。

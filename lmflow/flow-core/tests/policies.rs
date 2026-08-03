@@ -5,10 +5,10 @@
 
 use std::time::Duration;
 
-use flow_core::{Graph, Packet, Timestamp};
+use lmflow::{Graph, Packet, Timestamp};
 
 fn init() {
-    flow_core::register_builtin_kernels();
+    lmflow::register_builtin_kernels();
 }
 
 /// `sync`(默认):所有输入口齐备才触发。缺一路就不动。
@@ -306,7 +306,7 @@ input_ports: ["in"]
 /// 测试用算子:每次触发时,把「哪些输入口非空」编码成位掩码(bit i = 输入口 i 有包)发出。
 /// 用它验证 SyncSet 每次只带上就绪那组的口。
 mod port_probe {
-    use flow_core::ffi::*;
+    use lmflow::ffi::*;
     use std::ffi::c_void;
 
     unsafe extern "C" fn process(_s: *mut c_void, ctx: *mut LMFlowContext) -> i32 {

@@ -346,15 +346,14 @@ class PyDouble(lmflow.Kernel):
 
 ### 5.2b Rust 算子(`trait Kernel`,已实现)
 
-Rust 也能一等公民地写算子:实现 `flow_core::Kernel`(`get_contract`/`open`/`process`/`close`)+
+Rust 也能一等公民地写算子:实现 `lmflow::Kernel`(`get_contract`/`open`/`process`/`close`)+
 运行期 `register_kernel::<T>("Name")`,YAML 用 `kernel: Name` 引用。安全的 `KernelCtx`/
 `KernelContract` 包装内部 `Context`/`Contract`(不裸调 C ABI);panic / `Err` 都被 `catch_unwind`
 兜成图错误、不穿越边界。这是**C ABI vtable 之上的糖**(和 `flow.hpp` 的 `KernelAdapter<T>` 对 C++
 做的一样),**不是**引擎绕过 vtable 的原生快路(见 ADR)。见 `flow-core/src/kernel_api.rs`。
 
-> **Rust 门面 crate `lmflow`**(`lmflow/rust/`):薄 re-export `flow-core` 公开 API,外部 Rust 工程
-> `use lmflow::{Graph, Packet, Timestamp, Kernel, register_kernel}`;`flow_core` 库名 /
-> `libflow_core.a` 不变(C ABI/CMake/Python 共用)。
+> **外部 Rust 工程**:`cargo add lmflow` → `use lmflow::{Graph, Packet, Timestamp, Kernel, register_kernel}`。
+> 引擎就是这一个 crate `lmflow`(包名 = 库名 = `lmflow` → `liblmflow.a`,C ABI/CMake/Python 共用同一库)。
 
 ### 5.3 内置算子清单(`cpp/kernels/`,一文件一算子)
 
@@ -865,7 +864,7 @@ output_ports: [out]
 
 ### 8.1 形态
 
-pybind11 模块 `lmflow._lmflow`(`python/src/bindings.cc`)链接 `libflow_core`,
+pybind11 模块 `lmflow._lmflow`(`python/src/bindings.cc`)链接 `liblmflow`,
 只调用 `include/lmflow/flow.h` 这一层 C ABI —— 和 C++ 算子走同一条路。
 Python 包 `lmflow`(`python/lmflow/__init__.py`)在其上提供 `@kernel` 装饰器、
 `Kernel` 基类、`Graph` 上下文管理器与类型常量。
@@ -985,9 +984,9 @@ cc.emit(0, packet)
 
 **Python 部分:破例引入 CMake**(ADR #4)
 
-- `pyproject.toml`(scikit-build-core)→ CMake 编 pybind11 模块 → 链 `libflow_core`。
+- `pyproject.toml`(scikit-build-core)→ CMake 编 pybind11 模块 → 链 `liblmflow`。
 - 两步:`cargo build` 出库 → `pip install -e .` 编扩展。
-- 外部 C++ 宿主:自带构建系统,链 `libflow_core` + `include/`,不进本仓库构建。
+- 外部 C++ 宿主:自带构建系统,链 `liblmflow` + `include/`,不进本仓库构建。
 
 **依赖**:`serde`/`serde_yaml`/`serde_json`;构建期 `cc`;Python 侧 `pybind11`。
 `crossbeam-channel`、`parking_lot` 在 M3 引入。
@@ -999,7 +998,7 @@ cc.emit(0, packet)
 ```text
 lm-flow/                          仓库根
 ├── lmflow/                       第一方源码
-│   ├── flow-core/                引擎(独立 Rust crate,发布名 lmflow-core;lib flow_core)
+│   ├── flow-core/                引擎(Rust crate:包名=库名=lmflow → liblmflow.a;目录名 flow-core 为历史遗留)
 │   │   ├── build.rs              cc 编译 cpp/ 并链入
 │   │   ├── Cargo.toml · Cargo.lock
 │   │   ├── src/                  timestamp / packet / edge / node / graph / scheduler / ffi / kernel_api …
@@ -1016,7 +1015,6 @@ lm-flow/                          仓库根
 │   │   ├── tests/                abi_layout.rs 等
 │   │   └── benches/              throughput.rs(Criterion)
 │   ├── python/                   src/bindings.cc(pybind11)+ lmflow 包 + CMakeLists
-│   ├── rust/                     lmflow 门面 crate(re-export lmflow-core,外部 use lmflow::)
 │   └── examples/                 examples/<lang>/<name>/:cpp · python · rust · android · ios · harmonyos
 ├── third_party/pybind11/         vendored 子模块(仅构建 Python wheel 用)
 ├── cmake/                        engine.cmake · install-sdk.cmake · find_package 配置

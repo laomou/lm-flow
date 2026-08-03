@@ -6,7 +6,7 @@
 
 use std::sync::Mutex;
 
-use flow_core::{Graph, Packet, State, Timestamp};
+use lmflow::{Graph, Packet, State, Timestamp};
 
 /// 日志回调是**进程级**的,cargo 又并行跑测试 —— 不串行化就会互相把回调覆盖掉,
 /// 导致断言看到 0 条日志。所有使用 lmflow_set_log_callback 的测试都必须持此锁。
@@ -17,7 +17,7 @@ fn log_guard() -> std::sync::MutexGuard<'static, ()> {
 }
 
 fn init() {
-    flow_core::register_builtin_kernels();
+    lmflow::register_builtin_kernels();
 }
 
 /// 两级直通:MVP 的核心用例。
@@ -102,7 +102,7 @@ output_ports: ["out"]
     // 捆绑算子一律用内建类型 —— 因此 C++/Rust/Python 三侧都能直接读
     assert_eq!(
         out.type_id(),
-        flow_core::packet::type_id::I64,
+        lmflow::packet::type_id::I64,
         "output should be the builtin integer type"
     );
     assert_eq!(out.as_i64(), Some(42), "6 * factor(7) = 42");
@@ -520,7 +520,7 @@ fn send_before_start_is_state_error() {
         .unwrap()
         .send(Packet::new(1i32).at(Timestamp(0)))
         .unwrap_err();
-    assert_eq!(err.code(), flow_core::status::code::STATE, "{err}");
+    assert_eq!(err.code(), lmflow::status::code::STATE, "{err}");
 }
 
 #[test]
@@ -529,7 +529,7 @@ fn double_start_is_state_error() {
     let graph = simple_graph();
     graph.start().unwrap();
     let err = graph.start().unwrap_err();
-    assert_eq!(err.code(), flow_core::status::code::STATE, "{err}");
+    assert_eq!(err.code(), lmflow::status::code::STATE, "{err}");
 }
 
 #[test]
@@ -549,7 +549,7 @@ fn send_after_close_is_closed_error() {
     let input = graph.input("in").unwrap();
     graph.close_all_inputs();
     let err = input.send(Packet::new(1i32).at(Timestamp(0))).unwrap_err();
-    assert_eq!(err.code(), flow_core::status::code::CLOSED, "{err}");
+    assert_eq!(err.code(), lmflow::status::code::CLOSED, "{err}");
 }
 
 #[test]
@@ -585,11 +585,11 @@ fn unknown_port_names_are_not_found() {
     let graph = simple_graph();
     assert_eq!(
         graph.input("ghost").unwrap_err().code(),
-        flow_core::status::code::NOT_FOUND
+        lmflow::status::code::NOT_FOUND
     );
     assert_eq!(
         graph.add_poller("ghost").unwrap_err().code(),
-        flow_core::status::code::NOT_FOUND
+        lmflow::status::code::NOT_FOUND
     );
 }
 
@@ -600,7 +600,7 @@ fn cancel_makes_wait_done_report_cancelled() {
     graph.start().unwrap();
     graph.cancel();
     let err = graph.wait_done().unwrap_err();
-    assert_eq!(err.code(), flow_core::status::code::CANCELLED, "{err}");
+    assert_eq!(err.code(), lmflow::status::code::CANCELLED, "{err}");
 }
 
 // ---------------------------------------------------------------- 内省
@@ -679,7 +679,7 @@ max_queued_packets: 2
 /// 而不是误报 `WouldBlock`。旧实现里 `pump_step` 只跑主线程任务,池图上它恒为 false,
 /// 于是阻塞 send 一撞水位就直接报错 —— 本测试就是那个回归的守卫。
 mod slow_sink_kernel {
-    use flow_core::ffi::LMFlowContext;
+    use lmflow::ffi::LMFlowContext;
     use std::ffi::c_void;
     use std::time::Duration;
 
@@ -691,7 +691,7 @@ mod slow_sink_kernel {
     pub fn register() {
         static ONCE: std::sync::Once = std::sync::Once::new();
         ONCE.call_once(|| {
-            let vt = flow_core::ffi::LMFlowKernelVTable {
+            let vt = lmflow::ffi::LMFlowKernelVTable {
                 create: None,
                 get_contract: None,
                 open: None,
@@ -702,7 +702,7 @@ mod slow_sink_kernel {
             let vt: &'static _ = Box::leak(Box::new(vt));
             let name = std::ffi::CString::new("SlowSink").unwrap();
             let rc = unsafe {
-                flow_core::ffi::lmflow_register_kernel(name.as_ptr(), vt, std::ptr::null_mut())
+                lmflow::ffi::lmflow_register_kernel(name.as_ptr(), vt, std::ptr::null_mut())
             };
             assert_eq!(rc, 0, "failed to register SlowSink");
         });
@@ -765,7 +765,7 @@ fn watchdog_warns_on_slow_kernel() {
             MSGS.lock().unwrap_or_else(|e| e.into_inner()).push(s);
         }
     }
-    flow_core::ffi::lmflow_set_log_callback(Some(sink), std::ptr::null_mut());
+    lmflow::ffi::lmflow_set_log_callback(Some(sink), std::ptr::null_mut());
 
     let graph = Graph::from_yaml(
         r#"
@@ -788,7 +788,7 @@ watchdog_ms: 1
     graph
         .wait_done_timeout(std::time::Duration::from_secs(10))
         .unwrap();
-    flow_core::ffi::lmflow_set_log_callback(None, std::ptr::null_mut());
+    lmflow::ffi::lmflow_set_log_callback(None, std::ptr::null_mut());
 
     let msgs = MSGS.lock().unwrap_or_else(|e| e.into_inner());
     assert!(
@@ -1041,7 +1041,7 @@ fn warns_about_unconsumed_ports() {
     init();
     let _log = log_guard();
     WARNINGS.lock().expect("lock poisoned").clear();
-    flow_core::ffi::lmflow_set_log_callback(Some(sink), std::ptr::null_mut());
+    lmflow::ffi::lmflow_set_log_callback(Some(sink), std::ptr::null_mut());
     let _graph = Graph::from_yaml(
         r#"
 nodes:
@@ -1050,7 +1050,7 @@ input_ports: ["in", "unused"]
 "#,
     )
     .unwrap();
-    flow_core::ffi::lmflow_set_log_callback(None, std::ptr::null_mut());
+    lmflow::ffi::lmflow_set_log_callback(None, std::ptr::null_mut());
 
     let w = WARNINGS.lock().expect("lock poisoned").join("\n");
     assert!(

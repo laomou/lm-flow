@@ -10,8 +10,8 @@
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicIsize, Ordering};
 
-use flow_core::packet::{dtype, BufferData, Builtin};
-use flow_core::{Graph, Packet, Timestamp};
+use lmflow::packet::{dtype, BufferData, Builtin};
+use lmflow::{Graph, Packet, Timestamp};
 
 /// 外部 payload 的存活数。创建 +1,drop_fn 被调 -1。
 static ALIVE: AtomicIsize = AtomicIsize::new(0);
@@ -39,7 +39,7 @@ fn tracked_packet(v: i32, ts: i64) -> Packet {
 }
 
 fn linear_graph(kernel: &str) -> Graph {
-    flow_core::register_builtin_kernels();
+    lmflow::register_builtin_kernels();
     Graph::from_yaml(&format!(
         r#"
 nodes:
@@ -109,7 +109,7 @@ fn packets_left_in_queues_are_released_on_graph_drop() {
 fn packets_are_released_when_kernel_fails() {
     let (_lock, base) = accounting();
     {
-        flow_core::register_builtin_kernels();
+        lmflow::register_builtin_kernels();
         // ScaleKernel 契约声明 int;送 type_id=0 会被类型校验拒绝 → 走失败路径
         let graph = Graph::from_yaml(
             r#"
@@ -196,7 +196,7 @@ fn rejected_send_releases_the_packet() {
 /// 线程池 + `max_in_flight` 的多槽管线。并行 in-flight 的每个 context 槽都持有
 /// 本次输入;取消 / 直接销毁 / 失败时,**所有槽**(不只槽 0)都必须归还 payload。
 fn pool_graph_mif(kernel: &str, mif: usize) -> Graph {
-    flow_core::register_builtin_kernels();
+    lmflow::register_builtin_kernels();
     Graph::from_yaml(&format!(
         r#"
 executors:
@@ -336,7 +336,7 @@ fn buffer_addr(p: &Packet) -> usize {
 /// (曾真实发生:输入槽只在下次调用开头才清,导致下游 CoW 永远复制)。
 #[test]
 fn cow_is_zero_copy_on_linear_pipeline() {
-    flow_core::register_builtin_kernels();
+    lmflow::register_builtin_kernels();
     let graph = Graph::from_yaml(
         r#"
 nodes:
@@ -374,7 +374,7 @@ output_ports: ["out"]
 /// 扇出后就地改写:必须复制,且**不污染另一条分支**。
 #[test]
 fn cow_copies_on_fanout_without_polluting_siblings() {
-    flow_core::register_builtin_kernels();
+    lmflow::register_builtin_kernels();
     let graph = Graph::from_yaml(
         r#"
 nodes:
@@ -421,7 +421,7 @@ output_ports: ["oa", "ob"]
 #[test]
 fn steady_state_has_no_accumulation() {
     let (_lock, base) = accounting();
-    flow_core::register_builtin_kernels();
+    lmflow::register_builtin_kernels();
     let graph = linear_graph("PassThroughKernel");
     let poller = graph.add_poller("out").unwrap();
     graph.start().unwrap();

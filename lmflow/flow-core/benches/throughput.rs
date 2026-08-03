@@ -17,7 +17,7 @@ use criterion::measurement::WallTime;
 use criterion::{
     criterion_group, criterion_main, BenchmarkGroup, BenchmarkId, Criterion, Throughput,
 };
-use flow_core::{BufferData, Builtin, Graph, Packet, Timestamp};
+use lmflow::{BufferData, Builtin, Graph, Packet, Timestamp};
 
 /// 每次 Criterion 迭代喂入并排空的包数(吞吐以此为单位)。
 const BATCH: u64 = 256;
@@ -25,7 +25,7 @@ const BATCH: u64 = 256;
 const DT_U8: i32 = 0;
 
 fn init() {
-    flow_core::register_builtin_kernels();
+    lmflow::register_builtin_kernels();
 }
 
 /// U8 buffer 包(InvertKernel 要求 dtype U8 + ndim ≥ 2)。

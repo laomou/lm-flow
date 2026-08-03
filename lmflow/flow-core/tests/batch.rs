@@ -3,10 +3,10 @@
 //! 关键断言:攒够 N 个包一次交给算子(`process()` 用 `input_count`/`input_at` 读整批);
 //! 关流时不足一批也刷出(不丢数据);正常终止。
 
-use flow_core::{Graph, Packet, State, Timestamp};
+use lmflow::{Graph, Packet, State, Timestamp};
 
 fn init() {
-    flow_core::register_builtin_kernels();
+    lmflow::register_builtin_kernels();
 }
 
 const BATCH3: &str = r#"

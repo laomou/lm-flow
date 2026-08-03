@@ -1,6 +1,6 @@
 # 打 tag(v*)时产出两条发布线:
 #   1. 原生 SDK —— 头文件 + 各平台编译好的库(.a/.so/.dylib),挂到 GitHub Release。
-#      这是 C/C++/移动端宿主的主产物(include flow.h + 链 libflow_core)。
+#      这是 C/C++/移动端宿主的主产物(include flow.h + 链 liblmflow)。
 #   2. Python wheel —— 发布到 PyPI(pip install lm-flow)。**只发预编 wheel,不发 sdist**:
 #      装不到匹配平台的 wheel 时 pip 直接失败,而不是在用户机上编译源码。
 #
@@ -37,7 +37,7 @@ jobs:
           path: ./wheelhouse/*.whl
 
   # 原生 SDK:头文件 + 编译好的库(.a 静态 / .so|.dylib 动态)。
-  # 这才是 C/C++/移动端宿主真正要的产物 —— 直接 include flow.h、链 libflow_core。
+  # 这才是 C/C++/移动端宿主真正要的产物 —— 直接 include flow.h、链 liblmflow。
   native:
     name: native ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
@@ -79,9 +79,9 @@ jobs:
           cp lmflow/flow-core/include/lmflow/*.h lmflow/flow-core/include/lmflow/*.hpp "$PKG/include/lmflow/"
           cp LICENSE README.md "$PKG/"
           OUT="lmflow/flow-core/target/${{ matrix.target }}/release"
-          cp "$OUT/libflow_core.a" "$PKG/lib/"                 # 静态库:完整,首选(移动端也用它)
-          cp "$OUT"/libflow_core.so "$PKG/lib/" 2>/dev/null || true    # 桌面 Linux/Android 动态库
-          cp "$OUT"/libflow_core.dylib "$PKG/lib/" 2>/dev/null || true # macOS 动态库
+          cp "$OUT/liblmflow.a" "$PKG/lib/"                 # 静态库:完整,首选(移动端也用它)
+          cp "$OUT"/liblmflow.so "$PKG/lib/" 2>/dev/null || true    # 桌面 Linux/Android 动态库
+          cp "$OUT"/liblmflow.dylib "$PKG/lib/" 2>/dev/null || true # macOS 动态库
           tar czf "$PKG.tar.gz" "$PKG"
           ls -l "$PKG.tar.gz"
       - uses: actions/upload-artifact@v4

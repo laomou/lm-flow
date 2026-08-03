@@ -33,7 +33,7 @@ if(NOT TARGET lmflow::flow_core)
 endif()
 
 add_executable(hello_world_host hello_world_host.cc)
-target_link_libraries(hello_world_host PRIVATE lmflow::flow_core)  # 头 + libflow_core.a + 系统库
+target_link_libraries(hello_world_host PRIVATE lmflow::flow_core)  # 头 + liblmflow.a + 系统库
 
 # 源码构建(add_subdirectory)时:确保 cargo 先出库再链接。装了 SDK 时 flow_engine 不存在,跳过。
 if(TARGET flow_engine)

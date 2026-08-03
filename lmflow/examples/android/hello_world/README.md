@@ -1,13 +1,13 @@
 # Android 集成示例(JNI)
 
 演示如何在 Android 上通过 **JNI** 调用引擎。引擎是可移植的 Rust + C++,交叉编到
-Android 后就是一个普通静态库 `libflow_core.a`;JNI 层只依赖 `include/flow.h` 这一层
+Android 后就是一个普通静态库 `liblmflow.a`;JNI 层只依赖 `include/flow.h` 这一层
 C ABI,不碰引擎内部,也不需要引擎认识 JVM。
 
 ```
 examples/android/
   jni/lmflow_jni.cc     JNI 桥:把 C ABI 暴露成 LmFlow 的 native 方法
-  jni/CMakeLists.txt    NDK 构建:link 预编的 libflow_core.a,产出 liblmflow_jni.so
+  jni/CMakeLists.txt    NDK 构建:link 预编的 liblmflow.a,产出 liblmflow_jni.so
   app/LmFlow.kt         Kotlin 门面 + 用法
 ```
 

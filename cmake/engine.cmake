@@ -11,13 +11,13 @@ else()
 endif()
 
 # flow-core 是独立 crate,target 落在它自己目录下。
-set(FLOW_LIB "${LMFLOW_SRC}/flow-core/target/${_cargo_dir}/libflow_core.a")
+set(FLOW_LIB "${LMFLOW_SRC}/flow-core/target/${_cargo_dir}/liblmflow.a")
 
 find_program(CARGO cargo REQUIRED)
 find_package(Threads REQUIRED)
 
 # cargo 是权威编译器(CMake 不能直接编 Rust);这里只驱动它。build.rs 经 cc 顺带编
-# cpp/ 下的 C++ 算子,一并进 libflow_core.a。ALL:让 `cmake --build` 默认就出这个库。
+# cpp/ 下的 C++ 算子,一并进 liblmflow.a。ALL:让 `cmake --build` 默认就出这个库。
 # 让 flow_engine **每次都调 cargo**(cargo 自己做增量,clean 时秒回)—— 否则 CMake 不追踪
 # .rs 变更、会复用陈旧的 .a(本地增量构建曾因此链到旧符号)。cargo 只在 .a 真变时更新它,
 # 故下游链接仍按需重链。
@@ -25,7 +25,7 @@ add_custom_target(flow_engine ALL
   BYPRODUCTS "${FLOW_LIB}"
   COMMAND ${CARGO} build ${_cargo_flags}
   WORKING_DIRECTORY "${LMFLOW_SRC}/flow-core"
-  COMMENT "cargo build ${_cargo_flags} — Rust engine + C++ kernels → libflow_core.a"
+  COMMENT "cargo build ${_cargo_flags} — Rust engine + C++ kernels → liblmflow.a"
   VERBATIM USES_TERMINAL)
 
 add_library(flow_core STATIC IMPORTED GLOBAL)

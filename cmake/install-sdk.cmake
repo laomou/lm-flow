@@ -1,4 +1,4 @@
-# cmake/install-sdk.cmake —— 安装原生 SDK:公共头 + libflow_core.a + find_package(lmflow) 配置。
+# cmake/install-sdk.cmake —— 安装原生 SDK:公共头 + liblmflow.a + find_package(lmflow) 配置。
 # 由根 CMakeLists include(在定义好 flow_core / FLOW_LIB 之后)。头在 lmflow/ 源码下,
 # 配置模板在仓库根 cmake/。
 

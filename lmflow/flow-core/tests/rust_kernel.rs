@@ -2,7 +2,7 @@
 //!
 //! 用纯 Rust 写算子、注册、建图跑通;并验证 `process` 返 `Err` / panic 都被兜住成图错误(不崩)。
 
-use flow_core::{
+use lmflow::{
     register_kernel, Graph, Kernel, KernelContract, KernelCtx, Packet, State, Timestamp,
 };
 
@@ -13,14 +13,14 @@ struct RustDouble {
 }
 impl Kernel for RustDouble {
     fn get_contract(c: &mut KernelContract) {
-        c.input_type(0, flow_core::packet::type_id::I64);
-        c.output_type(0, flow_core::packet::type_id::I64);
+        c.input_type(0, lmflow::packet::type_id::I64);
+        c.output_type(0, lmflow::packet::type_id::I64);
     }
-    fn open(&mut self, cc: &mut KernelCtx) -> flow_core::Result<()> {
+    fn open(&mut self, cc: &mut KernelCtx) -> lmflow::Result<()> {
         self.factor = cc.option_i64("factor", 2);
         Ok(())
     }
-    fn process(&mut self, cc: &mut KernelCtx) -> flow_core::Result<()> {
+    fn process(&mut self, cc: &mut KernelCtx) -> lmflow::Result<()> {
         let v = cc
             .input(0)
             .and_then(|p| p.as_i64())
@@ -59,7 +59,7 @@ output_ports: ["out"]
 #[derive(Default)]
 struct RustBoom;
 impl Kernel for RustBoom {
-    fn process(&mut self, cc: &mut KernelCtx) -> flow_core::Result<()> {
+    fn process(&mut self, cc: &mut KernelCtx) -> lmflow::Result<()> {
         Err(cc.fail("deliberate failure"))
     }
 }
@@ -91,7 +91,7 @@ output_ports: ["out"]
 #[derive(Default)]
 struct RustPanic;
 impl Kernel for RustPanic {
-    fn process(&mut self, _cc: &mut KernelCtx) -> flow_core::Result<()> {
+    fn process(&mut self, _cc: &mut KernelCtx) -> lmflow::Result<()> {
         panic!("kernel goes boom");
     }
 }

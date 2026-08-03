@@ -70,14 +70,14 @@ jobs:
         run: |
           decl=$(grep -oE "^[A-Za-z_][A-Za-z0-9_ *]*\blmflow_[a-z_0-9]+\(" flow-core/include/lmflow/flow.h \
                  | grep -oE "lmflow_[a-z_0-9]+" | sort -u)
-          syms=$(nm -g --defined-only flow-core/target/release/libflow_core.a \
+          syms=$(nm -g --defined-only flow-core/target/release/liblmflow.a \
                  | grep -oE " T lmflow_[a-z_0-9]+" | grep -oE "lmflow_[a-z_0-9]+" | sort -u)
           missing=$(comm -23 <(echo "$decl") <(echo "$syms"))
           [ -z "$missing" ] || { echo "header 声明了但库里没有:"; echo "$missing"; exit 1; }
       - name: 编译并运行外部 C++ 宿主
         run: |
           g++ -std=c++17 -Wall -Wextra -Werror -Iflow-core/include \
-              examples/cpp/hello_world/hello_world_host.cc flow-core/target/release/libflow_core.a \
+              examples/cpp/hello_world/hello_world_host.cc flow-core/target/release/liblmflow.a \
               -lpthread -ldl -lm -o /tmp/cpp_host
           out=$(/tmp/cpp_host)
           expected=$(for i in $(seq 0 9); do echo "out: $i @ ts=$i"; done)
@@ -195,7 +195,7 @@ jobs:
           # (JNI 符号由 App 的 JVM 在运行时提供,故 -shared 允许其未定义;引擎符号须从 .a 解析)
           "$TOOL/aarch64-linux-android21-clang++" -std=c++17 -Wall -Wextra -Werror \
             -shared -fPIC -Iflow-core/include examples/android/hello_world/jni/lmflow_jni.cc \
-            flow-core/target/aarch64-linux-android/debug/libflow_core.a -llog -o /tmp/liblmflow_jni.so
+            flow-core/target/aarch64-linux-android/debug/liblmflow.a -llog -o /tmp/liblmflow_jni.so
           echo "Android JNI 桥交叉编+链接成功"
       # 鸿蒙/OpenHarmony 标准系统是 target_os=linux(rustc 已确认),与 Linux 走同一套代码路径,
       # 由 rust/external-host 门禁间接覆盖;其 SDK 不在 runner 上,故不单列交叉编译。
@@ -219,7 +219,7 @@ jobs:
           # (只编+链不跑:runner 无真机;链接成功即证明头解析、符号解析、C++ 运行时可链)
           xcrun --sdk iphoneos clang -arch arm64 -miphoneos-version-min=13.0 -Iflow-core/include \
             examples/ios/hello_world/bridge_smoke.c \
-            flow-core/target/aarch64-apple-ios/release/libflow_core.a -lc++ -o /tmp/ios_smoke
+            flow-core/target/aarch64-apple-ios/release/liblmflow.a -lc++ -o /tmp/ios_smoke
           echo "iOS 桥接编译+链接成功"
       - name: Swift 示例类型检查(Demo.swift 对着 C 模块 LmFlowC)
         run: |
@@ -244,7 +244,7 @@ jobs:
       - name: 编译并运行 flow_cv.hpp 测试(含非连续 ROI 拷贝)
         run: |
           g++ -std=c++17 -Wall -Wextra -Werror -Ilmflow/flow-core/include lmflow/flow-core/cpp/tests/flow_cv_test.cc \
-              lmflow/flow-core/target/release/libflow_core.a $(pkg-config --cflags --libs opencv4) \
+              lmflow/flow-core/target/release/liblmflow.a $(pkg-config --cflags --libs opencv4) \
               -lpthread -ldl -lm -o /tmp/flow_cv_test
           /tmp/flow_cv_test
       # 直接证明「Python numpy 图 → C++ OpenCV 算子 → 读回」是同一块内存:开 LMFLOW_WITH_CV_TEST

@@ -2,14 +2,14 @@
 //!
 //! 用 Rust 的 `BufferData` 造输入缓冲、`payload()` 读回输出缓冲,穿过真实图。
 
-use flow_core::packet::Payload;
-use flow_core::{BufferData, Builtin, Graph, Packet, Timestamp};
+use lmflow::packet::Payload;
+use lmflow::{BufferData, Builtin, Graph, Packet, Timestamp};
 
 const DT_U8: i32 = 0;
 const DT_F16: i32 = 6;
 
 fn init() {
-    flow_core::register_builtin_kernels();
+    lmflow::register_builtin_kernels();
 }
 
 /// 造一个一维 u8 缓冲包。

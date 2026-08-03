@@ -290,7 +290,7 @@ typedef struct {
  * Stringify / Sink / Invert / Normalize)。
  *
  * 注意:本函数由捆绑的算子库(cpp/kernels.cc)提供,而非引擎本体 —— 但链接
- * libflow_core 时二者在同一产物内。宿主须在 init_from_yaml **之前**调用一次,
+ * liblmflow 时二者在同一产物内。宿主须在 init_from_yaml **之前**调用一次,
  * 否则会得到「算子未注册」。用显式函数而非静态初始化,是因为静态初始化对象在
  * 静态库中可能被链接器裁剪(见 docs/design.md §14 风险登记)。幂等。 */
 void lmflow_register_builtin_kernels(void);

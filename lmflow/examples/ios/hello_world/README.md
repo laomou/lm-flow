@@ -1,7 +1,7 @@
 # iOS 集成示例(Swift 直调 C ABI)
 
 `flow.h` 是**纯 C ABI**,Swift 通过一个 module map 就能 `import` 并直接调用,无需
-Obj-C 桥。引擎交叉编到 iOS 后是普通静态库 `libflow_core.a`。
+Obj-C 桥。引擎交叉编到 iOS 后是普通静态库 `liblmflow.a`。
 
 ```
 examples/ios/
@@ -21,7 +21,7 @@ examples/ios/
 
 2. **在 Xcode / SwiftPM 里**:
    - 头文件搜索路径加上 `examples/ios`(取 module map)与 `include`;
-   - 链接第 1 步的 `target/aarch64-apple-ios/release/libflow_core.a`,并加 `-lc++`
+   - 链接第 1 步的 `target/aarch64-apple-ios/release/liblmflow.a`,并加 `-lc++`
      (引擎的 C++ 算子需要 C++ 运行时);
    - `import LmFlowC` 后即可调用 `lmflow_*`,用法见 `Demo.swift`。
 
@@ -30,7 +30,7 @@ examples/ios/
 `ci.yml` 的 `cross-darwin` job(macOS runner,自带 Xcode iOS SDK)会:
 - `cargo build --target aarch64-apple-ios` 交叉编引擎;
 - 用 `xcrun --sdk iphoneos clang -arch arm64` **编译并链接** `bridge_smoke.c` +
-  `libflow_core.a` 成一个 iOS arm64 可执行 —— 证明 C ABI 头在 iOS 下能解析、
+  `liblmflow.a` 成一个 iOS arm64 可执行 —— 证明 C ABI 头在 iOS 下能解析、
   符号能解析、C++ 运行时能链。(不跑:runner 无真机/模拟器;可移植性由链接成功保证。)
 
 ## 真实数据

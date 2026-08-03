@@ -23,14 +23,13 @@ First-party source lives under `lmflow/`; build files and the vendored submodule
 ```text
 lm-flow/
 ├── lmflow/                    All first-party source
-│   ├── flow-core/             Engine — standalone Rust crate (package lmflow-core, lib flow_core)
+│   ├── flow-core/             Engine — the lmflow crate (package = lib = lmflow → liblmflow.a; C ABI staticlib + cdylib)
 │   │   ├── build.rs           Compiles cpp/ via `cc` and links it in
 │   │   ├── Cargo.toml · Cargo.lock
 │   │   ├── src/ · tests/      engine sources + ABI-layout consistency tests
 │   │   ├── include/lmflow/    Public headers — flow.h (C ABI, only stable interface) · flow.hpp (C++ sugar) · flow_cv.hpp · flow_platform_log.hpp
 │   │   └── cpp/               C++ kernels: kernels/ (built-ins) · abi_assert.cc · tests/
 │   ├── python/                pybind11 bindings (src/) + the lmflow package + CMakeLists
-│   ├── rust/                  lmflow facade crate (re-exports lmflow-core; external `use lmflow::`)
 │   └── examples/              each example is self-contained: examples/<lang>/<name>/
 │       ├── cpp/hello_world/    standalone C++ project (find_package or build-from-source)
 │       ├── python/             hello_world/, realtime_pipeline/, opencv_pipeline/
@@ -137,25 +136,25 @@ C/C++ and mobile hosts don't use pip — they use the **headers + library** dire
 ```text
 lmflow-v0.1.0-linux-x86_64/
 ├── include/lmflow/   flow.h · flow.hpp · flow_cv.hpp · flow_platform_log.hpp
-└── lib/       libflow_core.a (static, self-contained, preferred) · libflow_core.so (shared)
+└── lib/       liblmflow.a (static, self-contained, preferred) · liblmflow.so (shared)
 ```
 
 ```bash
 # Link the static library (recommended, especially for mobile embedding):
-g++ -std=c++17 -Iinclude my_host.cc lib/libflow_core.a -lpthread -ldl -lm -o my_host
+g++ -std=c++17 -Iinclude my_host.cc lib/liblmflow.a -lpthread -ldl -lm -o my_host
 ```
 
 Or build one yourself locally:
 
 ```bash
 cd lmflow/flow-core
-cargo build --release          # → lmflow/flow-core/target/release/libflow_core.{a,so}
+cargo build --release          # → lmflow/flow-core/target/release/liblmflow.{a,so}
 # the headers live under lmflow/flow-core/include/lmflow
 ```
 
 ### Build & consume with CMake
 
-CMake is the top-level build for the C++/native side; it lives at the repo root and **drives cargo** (which builds the Rust engine + C++ kernels into `libflow_core`), builds the C++ examples/tests, and installs a `find_package` config:
+CMake is the top-level build for the C++/native side; it lives at the repo root and **drives cargo** (which builds the Rust engine + C++ kernels into `liblmflow`), builds the C++ examples/tests, and installs a `find_package` config:
 
 ```bash
 cmake -B build -DCMAKE_BUILD_TYPE=Release
@@ -168,7 +167,7 @@ Consumers then just:
 
 ```cmake
 find_package(lmflow REQUIRED)
-target_link_libraries(my_app PRIVATE lmflow::flow_core)   # headers + libflow_core.a + system libs
+target_link_libraries(my_app PRIVATE lmflow::flow_core)   # headers + liblmflow.a + system libs
 ```
 
 > Rust developers use `cargo` in `lmflow/flow-core`; Python users just `pip install lm-lmflow` (prebuilt wheels). The wheel is built by **scikit-build-core driving this same root CMake** (`-DLMFLOW_BUILD_PYTHON=ON`), so there is one build definition, not three.

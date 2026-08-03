@@ -10,17 +10,17 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 
-use flow_core::{Graph, Packet, Timestamp};
+use lmflow::{Graph, Packet, Timestamp};
 
 fn init() {
-    flow_core::register_builtin_kernels();
+    lmflow::register_builtin_kernels();
 }
 
 /// 需要一个可重入的、耗时可控的 Python/C++ 算子。这里用 Rust 侧的自定义 C 回调注册一个
 /// 「睡 (10 - ts) 毫秒后把 ts 原样输出」的算子 —— ts 越小睡越久,故完成顺序与 ts 相反。
 mod reverse_sleep_kernel {
     use super::*;
-    use flow_core::ffi::{LMFlowContext, LMFlowContract};
+    use lmflow::ffi::{LMFlowContext, LMFlowContract};
     use std::ffi::c_void;
 
     // 记录 process 的**进入**顺序与并发峰值,用来证明并行。
@@ -34,11 +34,11 @@ mod reverse_sleep_kernel {
         let cur = CUR_CONCURRENCY.fetch_add(1, Ordering::SeqCst) + 1;
         MAX_CONCURRENCY.fetch_max(cur, Ordering::SeqCst);
 
-        let ts = flow_core::ffi::lmflow_ctx_input_timestamp(ctx);
+        let ts = lmflow::ffi::lmflow_ctx_input_timestamp(ctx);
         // ts 越小睡越久:制造「完成顺序与 ts 相反」。
         let sleep_ms = (70 - ts * 10).clamp(5, 70) as u64;
         std::thread::sleep(Duration::from_millis(sleep_ms));
-        flow_core::ffi::lmflow_ctx_forward(ctx, 0, 0); // 原样转发 0->0
+        lmflow::ffi::lmflow_ctx_forward(ctx, 0, 0); // 原样转发 0->0
 
         CUR_CONCURRENCY.fetch_sub(1, Ordering::SeqCst);
         0
@@ -50,7 +50,7 @@ mod reverse_sleep_kernel {
     pub fn register() {
         static ONCE: std::sync::Once = std::sync::Once::new();
         ONCE.call_once(|| {
-            let vt = flow_core::ffi::LMFlowKernelVTable {
+            let vt = lmflow::ffi::LMFlowKernelVTable {
                 create: Some(create),
                 get_contract: None,
                 open: None,
@@ -62,7 +62,7 @@ mod reverse_sleep_kernel {
             let vt: &'static _ = Box::leak(Box::new(vt));
             let name = std::ffi::CString::new("ReverseSleep").unwrap();
             let rc = unsafe {
-                flow_core::ffi::lmflow_register_kernel(name.as_ptr(), vt, std::ptr::null_mut())
+                lmflow::ffi::lmflow_register_kernel(name.as_ptr(), vt, std::ptr::null_mut())
             };
             assert_eq!(rc, 0, "failed to register ReverseSleep");
         });
@@ -228,22 +228,22 @@ output_ports: ["out"]
 /// 数据配错),且下游按时间戳单调。
 mod reverse_sleep2_kernel {
     use super::*;
-    use flow_core::ffi::LMFlowContext;
+    use lmflow::ffi::LMFlowContext;
     use std::ffi::c_void;
 
     unsafe extern "C" fn process(_self: *mut c_void, ctx: *mut LMFlowContext) -> i32 {
-        let ts = flow_core::ffi::lmflow_ctx_input_timestamp(ctx);
+        let ts = lmflow::ffi::lmflow_ctx_input_timestamp(ctx);
         let sleep_ms = (70 - ts * 10).clamp(5, 70) as u64;
         std::thread::sleep(Duration::from_millis(sleep_ms));
         // 两口都到齐才会被调用(sync);把 0 口原样转发,一个对齐时刻产出一个包。
-        flow_core::ffi::lmflow_ctx_forward(ctx, 0, 0);
+        lmflow::ffi::lmflow_ctx_forward(ctx, 0, 0);
         0
     }
 
     pub fn register() {
         static ONCE: std::sync::Once = std::sync::Once::new();
         ONCE.call_once(|| {
-            let vt = flow_core::ffi::LMFlowKernelVTable {
+            let vt = lmflow::ffi::LMFlowKernelVTable {
                 create: None,
                 get_contract: None,
                 open: None,
@@ -254,7 +254,7 @@ mod reverse_sleep2_kernel {
             let vt: &'static _ = Box::leak(Box::new(vt));
             let name = std::ffi::CString::new("ReverseSleep2").unwrap();
             let rc = unsafe {
-                flow_core::ffi::lmflow_register_kernel(name.as_ptr(), vt, std::ptr::null_mut())
+                lmflow::ffi::lmflow_register_kernel(name.as_ptr(), vt, std::ptr::null_mut())
             };
             assert_eq!(rc, 0, "failed to register ReverseSleep2");
         });

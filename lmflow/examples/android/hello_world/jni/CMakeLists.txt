@@ -19,8 +19,8 @@ else()
 endif()
 
 get_filename_component(LMFLOW_SRC "${CMAKE_CURRENT_SOURCE_DIR}/../../../.." ABSOLUTE)
-set(FLOW_CORE "${LMFLOW_SRC}/flow-core/target/${RUST_TARGET}/release/libflow_core.a"
-    CACHE FILEPATH "为该 ABI 预编的 libflow_core.a")
+set(FLOW_CORE "${LMFLOW_SRC}/flow-core/target/${RUST_TARGET}/release/liblmflow.a"
+    CACHE FILEPATH "为该 ABI 预编的 liblmflow.a")
 
 add_library(lmflow_jni SHARED lmflow_jni.cc)
 target_include_directories(lmflow_jni PRIVATE "${LMFLOW_SRC}/flow-core/include")

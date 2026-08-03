@@ -5,7 +5,7 @@
  *   input1 → node1(PassThrough) → input2 → node2(PassThrough) → output2
  *
  * 本文件不属于 cargo 构建(仓库内示例宿主是 Rust)。外部用户按自己的构建系统:
- *   g++ -std=c++17 -I<flow-core/include> hello_world_host.cc -lflow_core -lpthread
+ *   g++ -std=c++17 -I<flow-core/include> hello_world_host.cc -llmflow -lpthread
  */
 #include <cstdio>
 #include <cstdlib>

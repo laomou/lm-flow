@@ -25,14 +25,13 @@
 ```text
 lm-flow/
 ├── lmflow/                    第一方源码
-│   ├── flow-core/             引擎 —— 独立 Rust crate(发布名 lmflow-core;lib flow_core)
+│   ├── flow-core/             引擎 —— lmflow crate(包名=库名=lmflow → liblmflow.a;C ABI staticlib+cdylib)
 │   │   ├── build.rs           用 cc 编译 cpp/ 并链入
 │   │   ├── Cargo.toml · Cargo.lock
 │   │   ├── src/ · tests/      引擎源码 + ABI 布局一致性测试
 │   │   ├── include/lmflow/    公共头 —— flow.h(C ABI,唯一稳定接口)· flow.hpp(C++ 糖层)· flow_cv.hpp · flow_platform_log.hpp
 │   │   └── cpp/               C++ 算子:kernels/(内置)· abi_assert.cc · tests/
 │   ├── python/                pybind11 绑定(src/)+ lmflow 包 + CMakeLists
-│   ├── rust/                  lmflow 门面 crate(re-export lmflow-core;外部 use lmflow::)
 │   └── examples/              每个示例是独立工程:examples/<lang>/<name>/
 │       ├── cpp/hello_world/    独立 C++ 工程(find_package 或从源码构建)
 │       ├── python/             hello_world/、realtime_pipeline/、opencv_pipeline/
@@ -141,25 +140,25 @@ C/C++ 或移动端宿主不走 pip —— 直接用**头文件 + 库**。每个 
 ```text
 lmflow-v0.1.0-linux-x86_64/
 ├── include/lmflow/   flow.h · flow.hpp · flow_cv.hpp · flow_platform_log.hpp
-└── lib/       libflow_core.a(静态,完整,首选)· libflow_core.so(动态)
+└── lib/       liblmflow.a(静态,完整,首选)· liblmflow.so(动态)
 ```
 
 ```bash
 # 链静态库(推荐,尤其移动端嵌入):
-g++ -std=c++17 -Iinclude my_host.cc lib/libflow_core.a -lpthread -ldl -lm -o my_host
+g++ -std=c++17 -Iinclude my_host.cc lib/liblmflow.a -lpthread -ldl -lm -o my_host
 ```
 
 本地自己出一份也行:
 
 ```bash
 cd lmflow/flow-core
-cargo build --release          # → lmflow/flow-core/target/release/libflow_core.{a,so}
+cargo build --release          # → lmflow/flow-core/target/release/liblmflow.{a,so}
 # 头文件在 lmflow/flow-core/include/lmflow 下
 ```
 
 ### 用 CMake 构建与消费
 
-C++/原生侧的顶层构建是 CMake,它在仓库根,**驱动 cargo**(由 cargo 把 Rust 引擎 + C++ 算子编成 `libflow_core`),再编 C++ 示例/测试,并安装出 `find_package` 配置:
+C++/原生侧的顶层构建是 CMake,它在仓库根,**驱动 cargo**(由 cargo 把 Rust 引擎 + C++ 算子编成 `liblmflow`),再编 C++ 示例/测试,并安装出 `find_package` 配置:
 
 ```bash
 cmake -B build -DCMAKE_BUILD_TYPE=Release
@@ -172,7 +171,7 @@ cmake --install build --prefix /opt/lmflow   # → headers + lib + lib/cmake/lmf
 
 ```cmake
 find_package(lmflow REQUIRED)
-target_link_libraries(my_app PRIVATE lmflow::flow_core)   # 头 + libflow_core.a + 系统库
+target_link_libraries(my_app PRIVATE lmflow::flow_core)   # 头 + liblmflow.a + 系统库
 ```
 
 > Rust 开发者在 `lmflow/flow-core` 里用 `cargo`;Python 用户直接 `pip install lm-lmflow`(预编 wheel)。

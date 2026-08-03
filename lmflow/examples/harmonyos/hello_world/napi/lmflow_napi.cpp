@@ -2,7 +2,7 @@
  * lmflow_napi.cpp —— HarmonyOS NAPI 原生模块:把引擎 C ABI 暴露给 ArkTS。
  *
  * OHOS(标准系统)是 target_os=linux —— 引擎按 OHOS 目标交叉编后就是普通静态库
- * libflow_core.a,NAPI 层只依赖 include/flow.h。ArkTS 侧 `import lmflow` 后调用 runScale。
+ * liblmflow.a,NAPI 层只依赖 include/flow.h。ArkTS 侧 `import lmflow` 后调用 runScale。
  * 跨界数据用内建类型(I64),与 C++/Kotlin/Swift/Python 侧一致。
  *
  * 构建见同目录 CMakeLists.txt 与 examples/harmonyos/README.md(用 DevEco Studio 的 CMake)。

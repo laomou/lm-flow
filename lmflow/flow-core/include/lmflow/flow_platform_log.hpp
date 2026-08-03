@@ -7,7 +7,7 @@
  *     #include "lmflow/flow_platform_log.hpp"
  *     lmflow::InstallPlatformLogSink();   // 之后 core + 算子日志都进平台日志
  *
- * 平台选择发生在**宿主编译期**(下面的 #ifdef),所以 libflow_core 仍然零平台依赖 ——
+ * 平台选择发生在**宿主编译期**(下面的 #ifdef),所以 liblmflow 仍然零平台依赖 ——
  * 是宿主在链接 -llog / libhilog / 系统框架,不是引擎。想要别的去向(文件、崩溃上报、
  * 测试缓冲、什么都不做)就别用本头,自己给 lmflow_set_log_callback 传一个 sink 即可。
  *

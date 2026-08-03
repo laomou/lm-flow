@@ -11,7 +11,7 @@
 
 use std::mem::{align_of, offset_of, size_of};
 
-use flow_core::ffi::{LMFlowBuffer, LMFlowNodeStats, LMFlowPacket};
+use lmflow::ffi::{LMFlowBuffer, LMFlowNodeStats, LMFlowPacket};
 
 #[test]
 fn lmflow_packet_layout() {
@@ -50,18 +50,18 @@ fn flow_node_stats_uses_struct_size_for_forward_compat() {
 #[test]
 fn abi_version_matches_header() {
     // include/flow.h: #define LMFLOW_ABI_VERSION 1u
-    assert_eq!(flow_core::ffi::lmflow_abi_version(), 1);
+    assert_eq!(lmflow::ffi::lmflow_abi_version(), 1);
 }
 
 #[test]
 fn invalid_id_matches_header() {
     // include/flow.h: #define LMFLOW_INVALID_ID ((size_t)-1)
-    assert_eq!(flow_core::ffi::INVALID_ID, usize::MAX);
+    assert_eq!(lmflow::ffi::INVALID_ID, usize::MAX);
 }
 
 #[test]
 fn status_codes_match_header() {
-    use flow_core::status::code;
+    use lmflow::status::code;
     assert_eq!(code::OK, 0);
     assert_eq!(code::INVALID_ARG, 1);
     assert_eq!(code::NOT_FOUND, 2);
@@ -78,7 +78,7 @@ fn status_codes_match_header() {
 
 #[test]
 fn builtin_type_ids_match_header() {
-    use flow_core::packet::type_id;
+    use lmflow::packet::type_id;
     assert_eq!(type_id::NONE, 0);
     assert_eq!(type_id::BYTES, 1);
     assert_eq!(type_id::I64, 2);
@@ -91,7 +91,7 @@ fn builtin_type_ids_match_header() {
 
 #[test]
 fn dtype_ids_and_sizes_match_header() {
-    use flow_core::packet::{dtype, dtype_size};
+    use lmflow::packet::{dtype, dtype_size};
     assert_eq!(dtype::U8, 0);
     assert_eq!(dtype::I8, 1);
     assert_eq!(dtype::U16, 2);
@@ -106,7 +106,7 @@ fn dtype_ids_and_sizes_match_header() {
 
 #[test]
 fn timestamp_sentinels_match_header() {
-    use flow_core::Timestamp;
+    use lmflow::Timestamp;
     assert_eq!(Timestamp::unset().0, i64::MIN);
     assert_eq!(Timestamp::unstarted().0, i64::MIN + 1);
     assert_eq!(Timestamp::pre_stream().0, i64::MIN + 2);
@@ -120,5 +120,5 @@ fn timestamp_sentinels_match_header() {
 #[test]
 fn max_dims_matches_header() {
     // include/flow.h: #define LMFLOW_MAX_DIMS 8 —— 改它会改变 LMFlowBuffer 布局
-    assert_eq!(flow_core::packet::MAX_DIMS, 8);
+    assert_eq!(lmflow::packet::MAX_DIMS, 8);
 }

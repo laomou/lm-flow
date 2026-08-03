@@ -5,10 +5,10 @@
 
 use std::time::Duration;
 
-use flow_core::{Graph, Packet, Timestamp};
+use lmflow::{Graph, Packet, Timestamp};
 
 fn init() {
-    flow_core::register_builtin_kernels();
+    lmflow::register_builtin_kernels();
 }
 
 fn zip_graph(policy: &str) -> Graph {

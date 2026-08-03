@@ -1,5 +1,5 @@
 [package]
-name = "lmflow-core"
+name = "lmflow"
 version = "0.2.0"
 description = "Dataflow-graph compute engine: a Rust scheduler behind a stable C ABI, with C++ kernels"
 edition = "2021"
@@ -12,9 +12,9 @@ categories = ["concurrency", "multimedia"]
 exclude = ["cpp/tests/**"]
 
 [lib]
-name = "flow_core"
-# lib   : 仓库内 Rust host / 测试直接依赖(不过 FFI)
-# staticlib / cdylib : 供外部 C/C++ host 链接
+name = "lmflow"
+# lib   : 仓库内 Rust host / 测试直接依赖(不过 FFI),外部 `use lmflow::`
+# staticlib / cdylib : 供外部 C/C++ host 链接(liblmflow.a / liblmflow.so)
 crate-type = ["lib", "staticlib", "cdylib"]
 
 [dependencies]

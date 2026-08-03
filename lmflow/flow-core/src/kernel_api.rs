@@ -9,21 +9,21 @@
 //! ```ignore
 //! #[derive(Default)]
 //! struct Double { factor: i64 }
-//! impl flow_core::Kernel for Double {
-//!     fn get_contract(c: &mut flow_core::KernelContract) {
-//!         c.input_type(0, flow_core::packet::type_id::I64);
-//!         c.output_type(0, flow_core::packet::type_id::I64);
+//! impl lmflow::Kernel for Double {
+//!     fn get_contract(c: &mut lmflow::KernelContract) {
+//!         c.input_type(0, lmflow::packet::type_id::I64);
+//!         c.output_type(0, lmflow::packet::type_id::I64);
 //!     }
-//!     fn open(&mut self, cc: &mut flow_core::KernelCtx) -> flow_core::Result<()> {
+//!     fn open(&mut self, cc: &mut lmflow::KernelCtx) -> lmflow::Result<()> {
 //!         self.factor = cc.option_i64("factor", 2);
 //!         Ok(())
 //!     }
-//!     fn process(&mut self, cc: &mut flow_core::KernelCtx) -> flow_core::Result<()> {
+//!     fn process(&mut self, cc: &mut lmflow::KernelCtx) -> lmflow::Result<()> {
 //!         let v = cc.input(0).and_then(|p| p.as_i64()).ok_or_else(|| cc.fail("need i64"))?;
-//!         cc.emit(0, flow_core::Packet::from_i64(v * self.factor))
+//!         cc.emit(0, lmflow::Packet::from_i64(v * self.factor))
 //!     }
 //! }
-//! flow_core::register_kernel::<Double>("Double").unwrap();
+//! lmflow::register_kernel::<Double>("Double").unwrap();
 //! ```
 
 use std::ffi::c_void;

@@ -1,13 +1,13 @@
 # HarmonyOS 集成示例(NAPI + ArkTS)
 
 HarmonyOS 上原生能力通过 **NAPI** 暴露给 ArkTS。**OHOS 标准系统是 `target_os=linux`**
-(rustc 已确认),引擎按 OHOS target 交叉编后就是普通静态库 `libflow_core.a`;NAPI 层只
+(rustc 已确认),引擎按 OHOS target 交叉编后就是普通静态库 `liblmflow.a`;NAPI 层只
 依赖 `include/flow.h`。
 
 ```
 examples/harmonyos/
   napi/lmflow_napi.cpp   NAPI 模块:把 C ABI 暴露成 ArkTS 可调的 runScale
-  napi/CMakeLists.txt    OHOS NDK 构建:link 预编 libflow_core.a + libace_napi,产出 liblmflow.so
+  napi/CMakeLists.txt    OHOS NDK 构建:link 预编 liblmflow.a + libace_napi,产出 liblmflow.so
   ets/Index.ets          ArkTS 用法
 ```
 

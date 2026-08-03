@@ -3,10 +3,10 @@
 //! 核心断言:子图展开出的图与手写扁平图**行为等价**(同样的直通链),且运行时引擎
 //! 完全不感知子图 —— 展开是纯建图期变换。
 
-use flow_core::{Graph, Packet, State, Timestamp};
+use lmflow::{Graph, Packet, State, Timestamp};
 
 fn init() {
-    flow_core::register_builtin_kernels();
+    lmflow::register_builtin_kernels();
 }
 
 /// 把一张直通图跑 10 个包,校验值与时间戳原样穿过。用于比对「子图展开 == 手写扁平」。

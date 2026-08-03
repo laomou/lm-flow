@@ -11,10 +11,10 @@ use std::sync::atomic::{AtomicIsize, AtomicUsize, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 
-use flow_core::{Graph, Packet, Timestamp};
+use lmflow::{Graph, Packet, Timestamp};
 
 fn init() {
-    flow_core::register_builtin_kernels();
+    lmflow::register_builtin_kernels();
 }
 
 /// 与 memory.rs 同样的所有权记账,但用于并发场景。
@@ -225,7 +225,7 @@ output_ports: ["oa", "ob"]
     graph.close_all_inputs();
     graph.wait_done_timeout(Duration::from_secs(30)).unwrap();
 
-    let count = |p: &flow_core::Poller| {
+    let count = |p: &lmflow::Poller| {
         let mut n = 0;
         while p.try_next().is_some() {
             n += 1;
@@ -480,7 +480,7 @@ output_ports: ["o1", "o2"]
     graph.close_all_inputs();
     graph.wait_done_timeout(Duration::from_secs(60)).unwrap();
 
-    let count = |p: &flow_core::Poller| {
+    let count = |p: &lmflow::Poller| {
         let mut n = 0;
         while p.try_next().is_some() {
             n += 1;

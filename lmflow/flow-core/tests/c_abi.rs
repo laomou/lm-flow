@@ -6,7 +6,7 @@
 
 use std::ffi::{c_char, c_void, CStr, CString};
 
-use flow_core::ffi::*;
+use lmflow::ffi::*;
 
 fn cs(s: &str) -> CString {
     CString::new(s).unwrap()
@@ -59,7 +59,7 @@ fn abi_version_and_handshake() {
 /// 与 examples/cpp/hello_world/hello_world_host.cc 等价的完整流程。
 #[test]
 fn full_pipeline_through_c_abi() {
-    flow_core::register_builtin_kernels();
+    lmflow::register_builtin_kernels();
     unsafe {
         let g = lmflow_graph_new();
         assert!(!g.is_null());
@@ -336,7 +336,7 @@ fn null_pointers_do_not_crash() {
 /// 绝不 use-after-free。这守卫的是 Python/C++ 宿主先销毁 graph、后用 input/poller 的场景。
 #[test]
 fn handles_stay_safe_after_graph_free() {
-    flow_core::register_builtin_kernels();
+    lmflow::register_builtin_kernels();
     unsafe {
         let g = lmflow_graph_new();
         let yaml = cs(CONFIG);
@@ -425,7 +425,7 @@ fn to_dot_on_uninitialized_graph_is_valid_empty_digraph() {
 
 #[test]
 fn introspection_through_c_abi() {
-    flow_core::register_builtin_kernels();
+    lmflow::register_builtin_kernels();
     unsafe {
         let g = lmflow_graph_new();
         let yaml = cs(CONFIG);
@@ -498,7 +498,7 @@ fn introspection_through_c_abi() {
 
 #[test]
 fn observer_receives_packets() {
-    flow_core::register_builtin_kernels();
+    lmflow::register_builtin_kernels();
 
     // 用 Mutex 而非 static mut:后者创建共享引用本身就是坏实践
     static SEEN: std::sync::Mutex<Vec<i32>> = std::sync::Mutex::new(Vec::new());
@@ -551,7 +551,7 @@ fn log_callback_receives_engine_messages() {
         assert!(!msg.is_null());
         COUNT.fetch_add(1, Ordering::SeqCst);
     }
-    flow_core::register_builtin_kernels();
+    lmflow::register_builtin_kernels();
     unsafe {
         lmflow_set_log_callback(Some(sink), std::ptr::null_mut());
         let g = lmflow_graph_new();

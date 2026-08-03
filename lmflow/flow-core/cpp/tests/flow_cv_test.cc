@@ -1,6 +1,6 @@
 // flow_cv.hpp 的单元测试 —— 需要 OpenCV,并链接引擎库(用到 lmflow_packet_* C ABI)。
 //
-//   g++ -std=c++17 -Iinclude cpp/flow_cv_test.cc target/release/libflow_core.a
+//   g++ -std=c++17 -Iinclude cpp/flow_cv_test.cc target/release/liblmflow.a
 //       $(pkg-config --cflags --libs opencv4) -lpthread -ldl -lm -o flow_cv_test
 //   (以上两行是一条命令;这里不用反斜杠续行,免得 -Werror=comment 报「多行注释」)
 //
