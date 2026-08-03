@@ -8,7 +8,7 @@ A dataflow-graph engine: computation is described as a **directed graph** — no
 
 ```text
   Host (Rust / C++ / Python) ── drives the graph
-        │  C ABI  (lmflow/include/flow.h)
+        │  C ABI  (lmflow/flow.h)
         ▼
   Engine (Rust): scheduler · executors · edge queues · topology · YAML
         │  C ABI  (callbacks)
@@ -23,18 +23,14 @@ First-party source lives under `lmflow/`; build files and the vendored submodule
 ```text
 lm-flow/
 ├── lmflow/                    All first-party source
-│   ├── flow-core/             Engine — standalone Rust crate (lib + staticlib + cdylib)
-│   │   ├── build.rs           Compiles ../cpp via `cc` and links it in
+│   ├── flow-core/             Engine — standalone Rust crate (package lmflow-core, lib flow_core)
+│   │   ├── build.rs           Compiles cpp/ via `cc` and links it in
 │   │   ├── Cargo.toml · Cargo.lock
-│   │   ├── src/ · tests/ (ABI layout consistency) · examples/ (Rust hosts)
-│   ├── include/               Public headers (authoritative C ABI + optional C++ sugar)
-│   │   ├── flow.h             C ABI — the only stable interface
-│   │   └── flow.hpp           C++ kernel sugar (header-only, not ABI)
-│   ├── cpp/                    C++ kernels
-│   │   ├── kernels/            Built-in sample kernels (11, one file per kernel + register.cc)
-│   │   ├── abi_assert.cc       Compile-time checks of the cross-boundary struct layout
-│   │   └── tests/              C++ test executables (flow.hpp unit test, CV conversion test)
+│   │   ├── src/ · tests/      engine sources + ABI-layout consistency tests
+│   │   ├── include/lmflow/    Public headers — flow.h (C ABI, only stable interface) · flow.hpp (C++ sugar) · flow_cv.hpp · flow_platform_log.hpp
+│   │   └── cpp/               C++ kernels: kernels/ (built-ins) · abi_assert.cc · tests/
 │   ├── python/                pybind11 bindings (src/) + the lmflow package + CMakeLists
+│   ├── rust/                  lmflow facade crate (re-exports lmflow-core; external `use lmflow::`)
 │   └── examples/              each example is self-contained: examples/<lang>/<name>/
 │       ├── cpp/hello_world/    standalone C++ project (find_package or build-from-source)
 │       ├── python/             hello_world/, realtime_pipeline/, opencv_pipeline/
@@ -140,7 +136,7 @@ C/C++ and mobile hosts don't use pip — they use the **headers + library** dire
 
 ```text
 lmflow-v0.1.0-linux-x86_64/
-├── include/   flow.h · flow.hpp · flow_cv.hpp · flow_platform_log.hpp
+├── include/lmflow/   flow.h · flow.hpp · flow_cv.hpp · flow_platform_log.hpp
 └── lib/       libflow_core.a (static, self-contained, preferred) · libflow_core.so (shared)
 ```
 
@@ -154,7 +150,7 @@ Or build one yourself locally:
 ```bash
 cd lmflow/flow-core
 cargo build --release          # → lmflow/flow-core/target/release/libflow_core.{a,so}
-# the headers are the three under lmflow/include
+# the headers live under lmflow/flow-core/include/lmflow
 ```
 
 ### Build & consume with CMake
@@ -177,6 +173,6 @@ target_link_libraries(my_app PRIVATE lmflow::flow_core)   # headers + libflow_co
 
 > Rust developers use `cargo` in `lmflow/flow-core`; Python users just `pip install lm-lmflow` (prebuilt wheels). The wheel is built by **scikit-build-core driving this same root CMake** (`-DLMFLOW_BUILD_PYTHON=ON`), so there is one build definition, not three.
 
-The C ABI is the only stable interface (`lmflow/include/flow.h`); `flow.hpp` is the optional C++ kernel sugar, `flow_cv.hpp` is OpenCV interop, and `flow_platform_log.hpp` bridges engine logs to the platform logger (logcat / os_log / HiLog) in one call — `lmflow::InstallPlatformLogSink()`.
+The C ABI is the only stable interface (`lmflow/flow.h`); `flow.hpp` is the optional C++ kernel sugar, `flow_cv.hpp` is OpenCV interop, and `flow_platform_log.hpp` bridges engine logs to the platform logger (logcat / os_log / HiLog) in one call — `lmflow::InstallPlatformLogSink()`.
 
 Mobile integration examples: [`lmflow/examples/android/hello_world`](lmflow/examples/android/hello_world) (JNI), [`lmflow/examples/ios/hello_world`](lmflow/examples/ios/hello_world) (Swift), [`lmflow/examples/harmonyos/hello_world`](lmflow/examples/harmonyos/hello_world) (NAPI).

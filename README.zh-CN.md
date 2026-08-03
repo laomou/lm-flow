@@ -9,7 +9,7 @@
 
 ```text
   宿主(Rust / C++ / Python) ── 驱动图
-        │  C ABI  (lmflow/include/flow.h)
+        │  C ABI  (lmflow/flow.h)
         ▼
   引擎(Rust):调度器 · 执行器 · 边队列 · 拓扑 · YAML
         │  C ABI  (回调)
@@ -25,18 +25,14 @@
 ```text
 lm-flow/
 ├── lmflow/                    第一方源码
-│   ├── flow-core/             引擎 —— 独立 Rust crate(lib + staticlib + cdylib)
-│   │   ├── build.rs           用 cc 编译 ../cpp 并链入
+│   ├── flow-core/             引擎 —— 独立 Rust crate(发布名 lmflow-core;lib flow_core)
+│   │   ├── build.rs           用 cc 编译 cpp/ 并链入
 │   │   ├── Cargo.toml · Cargo.lock
-│   │   ├── src/ · tests/(ABI 布局一致性) · examples/(Rust 宿主)
-│   ├── include/               公共头(C ABI 权威定义 + 可选 C++ 糖层)
-│   │   ├── flow.h             C ABI —— 唯一稳定接口
-│   │   └── flow.hpp           C++ 算子糖层(header-only,非 ABI)
-│   ├── cpp/                    C++ 算子
-│   │   ├── kernels/            内置示例算子集(11 个,一文件一算子 + register.cc 聚合)
-│   │   ├── abi_assert.cc       跨界结构体布局的编译期校验
-│   │   └── tests/              C++ 测试可执行(flow.hpp 单测、CV 转换测试)
+│   │   ├── src/ · tests/      引擎源码 + ABI 布局一致性测试
+│   │   ├── include/lmflow/    公共头 —— flow.h(C ABI,唯一稳定接口)· flow.hpp(C++ 糖层)· flow_cv.hpp · flow_platform_log.hpp
+│   │   └── cpp/               C++ 算子:kernels/(内置)· abi_assert.cc · tests/
 │   ├── python/                pybind11 绑定(src/)+ lmflow 包 + CMakeLists
+│   ├── rust/                  lmflow 门面 crate(re-export lmflow-core;外部 use lmflow::)
 │   └── examples/              每个示例是独立工程:examples/<lang>/<name>/
 │       ├── cpp/hello_world/    独立 C++ 工程(find_package 或从源码构建)
 │       ├── python/             hello_world/、realtime_pipeline/、opencv_pipeline/
@@ -144,7 +140,7 @@ C/C++ 或移动端宿主不走 pip —— 直接用**头文件 + 库**。每个 
 
 ```text
 lmflow-v0.1.0-linux-x86_64/
-├── include/   flow.h · flow.hpp · flow_cv.hpp · flow_platform_log.hpp
+├── include/lmflow/   flow.h · flow.hpp · flow_cv.hpp · flow_platform_log.hpp
 └── lib/       libflow_core.a(静态,完整,首选)· libflow_core.so(动态)
 ```
 
@@ -158,7 +154,7 @@ g++ -std=c++17 -Iinclude my_host.cc lib/libflow_core.a -lpthread -ldl -lm -o my_
 ```bash
 cd lmflow/flow-core
 cargo build --release          # → lmflow/flow-core/target/release/libflow_core.{a,so}
-# 头文件就是 lmflow/include 下那几个
+# 头文件在 lmflow/flow-core/include/lmflow 下
 ```
 
 ### 用 CMake 构建与消费
@@ -182,6 +178,6 @@ target_link_libraries(my_app PRIVATE lmflow::flow_core)   # 头 + libflow_core.a
 > Rust 开发者在 `lmflow/flow-core` 里用 `cargo`;Python 用户直接 `pip install lm-lmflow`(预编 wheel)。
 > wheel 由 **scikit-build-core 驱动这同一份根 CMake**(`-DLMFLOW_BUILD_PYTHON=ON`)构建 —— 一份构建定义,而非三份。
 
-C ABI 是唯一稳定接口(`lmflow/include/flow.h`);`flow.hpp` 是可选的 C++ 算子糖层,`flow_cv.hpp` 是 OpenCV 互转,`flow_platform_log.hpp` 一行把引擎日志接到平台日志系统(logcat / os_log / HiLog)—— `lmflow::InstallPlatformLogSink()`。
+C ABI 是唯一稳定接口(`lmflow/flow.h`);`flow.hpp` 是可选的 C++ 算子糖层,`flow_cv.hpp` 是 OpenCV 互转,`flow_platform_log.hpp` 一行把引擎日志接到平台日志系统(logcat / os_log / HiLog)—— `lmflow::InstallPlatformLogSink()`。
 
 移动端集成示例:[`lmflow/examples/android/hello_world`](lmflow/examples/android/hello_world)(JNI)、[`lmflow/examples/ios/hello_world`](lmflow/examples/ios/hello_world)(Swift)、[`lmflow/examples/harmonyos/hello_world`](lmflow/examples/harmonyos/hello_world)(NAPI)。

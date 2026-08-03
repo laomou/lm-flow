@@ -20,18 +20,18 @@ endif()
 set(_srcs src/bindings.cc)
 if(LMFLOW_WITH_CV_TEST)
   # 测试专用:把 CV 算子(链 OpenCV)也编进扩展,让 Python 能调用 CvInvertTest。
-  list(APPEND _srcs "${LMFLOW_SRC}/cpp/tests/cv_test_register.cc")
+  list(APPEND _srcs "${LMFLOW_SRC}/flow-core/cpp/tests/cv_test_register.cc")
 endif()
 
 pybind11_add_module(_lmflow ${_srcs})
-target_include_directories(_lmflow PRIVATE "${LMFLOW_SRC}/include" "${NUMPY_INCLUDE}")
+target_include_directories(_lmflow PRIVATE "${LMFLOW_SRC}/flow-core/include" "${NUMPY_INCLUDE}")
 target_link_libraries(_lmflow PRIVATE lmflow::flow_core)
 add_dependencies(_lmflow flow_engine)  # cargo 先出库再链
 
 if(LMFLOW_WITH_CV_TEST)
   find_package(OpenCV REQUIRED)
   target_compile_definitions(_lmflow PRIVATE LMFLOW_WITH_CV_TEST)
-  target_include_directories(_lmflow PRIVATE "${LMFLOW_SRC}/cpp/tests" ${OpenCV_INCLUDE_DIRS})
+  target_include_directories(_lmflow PRIVATE "${LMFLOW_SRC}/flow-core/cpp/tests" ${OpenCV_INCLUDE_DIRS})
   target_link_libraries(_lmflow PRIVATE ${OpenCV_LIBS})
 endif()
 

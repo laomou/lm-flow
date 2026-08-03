@@ -25,22 +25,22 @@ jobs:
       - name: flow.h 作为纯 C11
         run: |
           printf '#include "lmflow/flow.h"\nint main(void){return 0;}\n' > /tmp/c.c
-          gcc -std=c11 -Wall -Wextra -Werror -Iinclude -c /tmp/c.c -o /tmp/c.o
+          gcc -std=c11 -Wall -Wextra -Werror -Iflow-core/include -c /tmp/c.c -o /tmp/c.o
       - name: C++ 算子 + ABI 布局断言
         run: |
-          for f in cpp/kernels/*.cc; do
-            g++ -std=c++17 -Wall -Wextra -Werror -Iinclude -c "$f" -o "/tmp/$(basename "$f").o"
+          for f in flow-core/cpp/kernels/*.cc; do
+            g++ -std=c++17 -Wall -Wextra -Werror -Iflow-core/include -c "$f" -o "/tmp/$(basename "$f").o"
           done
-          g++ -std=c++17 -Wall -Wextra -Werror -Iinclude -c cpp/abi_assert.cc -o /tmp/a.o
-          g++ -std=c++17 -Wall -Wextra -Werror -Iinclude -c examples/cpp/hello_world/hello_world_host.cc -o /tmp/h.o
+          g++ -std=c++17 -Wall -Wextra -Werror -Iflow-core/include -c flow-core/cpp/abi_assert.cc -o /tmp/a.o
+          g++ -std=c++17 -Wall -Wextra -Werror -Iflow-core/include -c examples/cpp/hello_world/hello_world_host.cc -o /tmp/h.o
       - name: flow.hpp 糖层单元测试(异常不穿越 FFI + 构造失败安全)
         run: |
-          g++ -std=c++17 -Wall -Wextra -Werror -Iinclude cpp/tests/flow_hpp_test.cc -o /tmp/flow_hpp_test
+          g++ -std=c++17 -Wall -Wextra -Werror -Iflow-core/include flow-core/cpp/tests/flow_hpp_test.cc -o /tmp/flow_hpp_test
           /tmp/flow_hpp_test
       - name: flow_platform_log.hpp 可编译(桌面 stderr 分支)
         run: |
           printf '#include "lmflow/flow_platform_log.hpp"\nint main(){ lmflow::InstallPlatformLogSink(); }\n' > /tmp/plog.cc
-          g++ -std=c++17 -Wall -Wextra -Werror -Iinclude -c /tmp/plog.cc -o /tmp/plog.o
+          g++ -std=c++17 -Wall -Wextra -Werror -Iflow-core/include -c /tmp/plog.cc -o /tmp/plog.o
 
   rust:
     name: build · rust (fmt/clippy/test)
@@ -68,7 +68,7 @@ jobs:
       - run: cargo build --release --manifest-path flow-core/Cargo.toml
       - name: header 声明与库导出符号对齐
         run: |
-          decl=$(grep -oE "^[A-Za-z_][A-Za-z0-9_ *]*\blmflow_[a-z_0-9]+\(" include/lmflow/flow.h \
+          decl=$(grep -oE "^[A-Za-z_][A-Za-z0-9_ *]*\blmflow_[a-z_0-9]+\(" flow-core/include/lmflow/flow.h \
                  | grep -oE "lmflow_[a-z_0-9]+" | sort -u)
           syms=$(nm -g --defined-only flow-core/target/release/libflow_core.a \
                  | grep -oE " T lmflow_[a-z_0-9]+" | grep -oE "lmflow_[a-z_0-9]+" | sort -u)
@@ -76,7 +76,7 @@ jobs:
           [ -z "$missing" ] || { echo "header 声明了但库里没有:"; echo "$missing"; exit 1; }
       - name: 编译并运行外部 C++ 宿主
         run: |
-          g++ -std=c++17 -Wall -Wextra -Werror -Iinclude \
+          g++ -std=c++17 -Wall -Wextra -Werror -Iflow-core/include \
               examples/cpp/hello_world/hello_world_host.cc flow-core/target/release/libflow_core.a \
               -lpthread -ldl -lm -o /tmp/cpp_host
           out=$(/tmp/cpp_host)
@@ -194,7 +194,7 @@ jobs:
           # examples/android 的 JNI 桥:证明它连同引擎能被 NDK 交叉编+链成 .so
           # (JNI 符号由 App 的 JVM 在运行时提供,故 -shared 允许其未定义;引擎符号须从 .a 解析)
           "$TOOL/aarch64-linux-android21-clang++" -std=c++17 -Wall -Wextra -Werror \
-            -shared -fPIC -Iinclude examples/android/hello_world/jni/lmflow_jni.cc \
+            -shared -fPIC -Iflow-core/include examples/android/hello_world/jni/lmflow_jni.cc \
             flow-core/target/aarch64-linux-android/debug/libflow_core.a -llog -o /tmp/liblmflow_jni.so
           echo "Android JNI 桥交叉编+链接成功"
       # 鸿蒙/OpenHarmony 标准系统是 target_os=linux(rustc 已确认),与 Linux 走同一套代码路径,
@@ -217,7 +217,7 @@ jobs:
           cargo build --release --target aarch64-apple-ios --manifest-path flow-core/Cargo.toml
           # examples/ios 的桥接:iOS SDK 下编译+链接,证明 C ABI 头与库在 iOS 工具链可用
           # (只编+链不跑:runner 无真机;链接成功即证明头解析、符号解析、C++ 运行时可链)
-          xcrun --sdk iphoneos clang -arch arm64 -miphoneos-version-min=13.0 -Iinclude \
+          xcrun --sdk iphoneos clang -arch arm64 -miphoneos-version-min=13.0 -Iflow-core/include \
             examples/ios/hello_world/bridge_smoke.c \
             flow-core/target/aarch64-apple-ios/release/libflow_core.a -lc++ -o /tmp/ios_smoke
           echo "iOS 桥接编译+链接成功"
@@ -243,7 +243,7 @@ jobs:
       - run: cargo build --release --manifest-path lmflow/flow-core/Cargo.toml
       - name: 编译并运行 flow_cv.hpp 测试(含非连续 ROI 拷贝)
         run: |
-          g++ -std=c++17 -Wall -Wextra -Werror -Ilmflow/include lmflow/cpp/tests/flow_cv_test.cc \
+          g++ -std=c++17 -Wall -Wextra -Werror -Ilmflow/flow-core/include lmflow/flow-core/cpp/tests/flow_cv_test.cc \
               lmflow/flow-core/target/release/libflow_core.a $(pkg-config --cflags --libs opencv4) \
               -lpthread -ldl -lm -o /tmp/flow_cv_test
           /tmp/flow_cv_test

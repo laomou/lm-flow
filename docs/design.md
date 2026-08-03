@@ -256,7 +256,7 @@ bool       lmflow_ctx_has_side_packet(const LMFlowContext*, const char* name);
 
 ## 4. 对外 C 接口
 
-> **权威定义见 `include/lmflow/flow.h`**(手写,已通过 `gcc -std=c11 -Wall -Wextra` 与
+> **权威定义见 `flow-core/include/lmflow/flow.h`**(手写,已通过 `gcc -std=c11 -Wall -Wextra` 与
 > `g++ -std=c++17` 双向验证)。本节只列分组,避免文档与 header 双份漂移。
 
 | 分组 | 主要函数 |
@@ -999,24 +999,24 @@ cc.emit(0, packet)
 ```text
 lm-flow/                          仓库根
 ├── lmflow/                       第一方源码
-│   ├── flow-core/                引擎(独立 Rust crate)
-│   │   ├── build.rs              cc 编译 ../cpp 并链入
+│   ├── flow-core/                引擎(独立 Rust crate,发布名 lmflow-core;lib flow_core)
+│   │   ├── build.rs              cc 编译 cpp/ 并链入
 │   │   ├── Cargo.toml · Cargo.lock
 │   │   ├── src/                  timestamp / packet / edge / node / graph / scheduler / ffi / kernel_api …
+│   │   ├── include/              公共头(消费者 #include "lmflow/xxx.h")
+│   │   │   └── lmflow/
+│   │   │       ├── flow.h            C ABI —— 唯一稳定接口(权威定义)
+│   │   │       ├── flow.hpp          C++ 算子糖层(header-only,非 ABI)
+│   │   │       ├── flow_cv.hpp       可选:LMFlowBuffer ↔ cv::Mat(仅需 OpenCV 者 include)
+│   │   │       └── flow_platform_log.hpp  可选:引擎日志接平台日志(logcat/os_log/HiLog)
+│   │   ├── cpp/                  C++ 算子
+│   │   │   ├── kernels/              内置算子集(18 个,一文件一算子 + register.cc)
+│   │   │   ├── abi_assert.cc         跨界结构体布局的编译期校验
+│   │   │   └── tests/                flow_hpp_test.cc / flow_cv_test.cc + CMakeLists
 │   │   ├── tests/                abi_layout.rs 等
 │   │   └── benches/              throughput.rs(Criterion)
-│   ├── include/                  公共头(消费者 #include "lmflow/xxx.h")
-│   │   └── lmflow/
-│   │       ├── flow.h            C ABI —— 唯一稳定接口(权威定义)
-│   │       ├── flow.hpp          C++ 算子糖层(header-only,非 ABI)
-│   │       ├── flow_cv.hpp       可选:LMFlowBuffer ↔ cv::Mat(仅需 OpenCV 者 include)
-│   │       └── flow_platform_log.hpp  可选:引擎日志接平台日志(logcat/os_log/HiLog)
-│   ├── cpp/                      C++ 算子
-│   │   ├── kernels/              内置算子集(18 个,一文件一算子 + register.cc)
-│   │   ├── abi_assert.cc         跨界结构体布局的编译期校验
-│   │   └── tests/                flow_hpp_test.cc / flow_cv_test.cc + CMakeLists
 │   ├── python/                   src/bindings.cc(pybind11)+ lmflow 包 + CMakeLists
-│   ├── rust/                     lmflow 门面 crate(re-export flow-core,外部 use lmflow::)
+│   ├── rust/                     lmflow 门面 crate(re-export lmflow-core,外部 use lmflow::)
 │   └── examples/                 examples/<lang>/<name>/:cpp · python · rust · android · ios · harmonyos
 ├── third_party/pybind11/         vendored 子模块(仅构建 Python wheel 用)
 ├── cmake/                        engine.cmake · install-sdk.cmake · find_package 配置

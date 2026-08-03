@@ -75,8 +75,8 @@ jobs:
         run: |
           VER="${{ github.ref_name }}"
           PKG="lmflow-${VER}-${{ matrix.name }}"
-          mkdir -p "$PKG/include" "$PKG/lib"
-          cp lmflow/include/*.h lmflow/include/*.hpp "$PKG/include/"
+          mkdir -p "$PKG/include/lmflow" "$PKG/lib"
+          cp lmflow/flow-core/include/lmflow/*.h lmflow/flow-core/include/lmflow/*.hpp "$PKG/include/lmflow/"
           cp LICENSE README.md "$PKG/"
           OUT="lmflow/flow-core/target/${{ matrix.target }}/release"
           cp "$OUT/libflow_core.a" "$PKG/lib/"                 # 静态库:完整,首选(移动端也用它)

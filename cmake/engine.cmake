@@ -31,7 +31,7 @@ add_custom_target(flow_engine ALL
 add_library(flow_core STATIC IMPORTED GLOBAL)
 set_target_properties(flow_core PROPERTIES IMPORTED_LOCATION "${FLOW_LIB}")
 target_include_directories(flow_core INTERFACE
-  "$<BUILD_INTERFACE:${LMFLOW_SRC}/include>"
+  "$<BUILD_INTERFACE:${LMFLOW_SRC}/flow-core/include>"
   "$<INSTALL_INTERFACE:include>")
 target_link_libraries(flow_core INTERFACE Threads::Threads ${CMAKE_DL_LIBS} m)
 add_library(lmflow::flow_core ALIAS flow_core)

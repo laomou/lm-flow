@@ -1,9 +1,15 @@
 [package]
-name = "flow-core"
-version = "0.1.0"
-description = "数据流图计算框架:Rust 引擎 + C ABI 门面 + C++ 算子"
+name = "lmflow-core"
+version = "0.2.0"
+description = "Dataflow-graph compute engine: a Rust scheduler behind a stable C ABI, with C++ kernels"
 edition = "2021"
 license = "Apache-2.0"
+repository = "https://github.com/laomou/lm-flow"
+readme = "README.md"
+keywords = ["dataflow", "graph", "pipeline", "realtime", "ffi"]
+categories = ["concurrency", "multimedia"]
+# C++ 单元测试不必进发布 tarball;cpp/kernels、cpp/abi_assert.cc、include/** 默认包含(build.rs 需要)。
+exclude = ["cpp/tests/**"]
 
 [lib]
 name = "flow_core"
@@ -26,4 +32,3 @@ criterion = { version = "0.5", features = ["html_reports"] }
 [[bench]]
 name = "throughput"
 harness = false
-
