@@ -118,6 +118,17 @@ impl KernelCtx<'_> {
     pub fn log(&self, level: i32, msg: &str) {
         self.inner.log(level, msg);
     }
+    /// 是否装了日志 sink。**格式化之前先问一句** —— `format!` 会堆分配,没人听的时候
+    /// 一分钱都不该花(算子里的日志常常是每包一条):
+    ///
+    /// ```ignore
+    /// if cc.log_enabled() {
+    ///     cc.log(LOG_DEBUG, &format!("frame {}", n));
+    /// }
+    /// ```
+    pub fn log_enabled(&self) -> bool {
+        crate::runtime::log_enabled()
+    }
     /// 累加一个**按图**的命名计数器。比日志更适合被测试断言 ——
     /// 跑完用 [`crate::Graph::counter_value`] 读回。
     pub fn counter_add(&self, name: &str, delta: i64) {

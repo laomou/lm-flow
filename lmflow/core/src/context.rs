@@ -306,6 +306,11 @@ impl Context {
     }
 
     pub fn log(&self, level: i32, msg: &str) {
+        // 快路:没装 sink 时连这层 `format!`(加节点名前缀)都不该做 —— 它会堆分配,
+        // 而 `cc.Log` 在算子里可能是**每包**调用的。
+        if !crate::runtime::log_enabled() {
+            return;
+        }
         crate::runtime::log(level, &format!("[{}] {}", self.node_name, msg));
     }
 

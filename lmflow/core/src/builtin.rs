@@ -56,8 +56,12 @@ impl Kernel for Sink {
         c.input_any(0);
     }
     fn process(&mut self, cc: &mut KernelCtx) -> Result<()> {
-        let ts = cc.input_timestamp();
-        cc.log(LOG_DEBUG, &format!("received packet @ ts={}", ts.0));
+        // 每包一条 debug 日志:**先问再格式化**。默认没装 sink 时 `format!` 的堆分配
+        // 纯属浪费 —— 这条 process 是每包都走的。
+        if cc.log_enabled() {
+            let ts = cc.input_timestamp();
+            cc.log(LOG_DEBUG, &format!("received packet @ ts={}", ts.0));
+        }
         cc.counter_add("sink.packets", 1);
         self.count += 1;
         Ok(())

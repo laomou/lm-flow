@@ -29,15 +29,38 @@ static LOG: Mutex<LogSink> = Mutex::new(LogSink {
     user: std::ptr::null_mut(),
 });
 
+/// 是否装了 sink 的**无锁快路标志**。没装时(默认)`log()` 靠它直接返回,不必去抢
+/// 那把进程级 `LOG` 互斥锁 —— 算子里的 `cc.Log` 可能是**每包**调用的,让默认零配置
+/// 的用户每包抢一次全局锁是不能接受的。仅作快路提示,权威值仍在 `LOG` 里。
+static LOG_SET: AtomicBool = AtomicBool::new(false);
+
 pub fn set_log_callback(cb: Option<LogFn>, user: *mut c_void) {
     let mut sink = LOG.lock().expect("log lock poisoned");
     sink.cb = cb;
     sink.user = user;
+    // 先改 sink 再放标志:置位后 log() 才会去读,故不会读到半成品。
+    LOG_SET.store(cb.is_some(), Ordering::Release);
+}
+
+/// 当前是否装了日志 sink。**给算子做「格式化之前先问一句」用** ——
+/// `format!` 会堆分配,没人听的时候一分钱都不该花:
+///
+/// ```ignore
+/// if lmflow::runtime::log_enabled() {
+///     cc.log(LOG_DEBUG, &format!("frame {}", n));   // 只在真有 sink 时才格式化
+/// }
+/// ```
+pub fn log_enabled() -> bool {
+    LOG_SET.load(Ordering::Acquire)
 }
 
 /// 打一条日志。**调用时不得持有任何引擎内部锁**(见 flow.h 日志一节的承诺):
 /// 回调可能去抢 GIL 或加宿主自己的锁,持锁调用会形成锁序环。
 pub fn log(level: i32, msg: &str) {
+    // 快路:没装 sink 就别碰那把全局锁(见 LOG_SET)。
+    if !LOG_SET.load(Ordering::Acquire) {
+        return;
+    }
     let (cb, user) = {
         let sink = LOG.lock().expect("log lock poisoned");
         (sink.cb, sink.user)

@@ -41,3 +41,9 @@ harness = false
 # 基准跑的是内置 C++ 算子链,故需要 builtin-kernels(默认关,即默认不编 bench)。
 #(不能只靠文件内 #![cfg]:criterion_main! 生成的 main 会一起消失 → E0601)。
 required-features = ["builtin-kernels"]
+
+[[bench]]
+name = "dispatch"
+harness = false
+# 只用引擎自带的 Rust 默认算子(PassThrough / Sink)→ **不需要任何 feature**,
+# 纯 Rust 配置下也能量引擎派发成本。测量口径见文件头注释。

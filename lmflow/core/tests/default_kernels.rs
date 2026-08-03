@@ -104,3 +104,53 @@ output_ports: ["x", "y"]
     );
     g.wait_done_timeout(Duration::from_secs(5)).unwrap();
 }
+
+/// 日志快路:默认没装 sink 时 `log_enabled()` 为假(算子据此跳过 `format!`),
+/// 装上之后必须为真且真的收到日志 —— 快路不能把日志吞掉。
+#[test]
+fn log_fast_path_does_not_swallow_logs() {
+    use std::ffi::{c_char, c_void, CStr};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static SEEN: AtomicUsize = AtomicUsize::new(0);
+    unsafe extern "C" fn sink_cb(_u: *mut c_void, _lvl: i32, msg: *const c_char) {
+        if !msg.is_null() && !unsafe { CStr::from_ptr(msg) }.to_bytes().is_empty() {
+            SEEN.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    // 默认:无 sink → 快路生效
+    assert!(
+        !lmflow::runtime::log_enabled(),
+        "默认不该有 log sink(快路应生效,算子可跳过 format!)"
+    );
+
+    lmflow::ffi::lmflow_set_log_callback(Some(sink_cb), std::ptr::null_mut());
+    assert!(lmflow::runtime::log_enabled(), "装上 sink 后快路须让路");
+
+    // Sink 算子每包一条 debug 日志 + close 一条 info —— 装了 sink 就该真收到
+    let g = Graph::from_yaml(
+        r#"
+nodes:
+  - { name: k, kernel: Sink, input_ports: ["in"], output_ports: [] }
+input_ports: ["in"]
+output_ports: []
+"#,
+    )
+    .unwrap();
+    g.start().unwrap();
+    let inp = g.input("in").unwrap();
+    for i in 0..3i64 {
+        inp.send(Packet::from_i64(i).at(Timestamp(i))).unwrap();
+    }
+    g.close_all_inputs();
+    g.wait_done_timeout(Duration::from_secs(5)).unwrap();
+
+    lmflow::ffi::lmflow_set_log_callback(None, std::ptr::null_mut());
+    assert!(!lmflow::runtime::log_enabled(), "卸掉 sink 后应回到快路");
+    assert!(
+        SEEN.load(Ordering::Relaxed) >= 3,
+        "装了 sink 就必须真收到日志(每包一条 + close 一条),实际 {}",
+        SEEN.load(Ordering::Relaxed)
+    );
+}
