@@ -23,7 +23,7 @@ First-party source lives under `lmflow/`; build files and the vendored submodule
 ```text
 lm-flow/
 ├── lmflow/                    All first-party source
-│   ├── flow-core/             Engine — the lmflow crate (package = lib = lmflow → liblmflow.a; C ABI staticlib + cdylib)
+│   ├── core/                  Engine — the lmflow crate (package = lib = lmflow → liblmflow.a; C ABI staticlib + cdylib)
 │   │   ├── build.rs           Compiles cpp/ via `cc` and links it in
 │   │   ├── Cargo.toml · Cargo.lock
 │   │   ├── src/ · tests/      engine sources + ABI-layout consistency tests
@@ -55,10 +55,10 @@ lm-flow/
 
 ## Quick start
 
-The engine is a standalone Rust crate under `lmflow/flow-core` (Rust developers work there directly):
+The engine is a standalone Rust crate under `lmflow/core` (Rust developers work there directly):
 
 ```bash
-cd lmflow/flow-core
+cd lmflow/core
 cargo build                       # build the engine + C++ kernels
 cargo test                        # unit tests + ABI layout consistency
 cargo run --example hello_world   # two-stage passthrough pipeline, prints 0..9
@@ -147,9 +147,9 @@ g++ -std=c++17 -Iinclude my_host.cc lib/liblmflow.a -lpthread -ldl -lm -o my_hos
 Or build one yourself locally:
 
 ```bash
-cd lmflow/flow-core
-cargo build --release          # → lmflow/flow-core/target/release/liblmflow.{a,so}
-# the headers live under lmflow/flow-core/include/lmflow
+cd lmflow/core
+cargo build --release          # → lmflow/core/target/release/liblmflow.{a,so}
+# the headers live under lmflow/core/include/lmflow
 ```
 
 ### Build & consume with CMake
@@ -170,7 +170,7 @@ find_package(lmflow REQUIRED)
 target_link_libraries(my_app PRIVATE lmflow::flow_core)   # headers + liblmflow.a + system libs
 ```
 
-> Rust developers use `cargo` in `lmflow/flow-core`; Python users just `pip install lm-lmflow` (prebuilt wheels). The wheel is built by **scikit-build-core driving this same root CMake** (`-DLMFLOW_BUILD_PYTHON=ON`), so there is one build definition, not three.
+> Rust developers use `cargo` in `lmflow/core`; Python users just `pip install lm-lmflow` (prebuilt wheels). The wheel is built by **scikit-build-core driving this same root CMake** (`-DLMFLOW_BUILD_PYTHON=ON`), so there is one build definition, not three.
 
 The C ABI is the only stable interface (`lmflow/flow.h`); `flow.hpp` is the optional C++ kernel sugar, `flow_cv.hpp` is OpenCV interop, and `flow_platform_log.hpp` bridges engine logs to the platform logger (logcat / os_log / HiLog) in one call — `lmflow::InstallPlatformLogSink()`.
 

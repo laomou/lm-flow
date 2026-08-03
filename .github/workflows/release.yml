@@ -70,15 +70,15 @@ jobs:
             echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$TOOL/aarch64-linux-android21-clang" >> $GITHUB_ENV
           fi
       - name: 构建静态+动态库
-        run: cargo build --release --target ${{ matrix.target }} --manifest-path lmflow/flow-core/Cargo.toml
+        run: cargo build --release --target ${{ matrix.target }} --manifest-path lmflow/core/Cargo.toml
       - name: 打包 SDK(头文件 + 库)
         run: |
           VER="${{ github.ref_name }}"
           PKG="lmflow-${VER}-${{ matrix.name }}"
           mkdir -p "$PKG/include/lmflow" "$PKG/lib"
-          cp lmflow/flow-core/include/lmflow/*.h lmflow/flow-core/include/lmflow/*.hpp "$PKG/include/lmflow/"
+          cp lmflow/core/include/lmflow/*.h lmflow/core/include/lmflow/*.hpp "$PKG/include/lmflow/"
           cp LICENSE README.md "$PKG/"
-          OUT="lmflow/flow-core/target/${{ matrix.target }}/release"
+          OUT="lmflow/core/target/${{ matrix.target }}/release"
           cp "$OUT/liblmflow.a" "$PKG/lib/"                 # 静态库:完整,首选(移动端也用它)
           cp "$OUT"/liblmflow.so "$PKG/lib/" 2>/dev/null || true    # 桌面 Linux/Android 动态库
           cp "$OUT"/liblmflow.dylib "$PKG/lib/" 2>/dev/null || true # macOS 动态库

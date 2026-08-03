@@ -1,7 +1,7 @@
 //! hello_world —— 最小可运行示例:两级直通管线。
 //!
 //! 拓扑:input1 → node1(PassThrough) → input2 → node2(PassThrough) → output2
-//! 算子是 C++ 写的(经 flow-core 的 build.rs 用 cc 编译链入),引擎与 host 是 Rust ——
+//! 算子是 C++ 写的(经 lmflow crate 的 build.rs 用 cc 编译链入),引擎与 host 是 Rust ——
 //! 一条 `cargo run` 即可跑通全链路。对应 C++ 版见 examples/cpp/hello_world。
 
 use lmflow::{Graph, Packet, Timestamp};

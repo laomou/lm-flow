@@ -9,7 +9,7 @@ on: [push, pull_request]
 #   cross-platform — Android (NDK) / macOS / iOS cross-compile, guarding platform-specific code
 #   integration    — optional OpenCV (flow_cv.hpp + Python→C++ CV-kernel proof)
 #
-# 布局:源码在 lmflow/(引擎 lmflow/flow-core 是独立 crate),构建文件 + third_party 在仓库根。
+# 布局:源码在 lmflow/(引擎 lmflow/core 是独立 crate),构建文件 + third_party 在仓库根。
 # 各 job 用 working-directory 或显式路径落到对应目录。
 
 jobs:
@@ -25,27 +25,27 @@ jobs:
       - name: flow.h 作为纯 C11
         run: |
           printf '#include "lmflow/flow.h"\nint main(void){return 0;}\n' > /tmp/c.c
-          gcc -std=c11 -Wall -Wextra -Werror -Iflow-core/include -c /tmp/c.c -o /tmp/c.o
+          gcc -std=c11 -Wall -Wextra -Werror -Icore/include -c /tmp/c.c -o /tmp/c.o
       - name: C++ 算子 + ABI 布局断言
         run: |
-          for f in flow-core/cpp/kernels/*.cc; do
-            g++ -std=c++17 -Wall -Wextra -Werror -Iflow-core/include -c "$f" -o "/tmp/$(basename "$f").o"
+          for f in core/cpp/kernels/*.cc; do
+            g++ -std=c++17 -Wall -Wextra -Werror -Icore/include -c "$f" -o "/tmp/$(basename "$f").o"
           done
-          g++ -std=c++17 -Wall -Wextra -Werror -Iflow-core/include -c flow-core/cpp/abi_assert.cc -o /tmp/a.o
-          g++ -std=c++17 -Wall -Wextra -Werror -Iflow-core/include -c examples/cpp/hello_world/hello_world_host.cc -o /tmp/h.o
+          g++ -std=c++17 -Wall -Wextra -Werror -Icore/include -c core/cpp/abi_assert.cc -o /tmp/a.o
+          g++ -std=c++17 -Wall -Wextra -Werror -Icore/include -c examples/cpp/hello_world/hello_world_host.cc -o /tmp/h.o
       - name: flow.hpp 糖层单元测试(异常不穿越 FFI + 构造失败安全)
         run: |
-          g++ -std=c++17 -Wall -Wextra -Werror -Iflow-core/include flow-core/cpp/tests/flow_hpp_test.cc -o /tmp/flow_hpp_test
+          g++ -std=c++17 -Wall -Wextra -Werror -Icore/include core/cpp/tests/flow_hpp_test.cc -o /tmp/flow_hpp_test
           /tmp/flow_hpp_test
       - name: flow_platform_log.hpp 可编译(桌面 stderr 分支)
         run: |
           printf '#include "lmflow/flow_platform_log.hpp"\nint main(){ lmflow::InstallPlatformLogSink(); }\n' > /tmp/plog.cc
-          g++ -std=c++17 -Wall -Wextra -Werror -Iflow-core/include -c /tmp/plog.cc -o /tmp/plog.o
+          g++ -std=c++17 -Wall -Wextra -Werror -Icore/include -c /tmp/plog.cc -o /tmp/plog.o
 
   rust:
     name: build · rust (fmt/clippy/test)
     runs-on: ubuntu-latest
-    defaults: { run: { working-directory: lmflow/flow-core } }
+    defaults: { run: { working-directory: lmflow/core } }
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -65,19 +65,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo build --release --manifest-path flow-core/Cargo.toml
+      - run: cargo build --release --manifest-path core/Cargo.toml
       - name: header 声明与库导出符号对齐
         run: |
-          decl=$(grep -oE "^[A-Za-z_][A-Za-z0-9_ *]*\blmflow_[a-z_0-9]+\(" flow-core/include/lmflow/flow.h \
+          decl=$(grep -oE "^[A-Za-z_][A-Za-z0-9_ *]*\blmflow_[a-z_0-9]+\(" core/include/lmflow/flow.h \
                  | grep -oE "lmflow_[a-z_0-9]+" | sort -u)
-          syms=$(nm -g --defined-only flow-core/target/release/liblmflow.a \
+          syms=$(nm -g --defined-only core/target/release/liblmflow.a \
                  | grep -oE " T lmflow_[a-z_0-9]+" | grep -oE "lmflow_[a-z_0-9]+" | sort -u)
           missing=$(comm -23 <(echo "$decl") <(echo "$syms"))
           [ -z "$missing" ] || { echo "header 声明了但库里没有:"; echo "$missing"; exit 1; }
       - name: 编译并运行外部 C++ 宿主
         run: |
-          g++ -std=c++17 -Wall -Wextra -Werror -Iflow-core/include \
-              examples/cpp/hello_world/hello_world_host.cc flow-core/target/release/liblmflow.a \
+          g++ -std=c++17 -Wall -Wextra -Werror -Icore/include \
+              examples/cpp/hello_world/hello_world_host.cc core/target/release/liblmflow.a \
               -lpthread -ldl -lm -o /tmp/cpp_host
           out=$(/tmp/cpp_host)
           expected=$(for i in $(seq 0 9); do echo "out: $i @ ts=$i"; done)
@@ -119,7 +119,7 @@ jobs:
   tsan:
     name: safety · tsan (concurrency, required)
     runs-on: ubuntu-latest
-    defaults: { run: { working-directory: lmflow/flow-core } }
+    defaults: { run: { working-directory: lmflow/core } }
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly
@@ -132,7 +132,7 @@ jobs:
   sanitizers-extra:
     name: safety · asan/miri (advisory)
     runs-on: ubuntu-latest
-    defaults: { run: { working-directory: lmflow/flow-core } }
+    defaults: { run: { working-directory: lmflow/core } }
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly
@@ -190,12 +190,12 @@ jobs:
           export CXX_aarch64_linux_android="$TOOL/aarch64-linux-android21-clang++"
           export AR_aarch64_linux_android="$TOOL/llvm-ar"
           export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$TOOL/aarch64-linux-android21-clang"
-          cargo build --target aarch64-linux-android --manifest-path flow-core/Cargo.toml
+          cargo build --target aarch64-linux-android --manifest-path core/Cargo.toml
           # examples/android 的 JNI 桥:证明它连同引擎能被 NDK 交叉编+链成 .so
           # (JNI 符号由 App 的 JVM 在运行时提供,故 -shared 允许其未定义;引擎符号须从 .a 解析)
           "$TOOL/aarch64-linux-android21-clang++" -std=c++17 -Wall -Wextra -Werror \
-            -shared -fPIC -Iflow-core/include examples/android/hello_world/jni/lmflow_jni.cc \
-            flow-core/target/aarch64-linux-android/debug/liblmflow.a -llog -o /tmp/liblmflow_jni.so
+            -shared -fPIC -Icore/include examples/android/hello_world/jni/lmflow_jni.cc \
+            core/target/aarch64-linux-android/debug/liblmflow.a -llog -o /tmp/liblmflow_jni.so
           echo "Android JNI 桥交叉编+链接成功"
       # 鸿蒙/OpenHarmony 标准系统是 target_os=linux(rustc 已确认),与 Linux 走同一套代码路径,
       # 由 rust/external-host 门禁间接覆盖;其 SDK 不在 runner 上,故不单列交叉编译。
@@ -210,16 +210,16 @@ jobs:
         with: { targets: aarch64-apple-ios }
       # 原生 macOS:既验证 macOS 分支(QoS 优先级)能编,又让引擎真的在 macOS 上跑一遍
       - name: macOS 原生 cargo test
-        run: cargo test --manifest-path flow-core/Cargo.toml
+        run: cargo test --manifest-path core/Cargo.toml
       # iOS:交叉编译(Xcode 自带 iOS SDK,cc 经 xcrun 编 C++ 算子)
       - name: 交叉编译到 iOS + Swift/C 桥接冒烟
         run: |
-          cargo build --release --target aarch64-apple-ios --manifest-path flow-core/Cargo.toml
+          cargo build --release --target aarch64-apple-ios --manifest-path core/Cargo.toml
           # examples/ios 的桥接:iOS SDK 下编译+链接,证明 C ABI 头与库在 iOS 工具链可用
           # (只编+链不跑:runner 无真机;链接成功即证明头解析、符号解析、C++ 运行时可链)
-          xcrun --sdk iphoneos clang -arch arm64 -miphoneos-version-min=13.0 -Iflow-core/include \
+          xcrun --sdk iphoneos clang -arch arm64 -miphoneos-version-min=13.0 -Icore/include \
             examples/ios/hello_world/bridge_smoke.c \
-            flow-core/target/aarch64-apple-ios/release/liblmflow.a -lc++ -o /tmp/ios_smoke
+            core/target/aarch64-apple-ios/release/liblmflow.a -lc++ -o /tmp/ios_smoke
           echo "iOS 桥接编译+链接成功"
       - name: Swift 示例类型检查(Demo.swift 对着 C 模块 LmFlowC)
         run: |
@@ -240,11 +240,11 @@ jobs:
         with: { submodules: recursive }   # 下面 python 部分要编 pybind11 扩展
       - uses: dtolnay/rust-toolchain@stable
       - run: sudo apt-get update && sudo apt-get install -y libopencv-dev
-      - run: cargo build --release --manifest-path lmflow/flow-core/Cargo.toml
+      - run: cargo build --release --manifest-path lmflow/core/Cargo.toml
       - name: 编译并运行 flow_cv.hpp 测试(含非连续 ROI 拷贝)
         run: |
-          g++ -std=c++17 -Wall -Wextra -Werror -Ilmflow/flow-core/include lmflow/flow-core/cpp/tests/flow_cv_test.cc \
-              lmflow/flow-core/target/release/liblmflow.a $(pkg-config --cflags --libs opencv4) \
+          g++ -std=c++17 -Wall -Wextra -Werror -Ilmflow/core/include lmflow/core/cpp/tests/flow_cv_test.cc \
+              lmflow/core/target/release/liblmflow.a $(pkg-config --cflags --libs opencv4) \
               -lpthread -ldl -lm -o /tmp/flow_cv_test
           /tmp/flow_cv_test
       # 直接证明「Python numpy 图 → C++ OpenCV 算子 → 读回」是同一块内存:开 LMFLOW_WITH_CV_TEST

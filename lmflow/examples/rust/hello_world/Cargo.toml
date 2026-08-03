@@ -12,4 +12,4 @@ publish = false
 
 # 消费 lmflow crate(外部工程用 `cargo add lmflow`);这里走 path 依赖。
 [dependencies]
-lmflow = { path = "../../../flow-core" }
+lmflow = { path = "../../../core" }

@@ -10,8 +10,8 @@ else()
   set(_cargo_dir debug)
 endif()
 
-# flow-core 是独立 crate,target 落在它自己目录下。
-set(FLOW_LIB "${LMFLOW_SRC}/flow-core/target/${_cargo_dir}/liblmflow.a")
+# 引擎 crate(lmflow)的 target 落在它自己目录下。
+set(FLOW_LIB "${LMFLOW_SRC}/core/target/${_cargo_dir}/liblmflow.a")
 
 find_program(CARGO cargo REQUIRED)
 find_package(Threads REQUIRED)
@@ -24,14 +24,14 @@ find_package(Threads REQUIRED)
 add_custom_target(flow_engine ALL
   BYPRODUCTS "${FLOW_LIB}"
   COMMAND ${CARGO} build ${_cargo_flags}
-  WORKING_DIRECTORY "${LMFLOW_SRC}/flow-core"
+  WORKING_DIRECTORY "${LMFLOW_SRC}/core"
   COMMENT "cargo build ${_cargo_flags} — Rust engine + C++ kernels → liblmflow.a"
   VERBATIM USES_TERMINAL)
 
 add_library(flow_core STATIC IMPORTED GLOBAL)
 set_target_properties(flow_core PROPERTIES IMPORTED_LOCATION "${FLOW_LIB}")
 target_include_directories(flow_core INTERFACE
-  "$<BUILD_INTERFACE:${LMFLOW_SRC}/flow-core/include>"
+  "$<BUILD_INTERFACE:${LMFLOW_SRC}/core/include>"
   "$<INSTALL_INTERFACE:include>")
 target_link_libraries(flow_core INTERFACE Threads::Threads ${CMAKE_DL_LIBS} m)
 add_library(lmflow::flow_core ALIAS flow_core)

@@ -92,7 +92,7 @@
 │    new → init_from_yaml → add_poller → start                      │
 │    loop { input.send(pkt); poller.next() } → close → wait_done    │
 ├─────────────────────── C ABI (include/lmflow/flow.h) ────────────────────┤ ← unsafe 边界①
-│  Rust 引擎 (flow-core, lib + staticlib + cdylib)                  │
+│  Rust 引擎 (lmflow crate, lib + staticlib + cdylib)               │
 │    graph(索引 arena) · scheduler/executor · edge(FIFO)            │
 │    packet · timestamp · config(YAML) · registry · poller          │
 ├─────────────────────── C ABI (回调) ──────────────────────────────┤ ← unsafe 边界②
@@ -225,7 +225,7 @@ UNSET < UNSTARTED < PRE_STREAM < MIN … MAX < POST_STREAM < ONE_OVER_POST_STREA
 ```
 `PRE_STREAM`/`POST_STREAM` 是流首/流尾的单包位置;`DONE` 表示端口已关且不再有数据;
 `UNSET` 为默认值。算术用**饱和运算**,哨兵附近不会溢出回绕。
-已实现于 `flow-core/src/timestamp.rs`(含 9 个单测)。
+已实现于 `core/src/timestamp.rs`(含 9 个单测)。
 
 > 提交时 `timestamp == UNSET` 的包,引擎自动继承当前 `input_timestamp`(与 `Forward` 一致);
 > 在图输入口上提交 `UNSET` 视为非法。
@@ -256,7 +256,7 @@ bool       lmflow_ctx_has_side_packet(const LMFlowContext*, const char* name);
 
 ## 4. 对外 C 接口
 
-> **权威定义见 `flow-core/include/lmflow/flow.h`**(手写,已通过 `gcc -std=c11 -Wall -Wextra` 与
+> **权威定义见 `core/include/lmflow/flow.h`**(手写,已通过 `gcc -std=c11 -Wall -Wextra` 与
 > `g++ -std=c++17` 双向验证)。本节只列分组,避免文档与 header 双份漂移。
 
 | 分组 | 主要函数 |
@@ -350,7 +350,7 @@ Rust 也能一等公民地写算子:实现 `lmflow::Kernel`(`get_contract`/`open
 运行期 `register_kernel::<T>("Name")`,YAML 用 `kernel: Name` 引用。安全的 `KernelCtx`/
 `KernelContract` 包装内部 `Context`/`Contract`(不裸调 C ABI);panic / `Err` 都被 `catch_unwind`
 兜成图错误、不穿越边界。这是**C ABI vtable 之上的糖**(和 `flow.hpp` 的 `KernelAdapter<T>` 对 C++
-做的一样),**不是**引擎绕过 vtable 的原生快路(见 ADR)。见 `flow-core/src/kernel_api.rs`。
+做的一样),**不是**引擎绕过 vtable 的原生快路(见 ADR)。见 `core/src/kernel_api.rs`。
 
 > **外部 Rust 工程**:`cargo add lmflow` → `use lmflow::{Graph, Packet, Timestamp, Kernel, register_kernel}`。
 > 引擎就是这一个 crate `lmflow`(包名 = 库名 = `lmflow` → `liblmflow.a`,C ABI/CMake/Python 共用同一库)。
@@ -965,7 +965,7 @@ cc.emit(0, packet)
 - **算子回调方向**:C++ 异常 / Python 异常同样不得逃出,由糖层 / pybind11 蹃床转错误码。
 - **ABI 版本**:`LMFLOW_ABI_VERSION` + `lmflow_abi_version()`;`lmflow_graph_new` 内部校验,
   不匹配返回 NULL 并置错误。动态链接时 header 与 `.so` 不一致会导致布局错乱。
-- **布局一致性**:`cpp/abi_assert.cc` 的 `static_assert` 与 `flow-core/tests/abi_layout.rs`
+- **布局一致性**:`cpp/abi_assert.cc` 的 `static_assert` 与 `core/tests/abi_layout.rs`
   钉在同一组常量上,任一侧改字段而忘同步 → **构建失败**(已实测能拦住)。
 - **ABI 演进**:`LMFlowBuffer` 留了 `reserved` 供未来加字段(最可能是 GPU 内存空间);
   一旦改变既有布局,必须提升 `LMFLOW_ABI_VERSION`,所有既有二进制都要重编。
@@ -976,7 +976,7 @@ cc.emit(0, packet)
 
 **Rust/C++ 部分:cargo 主导**
 
-- `flow-core`:`crate-type = ["lib", "staticlib", "cdylib"]`。
+- `lmflow`(`lmflow/core/`):`crate-type = ["lib", "staticlib", "cdylib"]`。
   `lib` 给仓库内 Rust host/测试(不过 FFI);`staticlib`/`cdylib` 给外部宿主。
 - `build.rs` 用 `cc` crate 编译 `cpp/*.cc`(算子 + ABI 断言)并链入。
 - 示例宿主:`cargo run --example hello_world`(Rust host + C++ 算子,一条命令跑通)。
@@ -998,7 +998,7 @@ cc.emit(0, packet)
 ```text
 lm-flow/                          仓库根
 ├── lmflow/                       第一方源码
-│   ├── flow-core/                引擎(Rust crate:包名=库名=lmflow → liblmflow.a;目录名 flow-core 为历史遗留)
+│   ├── core/                     引擎 crate(包名=库名=lmflow → liblmflow.a)
 │   │   ├── build.rs              cc 编译 cpp/ 并链入
 │   │   ├── Cargo.toml · Cargo.lock
 │   │   ├── src/                  timestamp / packet / edge / node / graph / scheduler / ffi / kernel_api …

@@ -1,4 +1,4 @@
-//! flow-core 吞吐基准(Criterion)。三组量化引擎三条热路径:
+//! lmflow 吞吐基准(Criterion)。三组量化引擎三条热路径:
 //!   scheduling —— 吞吐 vs 管线深度(1/4/16 级 PassThrough)+ 单主线程 vs 4 线程池
 //!   queue      —— 每口 `Mutex<VecDeque>` 的纯入队率,对照端到端(入队+出队+派发)率
 //!   crossing   —— 每包 Rust→C++ FFI 往返:量化「跨界零拷贝」(I64 ≈ 大 buffer),
@@ -7,7 +7,7 @@
 //! 看点:跨界按引用传(ffi.rs `borrow_packet` 只拷指针)—— PassThrough 转发 I64 与大
 //! buffer 吞吐基本相同;payload 相关成本只在读写字节的算子(InvertKernel)才显现。
 //!
-//! 跑:在 `lmflow/flow-core` 下 `cargo bench`;报告在 `target/criterion/`。
+//! 跑:在 `lmflow/core` 下 `cargo bench`;报告在 `target/criterion/`。
 
 use std::cell::Cell;
 use std::hint::black_box;

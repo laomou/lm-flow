@@ -25,7 +25,7 @@
 ```text
 lm-flow/
 ├── lmflow/                    第一方源码
-│   ├── flow-core/             引擎 —— lmflow crate(包名=库名=lmflow → liblmflow.a;C ABI staticlib+cdylib)
+│   ├── core/                  引擎 —— lmflow crate(包名=库名=lmflow → liblmflow.a;C ABI staticlib+cdylib)
 │   │   ├── build.rs           用 cc 编译 cpp/ 并链入
 │   │   ├── Cargo.toml · Cargo.lock
 │   │   ├── src/ · tests/      引擎源码 + ABI 布局一致性测试
@@ -57,10 +57,10 @@ lm-flow/
 
 ## 快速开始
 
-引擎是 `lmflow/flow-core` 下的独立 Rust crate(Rust 开发者直接在这里干活):
+引擎是 `lmflow/core` 下的独立 Rust crate(Rust 开发者直接在这里干活):
 
 ```bash
-cd lmflow/flow-core
+cd lmflow/core
 cargo build                       # 编译引擎 + C++ 算子
 cargo test                        # 单测 + ABI 布局一致性
 cargo run --example hello_world   # 两级直通管线,输出 0..9
@@ -151,9 +151,9 @@ g++ -std=c++17 -Iinclude my_host.cc lib/liblmflow.a -lpthread -ldl -lm -o my_hos
 本地自己出一份也行:
 
 ```bash
-cd lmflow/flow-core
-cargo build --release          # → lmflow/flow-core/target/release/liblmflow.{a,so}
-# 头文件在 lmflow/flow-core/include/lmflow 下
+cd lmflow/core
+cargo build --release          # → lmflow/core/target/release/liblmflow.{a,so}
+# 头文件在 lmflow/core/include/lmflow 下
 ```
 
 ### 用 CMake 构建与消费
@@ -174,7 +174,7 @@ find_package(lmflow REQUIRED)
 target_link_libraries(my_app PRIVATE lmflow::flow_core)   # 头 + liblmflow.a + 系统库
 ```
 
-> Rust 开发者在 `lmflow/flow-core` 里用 `cargo`;Python 用户直接 `pip install lm-lmflow`(预编 wheel)。
+> Rust 开发者在 `lmflow/core` 里用 `cargo`;Python 用户直接 `pip install lm-lmflow`(预编 wheel)。
 > wheel 由 **scikit-build-core 驱动这同一份根 CMake**(`-DLMFLOW_BUILD_PYTHON=ON`)构建 —— 一份构建定义,而非三份。
 
 C ABI 是唯一稳定接口(`lmflow/flow.h`);`flow.hpp` 是可选的 C++ 算子糖层,`flow_cv.hpp` 是 OpenCV 互转,`flow_platform_log.hpp` 一行把引擎日志接到平台日志系统(logcat / os_log / HiLog)—— `lmflow::InstallPlatformLogSink()`。

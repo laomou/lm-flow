@@ -1,6 +1,6 @@
 // 把纯 C 头 flow.h 暴露成一个可被 Swift `import` 的 C 模块。
-// 在 Xcode / SwiftPM 里把本目录与 ../../../flow-core/include 加进头文件搜索路径即可。
+// 在 Xcode / SwiftPM 里把本目录与 ../../../core/include 加进头文件搜索路径即可。
 module LmFlowC {
-    header "../../../flow-core/include/lmflow/flow.h"
+    header "../../../core/include/lmflow/flow.h"
     export *
 }
