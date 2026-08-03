@@ -25,22 +25,22 @@ jobs:
       - name: flow.h 作为纯 C11
         run: |
           printf '#include "lmflow/flow.h"\nint main(void){return 0;}\n' > /tmp/c.c
-          gcc -std=c11 -Wall -Wextra -Werror -Icore/include -c /tmp/c.c -o /tmp/c.o
+          gcc -std=c11 -Wall -Wextra -Werror -Iinclude -c /tmp/c.c -o /tmp/c.o
       - name: C++ 算子 + ABI 布局断言
         run: |
-          for f in core/cpp/kernels/*.cc; do
-            g++ -std=c++17 -Wall -Wextra -Werror -Icore/include -c "$f" -o "/tmp/$(basename "$f").o"
+          for f in cpp/kernels/*.cc; do
+            g++ -std=c++17 -Wall -Wextra -Werror -Iinclude -c "$f" -o "/tmp/$(basename "$f").o"
           done
-          g++ -std=c++17 -Wall -Wextra -Werror -Icore/include -c core/cpp/abi_assert.cc -o /tmp/a.o
-          g++ -std=c++17 -Wall -Wextra -Werror -Icore/include -c examples/cpp/hello_world/hello_world_host.cc -o /tmp/h.o
+          g++ -std=c++17 -Wall -Wextra -Werror -Iinclude -c cpp/abi_assert.cc -o /tmp/a.o
+          g++ -std=c++17 -Wall -Wextra -Werror -Iinclude -c examples/cpp/hello_world/hello_world_host.cc -o /tmp/h.o
       - name: flow.hpp 糖层单元测试(异常不穿越 FFI + 构造失败安全)
         run: |
-          g++ -std=c++17 -Wall -Wextra -Werror -Icore/include core/cpp/tests/flow_hpp_test.cc -o /tmp/flow_hpp_test
+          g++ -std=c++17 -Wall -Wextra -Werror -Iinclude cpp/tests/flow_hpp_test.cc -o /tmp/flow_hpp_test
           /tmp/flow_hpp_test
       - name: flow_platform_log.hpp 可编译(桌面 stderr 分支)
         run: |
           printf '#include "lmflow/flow_platform_log.hpp"\nint main(){ lmflow::InstallPlatformLogSink(); }\n' > /tmp/plog.cc
-          g++ -std=c++17 -Wall -Wextra -Werror -Icore/include -c /tmp/plog.cc -o /tmp/plog.o
+          g++ -std=c++17 -Wall -Wextra -Werror -Iinclude -c /tmp/plog.cc -o /tmp/plog.o
 
   rust:
     name: build · rust (fmt/clippy/test)
@@ -51,9 +51,28 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with: { components: rustfmt, clippy }
       - run: cargo fmt --all -- --check
+      # 默认构建 = **纯 Rust 引擎**(不编任何 C++)。这就是 `cargo add lmflow` 拿到的东西,
+      # 所以它是第一等公民、先跑。跑得到的测试:单元测试 + abi_layout + rust_kernel(纯 Rust 算子)。
       - run: cargo clippy --all-targets -- -D warnings
-      - run: cargo build --all
-      - run: timeout 600 cargo test --all   # 含 ABI 布局/C ABI/内存记账/CoW;timeout 兜底,偶发挂起也快失败而非烧满 CI
+      - run: cargo build --all-targets
+      - run: timeout 300 cargo test
+      - name: 默认构建必须真的零 C++
+        run: |
+          A=target/debug/liblmflow.a
+          n=$(nm -g --defined-only "$A" | grep -c 'lmflow_register_builtin_kernels' || true)
+          [ "$n" = 0 ] || { echo "默认(纯 Rust)构建里仍有内置算子符号($n 个)"; exit 1; }
+          cpp=$(ar t "$A" | grep -cE 'passthrough|abi_assert|register\.o' || true)
+          [ "$cpp" = 0 ] || { echo "默认构建里仍打进了 C++ 目标文件($cpp 个)"; exit 1; }
+          eh=$(nm -u "$A" | grep -cE '__gxx_personality|__cxa_begin_catch|__cxa_throw' || true)
+          [ "$eh" = 0 ] || { echo "默认构建里仍引用 C++ 异常运行时($eh 处)"; exit 1; }
+          echo "默认构建校验通过:无内置算子符号 / 无 C++ 目标文件 / 无 C++ 异常运行时"
+      # 仓库内的完整路径:开 builtin-kernels 编 ../cpp 的 18 个内置 C++ 算子,
+      # 跑全部 208 个测试(含 C ABI / 内存记账 / CoW / 调度策略 …)。
+      - name: 带内置 C++ 算子(仓库内完整路径)
+        run: |
+          cargo clippy --features builtin-kernels --all-targets -- -D warnings
+          cargo build --features builtin-kernels --all-targets
+          timeout 600 cargo test --features builtin-kernels
 
   # 外部宿主视角:header 声明的符号必须都在库里,且真的能链接+运行。
   # 这条曾抓到两个真问题:lmflow_register_builtin_kernels 漏在 header 之外、
@@ -65,10 +84,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo build --release --manifest-path core/Cargo.toml
+      - run: cargo build --release --features builtin-kernels --manifest-path core/Cargo.toml
       - name: header 声明与库导出符号对齐
         run: |
-          decl=$(grep -oE "^[A-Za-z_][A-Za-z0-9_ *]*\blmflow_[a-z_0-9]+\(" core/include/lmflow/flow.h \
+          decl=$(grep -oE "^[A-Za-z_][A-Za-z0-9_ *]*\blmflow_[a-z_0-9]+\(" include/lmflow/flow.h \
                  | grep -oE "lmflow_[a-z_0-9]+" | sort -u)
           syms=$(nm -g --defined-only core/target/release/liblmflow.a \
                  | grep -oE " T lmflow_[a-z_0-9]+" | grep -oE "lmflow_[a-z_0-9]+" | sort -u)
@@ -76,7 +95,7 @@ jobs:
           [ -z "$missing" ] || { echo "header 声明了但库里没有:"; echo "$missing"; exit 1; }
       - name: 编译并运行外部 C++ 宿主
         run: |
-          g++ -std=c++17 -Wall -Wextra -Werror -Icore/include \
+          g++ -std=c++17 -Wall -Wextra -Werror -Iinclude \
               examples/cpp/hello_world/hello_world_host.cc core/target/release/liblmflow.a \
               -lpthread -ldl -lm -o /tmp/cpp_host
           out=$(/tmp/cpp_host)
@@ -125,7 +144,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@nightly
         with: { components: rust-src }
       - name: TSan(Rust + C++ 混合,含 max_in_flight 并行路径)
-        run: RUSTFLAGS="-Zsanitizer=thread" timeout 1200 cargo +nightly test -Zbuild-std --target x86_64-unknown-linux-gnu --lib --tests
+        run: RUSTFLAGS="-Zsanitizer=thread" timeout 1200 cargo +nightly test --features builtin-kernels -Zbuild-std --target x86_64-unknown-linux-gnu --lib --tests
 
   # ASan / Miri:辅助排查,暂不作门禁(build-std + C++ 侧易有误报,
   # Miri 也不完整支持线程与跨 FFI 的真实函数指针)。
@@ -138,7 +157,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@nightly
         with: { components: rust-src, miri }
       - name: ASan
-        run: RUSTFLAGS="-Zsanitizer=address" cargo +nightly test -Zbuild-std --target x86_64-unknown-linux-gnu --lib --tests
+        run: RUSTFLAGS="-Zsanitizer=address" cargo +nightly test --features builtin-kernels -Zbuild-std --target x86_64-unknown-linux-gnu --lib --tests
         continue-on-error: true
       - name: Miri(专查 FFI 里的 unsafe)
         run: cargo +nightly miri test --lib
@@ -190,11 +209,11 @@ jobs:
           export CXX_aarch64_linux_android="$TOOL/aarch64-linux-android21-clang++"
           export AR_aarch64_linux_android="$TOOL/llvm-ar"
           export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$TOOL/aarch64-linux-android21-clang"
-          cargo build --target aarch64-linux-android --manifest-path core/Cargo.toml
+          cargo build --features builtin-kernels --target aarch64-linux-android --manifest-path core/Cargo.toml
           # examples/android 的 JNI 桥:证明它连同引擎能被 NDK 交叉编+链成 .so
           # (JNI 符号由 App 的 JVM 在运行时提供,故 -shared 允许其未定义;引擎符号须从 .a 解析)
           "$TOOL/aarch64-linux-android21-clang++" -std=c++17 -Wall -Wextra -Werror \
-            -shared -fPIC -Icore/include examples/android/hello_world/jni/lmflow_jni.cc \
+            -shared -fPIC -Iinclude examples/android/hello_world/jni/lmflow_jni.cc \
             core/target/aarch64-linux-android/debug/liblmflow.a -llog -o /tmp/liblmflow_jni.so
           echo "Android JNI 桥交叉编+链接成功"
       # 鸿蒙/OpenHarmony 标准系统是 target_os=linux(rustc 已确认),与 Linux 走同一套代码路径,
@@ -210,14 +229,14 @@ jobs:
         with: { targets: aarch64-apple-ios }
       # 原生 macOS:既验证 macOS 分支(QoS 优先级)能编,又让引擎真的在 macOS 上跑一遍
       - name: macOS 原生 cargo test
-        run: cargo test --manifest-path core/Cargo.toml
+        run: cargo test --features builtin-kernels --manifest-path core/Cargo.toml
       # iOS:交叉编译(Xcode 自带 iOS SDK,cc 经 xcrun 编 C++ 算子)
       - name: 交叉编译到 iOS + Swift/C 桥接冒烟
         run: |
-          cargo build --release --target aarch64-apple-ios --manifest-path core/Cargo.toml
+          cargo build --release --features builtin-kernels --target aarch64-apple-ios --manifest-path core/Cargo.toml
           # examples/ios 的桥接:iOS SDK 下编译+链接,证明 C ABI 头与库在 iOS 工具链可用
           # (只编+链不跑:runner 无真机;链接成功即证明头解析、符号解析、C++ 运行时可链)
-          xcrun --sdk iphoneos clang -arch arm64 -miphoneos-version-min=13.0 -Icore/include \
+          xcrun --sdk iphoneos clang -arch arm64 -miphoneos-version-min=13.0 -Iinclude \
             examples/ios/hello_world/bridge_smoke.c \
             core/target/aarch64-apple-ios/release/liblmflow.a -lc++ -o /tmp/ios_smoke
           echo "iOS 桥接编译+链接成功"
@@ -240,10 +259,10 @@ jobs:
         with: { submodules: recursive }   # 下面 python 部分要编 pybind11 扩展
       - uses: dtolnay/rust-toolchain@stable
       - run: sudo apt-get update && sudo apt-get install -y libopencv-dev
-      - run: cargo build --release --manifest-path lmflow/core/Cargo.toml
+      - run: cargo build --release --features builtin-kernels --manifest-path lmflow/core/Cargo.toml
       - name: 编译并运行 flow_cv.hpp 测试(含非连续 ROI 拷贝)
         run: |
-          g++ -std=c++17 -Wall -Wextra -Werror -Ilmflow/core/include lmflow/core/cpp/tests/flow_cv_test.cc \
+          g++ -std=c++17 -Wall -Wextra -Werror -Ilmflow/include lmflow/cpp/tests/flow_cv_test.cc \
               lmflow/core/target/release/liblmflow.a $(pkg-config --cflags --libs opencv4) \
               -lpthread -ldl -lm -o /tmp/flow_cv_test
           /tmp/flow_cv_test

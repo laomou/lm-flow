@@ -3,6 +3,8 @@
 //! 关键断言:标记了 back_edges 的环能建、能跑、值正确,且**正向输入关闭后能正常终止**
 //! (不再撞 wait_done 的 stuck 错误);未标记的环仍在建图期被拒。
 
+#![cfg(feature = "builtin-kernels")] // 用内置 C++ 算子:纯 Rust 构建(--no-default-features)时整文件跳过
+
 use lmflow::{Graph, Packet, State, Timestamp};
 
 fn init() {

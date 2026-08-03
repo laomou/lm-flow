@@ -7,6 +7,8 @@
 //!  * 所有权守恒在并发下仍然成立;
 //!  * 混合执行器(一部分节点在池里、一部分在主线程)不会死锁。
 
+#![cfg(feature = "builtin-kernels")] // 用内置 C++ 算子:纯 Rust 构建(--no-default-features)时整文件跳过
+
 use std::sync::atomic::{AtomicIsize, AtomicUsize, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;

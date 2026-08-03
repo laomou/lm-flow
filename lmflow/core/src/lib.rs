@@ -7,11 +7,19 @@
 //!  * **Rust API**(本 crate 的公开条目)—— 仓库内的 Rust 宿主与测试直接用;
 //!  * **C ABI**([`ffi`] 模块 / `include/flow.h`)—— 外部 C/C++/Python 宿主用。
 //!
-//! 算子用 C++ 编写(见 `cpp/kernels.cc`),由 `build.rs` 编译链入,经函数指针
-//! vtable 被引擎回调。
+//! 算子与引擎解耦:可以用 **C++** 写(`flow.hpp` 糖层)、用 **Python** 写(pybind11),
+//! 也可以用 **Rust** 写([`Kernel`] + [`register_kernel`])—— 三者都经同一套函数指针
+//! vtable 注册进同一个注册表,引擎不知道算子是什么语言写的。
+//!
+//! 本 crate **默认是纯 Rust 引擎**,不编译也不捆绑任何 C++(`cargo add lmflow` 无需 C++
+//! 工具链)。引擎自带默认 Rust 算子(见 [`builtin`],如 `PassThrough`,建图时自动注册);
+//! 自己的算子用 [`Kernel`] + [`register_kernel`] 写。仓库内另有 18 个内置 C++ 算子
+//! (`../cpp/kernels/`),由 `builtin-kernels` feature 编入;**该 feature 只在 lm-flow
+//! 仓库内可用**(那些源码在 crate 目录之外,不随发布的 crate 分发)。
 //!
 //! 设计文档:`docs/design.md`。
 
+pub mod builtin;
 pub mod config;
 pub mod context;
 pub mod executor;
@@ -31,8 +39,9 @@ pub use packet::{BufferData, Builtin, Packet};
 pub use status::{Error, Result};
 pub use timestamp::Timestamp;
 
+#[cfg(feature = "builtin-kernels")]
 extern "C" {
-    /// 由 `cpp/kernels.cc` 提供:显式聚合注册内置 C++ 算子的实现。
+    /// 由 `../cpp/kernels/register.cc` 提供:显式聚合注册内置 C++ 算子的实现。
     ///
     /// 用显式函数而非静态初始化,是因为静态初始化对象在静态库中可能被链接器裁剪
     /// (见 docs/design.md §14 风险登记)。C ABI 的 `lmflow_register_builtin_kernels`
@@ -43,18 +52,23 @@ extern "C" {
 /// 注册内置 C++ 算子。**幂等**:重复调用只在首次生效。
 ///
 /// 必须在 [`Graph::from_yaml`] 之前调用,否则会报「算子未注册」。
+///
+/// 仅在 `builtin-kernels` feature 下存在(**默认关**,且只在 lm-flow 仓库内可用);
+/// 否则请用 [`register_kernel`] 注册自己的 Rust 算子。
+#[cfg(feature = "builtin-kernels")]
 pub fn register_builtin_kernels() {
     use std::sync::Once;
     static ONCE: Once = Once::new();
     ONCE.call_once(|| unsafe { lmflow_register_builtin_kernels_impl() });
 }
 
-/// C ABI:注册内置算子(见 `include/flow.h`)。是 [`register_builtin_kernels`] 的导出包装 ——
-/// 由 Rust 定义并 `#[no_mangle]` 导出,保证它同时出现在静态库和 cdylib 的符号表里,
-/// 与 `flow.h` 的声明一致。
+/// C ABI:注册内置算子(见 `include/lmflow/flow.h`)。是 [`register_builtin_kernels`] 的
+/// 导出包装 —— 由 Rust 定义并 `#[no_mangle]` 导出,保证它同时出现在静态库和 cdylib 的
+/// 符号表里,与 `flow.h` 的声明一致。
 ///
 /// # Safety
 /// 无参数、无指针入参;内部幂等。可从任意线程安全调用。
+#[cfg(feature = "builtin-kernels")]
 #[no_mangle]
 pub unsafe extern "C" fn lmflow_register_builtin_kernels() {
     register_builtin_kernels();

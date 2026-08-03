@@ -3,6 +3,8 @@
 //! 没有对齐时,`Zip` 之类的算子会把不同时刻的数据配到一起 —— 而且**不报错**,
 //! 只是结果错。这些测试专门钉住对齐语义。
 
+#![cfg(feature = "builtin-kernels")] // 用内置 C++ 算子:纯 Rust 构建(--no-default-features)时整文件跳过
+
 use std::time::Duration;
 
 use lmflow::{Graph, Packet, Timestamp};

@@ -3,6 +3,8 @@
 //! 核心断言:子图展开出的图与手写扁平图**行为等价**(同样的直通链),且运行时引擎
 //! 完全不感知子图 —— 展开是纯建图期变换。
 
+#![cfg(feature = "builtin-kernels")] // 用内置 C++ 算子:纯 Rust 构建(--no-default-features)时整文件跳过
+
 use lmflow::{Graph, Packet, State, Timestamp};
 
 fn init() {

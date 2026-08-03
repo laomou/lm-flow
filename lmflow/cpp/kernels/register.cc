@@ -26,7 +26,8 @@
  *  Reduce            全缓冲归约 sum/mean/min/max     BUFFER → F64 标量                  reduce.cc
  *
  * 由 Rust 侧 C ABI 包装 lmflow_register_builtin_kernels(见 core/src/lib.rs)
- * 调用一次。用**显式聚合**而非静态初始化:静态库会裁剪未被引用的静态初始化对象(ADR #14),
+ * 调用一次。用**显式聚合**而非静态初始化:静态库会裁剪未被引用的静态初始化对象
+ * (见 docs/design.md §5.1 与 §14 风险登记),
  * 而本函数被导出根引用,链接器不会裁掉它及其引用的各 Register 函数。
  */
 #include "builtins.hpp"

@@ -287,12 +287,18 @@ typedef struct {
 } LMFlowKernelVTable;
 
 /* 注册**捆绑的内置算子**(PassThrough / Scale / Sum / Split / Zip / Filter /
- * Stringify / Sink / Invert / Normalize)。
+ * Stringify / Sink / Invert / Normalize / Mux / RangeSource / FeedbackAdd /
+ * BatchSum / Cast / Affine / Clamp / Reduce —— 权威清单见 cpp/kernels/register.cc)。
  *
- * 注意:本函数由捆绑的算子库(cpp/kernels.cc)提供,而非引擎本体 —— 但链接
- * liblmflow 时二者在同一产物内。宿主须在 init_from_yaml **之前**调用一次,
- * 否则会得到「算子未注册」。用显式函数而非静态初始化,是因为静态初始化对象在
- * 静态库中可能被链接器裁剪(见 docs/design.md §14 风险登记)。幂等。 */
+ * 宿主须在 init_from_yaml **之前**调用一次,否则会得到「算子未注册」。幂等。
+ *
+ * 由引擎在 `builtin-kernels` Cargo feature(**默认开**)下提供:算子本体是
+ * kernels/ 下的 C++,经 build.rs 链入同一个 liblmflow 产物,本符号是它的导出根。
+ * 若用 `--no-default-features` 构建纯 Rust 引擎,则本符号不存在 —— 那种用法下自己
+ * 用 Rust 的 `register_kernel`(或 C ABI 的 lmflow_register_kernel)注册算子。
+ *
+ * 用显式函数而非静态初始化,是因为静态初始化对象在静态库中可能被链接器裁剪
+ * (见 docs/design.md §5.1 与 §14 风险登记)。 */
 void lmflow_register_builtin_kernels(void);
 
 /* 注册算子。同名重复注册返回 LMFLOW_ERR_INVALID_ARG。

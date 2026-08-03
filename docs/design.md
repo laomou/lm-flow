@@ -1,8 +1,8 @@
 # lmflow 设计方案
 
 > 状态:**成品**。Rust 引擎、C ABI、C++ 糖层(含 OpenCV 互转)、18 个内置算子、
-> Python 绑定(pybind11)、原生 SDK 发布(各平台头文件+库)全部就位;**246 个测试**
-> (Rust 208 + Python 38)全绿,TSan 硬门禁 0 竞态。Rust / C++ / Python 三种宿主的
+> Python 绑定(pybind11)、原生 SDK 发布(各平台头文件+库)全部就位;**248 个测试**
+> (Rust 210 + Python 38)全绿,TSan 硬门禁 0 竞态。Rust / C++ / Python 三种宿主的
 > hello_world 都输出正确;支持线程池绑核 + 实时优先级(Linux/Android),可交叉编到
 > Android / iOS / 鸿蒙。
 > 定位:一个数据流图计算框架 —— 把计算描述成**有向图**,节点是**算子(Kernel)**,
@@ -256,7 +256,7 @@ bool       lmflow_ctx_has_side_packet(const LMFlowContext*, const char* name);
 
 ## 4. 对外 C 接口
 
-> **权威定义见 `core/include/lmflow/flow.h`**(手写,已通过 `gcc -std=c11 -Wall -Wextra` 与
+> **权威定义见 `include/lmflow/flow.h`**(手写,已通过 `gcc -std=c11 -Wall -Wextra` 与
 > `g++ -std=c++17` 双向验证)。本节只列分组,避免文档与 header 双份漂移。
 
 | 分组 | 主要函数 |
@@ -324,6 +324,14 @@ LMFLOW_REGISTER_KERNEL(PassThroughKernel)    // 或 LMFLOW_REGISTER_KERNEL_AS(T,
 - `Context` 禁拷贝/移动,防止算子把只在回调期有效的句柄留存。
 - 注册:**内置算子用显式聚合注册**(`lmflow_register_builtin_kernels`),因为静态初始化
   对象在静态库中可能被链接器裁剪;用户算子可直接用宏。
+- **算子与引擎解耦**:注册表(`src/kernel.rs`)是唯一一张语言无关的 `name → vtable` 表,
+  C++(`flow.hpp`)、Python(pybind11)、Rust(`trait Kernel`)三条路都汇入同一个
+  `kernel::register`,引擎不知道算子是什么语言写的。内置的 18 个 C++ 算子因此只是**捆绑的
+  算子库**、不是引擎的一部分 —— 它们放在 crate 之外(`lmflow/cpp/`,见 §11),**不随发布的
+  crate 分发**;由 `builtin-kernels` feature(**默认关**)编入,只在本仓库内可用。
+- **引擎自带默认 Rust 算子**(`src/builtin.rs`):`PassThrough` 等,建图时(`Graph::from_config`)
+  自动注册一次,任何配置下都在、零 C++。名字刻意不带 `Kernel` 后缀,以免与 C++ 内置算子
+  (`PassThroughKernel` …)重名 —— 注册表按名字唯一,重名注册直接报错。
 - 内置算子清单见 `cpp/kernels/register.cc` 表头。其中**张量前处理组**(纯数值 BUFFER):
   `Cast`(dtype 转换)、`Affine`(`x*scale+shift`)、`Clamp`、`Reduce`(→F64 标量)——
   统一走 double 做 dtype 分派,连续缓冲、暂不支持 F16。示例见
@@ -978,8 +986,11 @@ cc.emit(0, packet)
 
 - `lmflow`(`lmflow/core/`):`crate-type = ["lib", "staticlib", "cdylib"]`。
   `lib` 给仓库内 Rust host/测试(不过 FFI);`staticlib`/`cdylib` 给外部宿主。
-- `build.rs` 用 `cc` crate 编译 `cpp/*.cc`(算子 + ABI 断言)并链入。
-- 示例宿主:`cargo run --example hello_world`(Rust host + C++ 算子,一条命令跑通)。
+- `build.rs` **默认什么都不做**(纯 Rust);开 `builtin-kernels` 才用 `cc` 编 `../cpp/*.cc`
+  (算子 + ABI 断言)并链入。build.rs 看不到 `#[cfg(feature)]`,故读 cargo 注入的
+  `CARGO_FEATURE_BUILTIN_KERNELS` 环境变量;`../cpp` 不存在(= 从 crates.io 装的)时给出
+  明确报错而非一堆找不到文件。仓库内 CMake / Python / 移动端 / CI 都显式带该 feature。
+- 示例宿主:`cargo run --manifest-path lmflow/examples/rust/hello_world/Cargo.toml`。
 - C ABI 的验证:Rust 集成测试直接 `unsafe` 调 `extern "C"` 函数,无需 C 语言 `main`。
 
 **Python 部分:破例引入 CMake**(ADR #4)
@@ -998,22 +1009,25 @@ cc.emit(0, packet)
 ```text
 lm-flow/                          仓库根
 ├── lmflow/                       第一方源码
-│   ├── core/                     引擎 crate(包名=库名=lmflow → liblmflow.a)
-│   │   ├── build.rs              cc 编译 cpp/ 并链入
+│   ├── core/                     引擎 crate `lmflow`(包名=库名=lmflow → liblmflow.a)
+│   │   │                         **默认纯 Rust**:不编译也不捆绑任何 C++
+│   │   ├── build.rs              可选地用 cc 编 ../cpp(仅 builtin-kernels feature,默认关)
 │   │   ├── Cargo.toml · Cargo.lock
-│   │   ├── src/                  timestamp / packet / edge / node / graph / scheduler / ffi / kernel_api …
-│   │   ├── include/              公共头(消费者 #include "lmflow/xxx.h")
-│   │   │   └── lmflow/
-│   │   │       ├── flow.h            C ABI —— 唯一稳定接口(权威定义)
-│   │   │       ├── flow.hpp          C++ 算子糖层(header-only,非 ABI)
-│   │   │       ├── flow_cv.hpp       可选:LMFlowBuffer ↔ cv::Mat(仅需 OpenCV 者 include)
-│   │   │       └── flow_platform_log.hpp  可选:引擎日志接平台日志(logcat/os_log/HiLog)
-│   │   ├── cpp/                  C++ 算子
-│   │   │   ├── kernels/              内置算子集(18 个,一文件一算子 + register.cc)
-│   │   │   ├── abi_assert.cc         跨界结构体布局的编译期校验
-│   │   │   └── tests/                flow_hpp_test.cc / flow_cv_test.cc + CMakeLists
-│   │   ├── tests/                abi_layout.rs 等
-│   │   └── benches/              throughput.rs(Criterion)
+│   │   ├── src/                  timestamp / packet / edge / node / graph / scheduler / ffi /
+│   │   │                         kernel_api(Rust 算子糖)/ builtin(自带默认 Rust 算子)…
+│   │   ├── tests/                abi_layout.rs · rust_kernel.rs(纯 Rust,两种配置都跑)
+│   │   │                         其余 11 个集成测试带 #![cfg(feature = "builtin-kernels")]
+│   │   └── benches/              throughput.rs(Criterion,required-features)
+│   ├── include/                  公共头(消费者 #include "lmflow/xxx.h")
+│   │   └── lmflow/
+│   │       ├── flow.h            C ABI —— 唯一稳定接口(权威定义)
+│   │       ├── flow.hpp          C++ 算子糖层(header-only,非 ABI)
+│   │       ├── flow_cv.hpp       可选:LMFlowBuffer ↔ cv::Mat(仅需 OpenCV 者 include)
+│   │       └── flow_platform_log.hpp  可选:引擎日志接平台日志(logcat/os_log/HiLog)
+│   ├── cpp/                      C++ 侧(**非引擎**,且在 crate 之外 → 不随发布的 crate 分发)
+│   │   ├── kernels/              18 个内置 C++ 算子(一文件一算子 + register.cc 显式聚合)
+│   │   ├── abi_assert.cc         跨界结构体布局的编译期校验
+│   │   └── tests/                flow_hpp_test.cc / flow_cv_test.cc + CMakeLists
 │   ├── python/                   src/bindings.cc(pybind11)+ lmflow 包 + CMakeLists
 │   └── examples/                 examples/<lang>/<name>/:cpp · python · rust · android · ios · harmonyos
 ├── third_party/pybind11/         vendored 子模块(仅构建 Python wheel 用)
@@ -1043,7 +1057,7 @@ lm-flow/                          仓库根
 
 ---
 
-## 13. 测试策略(已落地 246 个:Rust 208 + Python 38)
+## 13. 测试策略(已落地 248 个:Rust 210 + Python 38)
 
 | 测试文件 | 数量 | 覆盖 |
 |---|---|---|

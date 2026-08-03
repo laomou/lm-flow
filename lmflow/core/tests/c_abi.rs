@@ -4,6 +4,8 @@
 //! `LMFlowPacket` 裸结构体,不碰任何 Rust 侧便利 API —— 因为外部 C/C++/Python
 //! 宿主看到的就只有这些。`examples/cpp/hello_world/hello_world_host.cc` 的逻辑与此一致。
 
+#![cfg(feature = "builtin-kernels")] // 用内置 C++ 算子:纯 Rust 构建(--no-default-features)时整文件跳过
+
 use std::ffi::{c_char, c_void, CStr, CString};
 
 use lmflow::ffi::*;

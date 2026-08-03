@@ -3,6 +3,8 @@
 //! 三种策略的差别只在两处:**就绪条件**与**入队时是否丢包**。
 //! 这里各自验证到,并特别确认 `fixed_size` 的丢包**绝不静默**。
 
+#![cfg(feature = "builtin-kernels")] // 用内置 C++ 算子:纯 Rust 构建(--no-default-features)时整文件跳过
+
 use std::time::Duration;
 
 use lmflow::{Graph, Packet, Timestamp};

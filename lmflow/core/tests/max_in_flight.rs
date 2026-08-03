@@ -6,6 +6,8 @@
 //!
 //! 用一个「按时间戳反向睡眠」的算子构造「完成顺序 ≠ 时间戳顺序」,专门压这两点。
 
+#![cfg(feature = "builtin-kernels")] // 用内置 C++ 算子:纯 Rust 构建(--no-default-features)时整文件跳过
+
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;

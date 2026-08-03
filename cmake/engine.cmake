@@ -23,7 +23,7 @@ find_package(Threads REQUIRED)
 # 故下游链接仍按需重链。
 add_custom_target(flow_engine ALL
   BYPRODUCTS "${FLOW_LIB}"
-  COMMAND ${CARGO} build ${_cargo_flags}
+  COMMAND ${CARGO} build ${_cargo_flags} --features builtin-kernels
   WORKING_DIRECTORY "${LMFLOW_SRC}/core"
   COMMENT "cargo build ${_cargo_flags} — Rust engine + C++ kernels → liblmflow.a"
   VERBATIM USES_TERMINAL)
@@ -31,7 +31,7 @@ add_custom_target(flow_engine ALL
 add_library(flow_core STATIC IMPORTED GLOBAL)
 set_target_properties(flow_core PROPERTIES IMPORTED_LOCATION "${FLOW_LIB}")
 target_include_directories(flow_core INTERFACE
-  "$<BUILD_INTERFACE:${LMFLOW_SRC}/core/include>"
+  "$<BUILD_INTERFACE:${LMFLOW_SRC}/include>"
   "$<INSTALL_INTERFACE:include>")
 target_link_libraries(flow_core INTERFACE Threads::Threads ${CMAKE_DL_LIBS} m)
 add_library(lmflow::flow_core ALIAS flow_core)

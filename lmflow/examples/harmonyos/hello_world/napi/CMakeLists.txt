@@ -18,7 +18,7 @@ endif()
 get_filename_component(LMFLOW_SRC "${CMAKE_CURRENT_SOURCE_DIR}/../../../.." ABSOLUTE)
 
 add_library(lmflow SHARED lmflow_napi.cpp)
-target_include_directories(lmflow PRIVATE "${LMFLOW_SRC}/core/include")
+target_include_directories(lmflow PRIVATE "${LMFLOW_SRC}/include")
 # libace_napi.z.so:OHOS 的 NAPI 运行时;libhilog_ndk.z.so:HiLog(日志桥用);
 # liblmflow.a:交叉编好的引擎。
 target_link_libraries(lmflow

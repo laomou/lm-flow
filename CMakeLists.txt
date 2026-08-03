@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.18)
 project(lmflow VERSION 0.1.0 LANGUAGES CXX)
 
-# 引擎是 Rust crate(lmflow/core),cargo 权威构建(build.rs 经 cc 顺带编 lmflow/core/cpp
+# 引擎是 Rust crate(lmflow/core),cargo 权威构建(build.rs 经 cc 顺带编 lmflow/cpp
 # 算子 → liblmflow)。本 CMake(仓库根)驱动 cargo,并拥有 C++/Python 侧。
 # **各组件的构建规则在各自文件夹的 CMakeLists**,根文件只做:公共基座 + 编排 + SDK 安装。
 #
@@ -26,7 +26,7 @@ if(LMFLOW_BUILD_PYTHON)
 elseif(CMAKE_SOURCE_DIR STREQUAL LMFLOW_ROOT)     # 作为顶层工程时:C++ 测试 + 装 C/C++ SDK
   if(LMFLOW_BUILD_TESTS)
     enable_testing()
-    add_subdirectory(lmflow/core/cpp/tests)
+    add_subdirectory(lmflow/cpp/tests)
   endif()
   include("${LMFLOW_ROOT}/cmake/install-sdk.cmake")
 endif()

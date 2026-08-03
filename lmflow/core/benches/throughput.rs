@@ -8,6 +8,8 @@
 //! buffer 吞吐基本相同;payload 相关成本只在读写字节的算子(InvertKernel)才显现。
 //!
 //! 跑:在 `lmflow/core` 下 `cargo bench`;报告在 `target/criterion/`。
+//!
+//! 需要 `builtin-kernels` feature(见 Cargo.toml 的 `required-features`)。
 
 use std::cell::Cell;
 use std::hint::black_box;

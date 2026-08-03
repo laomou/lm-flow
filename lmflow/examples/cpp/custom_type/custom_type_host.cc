@@ -14,7 +14,7 @@
  *     下游 `Packet::Get<T>()` 类型安全取回;契约的 type_id 由引擎在收包时校验。
  *   - `LMFLOW_REGISTER_KERNEL(K)` 一行 self-register:在**你自己控制链接**的宿主里
  *     文件作用域写一句即可(main 之前静态注册),无需集中登记。引擎内置算子则用
- *     显式聚合(静态库会裁未引用的注册对象,见 ADR #14)。
+ *     显式聚合(静态库会裁未引用的注册对象,见 docs/design.md §5.1)。
  *
  * 构建见同目录 CMakeLists.txt。运行应打印 out: 0..5 并以退出码 0 结束。
  */
@@ -91,7 +91,7 @@ int main() {
   }
 
   // 两个算子已由文件作用域的 LMFLOW_REGISTER_KERNEL 宏在 main 之前自注册(见上)——
-  // 本例是自己控制链接的可执行,self-register 安全;引擎内置算子仍走显式聚合(ADR #14)。
+  // 本例是自己控制链接的可执行,self-register 安全;引擎内置算子仍走显式聚合(design.md §5.1)。
 
   LMFlowGraph* graph = lmflow_graph_new();
   if (!graph) {

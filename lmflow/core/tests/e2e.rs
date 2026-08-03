@@ -4,6 +4,8 @@
 //! `if let` 临时值把 MutexGuard 拖到块结束而自锁死,`passthrough_pipeline`
 //! 会立刻挂住(测试超时)而不是静默错误。
 
+#![cfg(feature = "builtin-kernels")] // 用内置 C++ 算子:纯 Rust 构建(--no-default-features)时整文件跳过
+
 use std::sync::Mutex;
 
 use lmflow::{Graph, Packet, State, Timestamp};

@@ -2,6 +2,8 @@
 //!
 //! 用 Rust 的 `BufferData` 造输入缓冲、`payload()` 读回输出缓冲,穿过真实图。
 
+#![cfg(feature = "builtin-kernels")] // 用内置 C++ 算子:纯 Rust 构建(--no-default-features)时整文件跳过
+
 use lmflow::packet::Payload;
 use lmflow::{BufferData, Builtin, Graph, Packet, Timestamp};
 

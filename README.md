@@ -23,12 +23,12 @@ First-party source lives under `lmflow/`; build files and the vendored submodule
 ```text
 lm-flow/
 ├── lmflow/                    All first-party source
-│   ├── core/                  Engine — the lmflow crate (package = lib = lmflow → liblmflow.a; C ABI staticlib + cdylib)
-│   │   ├── build.rs           Compiles cpp/ via `cc` and links it in
+│   ├── core/                  Engine — the `lmflow` crate, **pure Rust** (package = lib = lmflow → liblmflow.a)
+│   │   ├── build.rs           Optionally compiles ../cpp via `cc` (feature `builtin-kernels`, off by default)
 │   │   ├── Cargo.toml · Cargo.lock
-│   │   ├── src/ · tests/      engine sources + ABI-layout consistency tests
-│   │   ├── include/lmflow/    Public headers — flow.h (C ABI, only stable interface) · flow.hpp (C++ sugar) · flow_cv.hpp · flow_platform_log.hpp
-│   │   └── cpp/               C++ kernels: kernels/ (built-ins) · abi_assert.cc · tests/
+│   │   └── src/ · tests/ · benches/
+│   ├── include/lmflow/        Public headers — flow.h (C ABI, only stable interface) · flow.hpp (C++ kernel sugar) · flow_cv.hpp · flow_platform_log.hpp
+│   ├── cpp/                   C++ side (not the engine) — kernels/ (18 built-ins) · abi_assert.cc · tests/
 │   ├── python/                pybind11 bindings (src/) + the lmflow package + CMakeLists
 │   └── examples/              each example is self-contained: examples/<lang>/<name>/
 │       ├── cpp/hello_world/    standalone C++ project (find_package or build-from-source)
@@ -59,10 +59,13 @@ The engine is a standalone Rust crate under `lmflow/core` (Rust developers work 
 
 ```bash
 cd lmflow/core
-cargo build                       # build the engine + C++ kernels
-cargo test                        # unit tests + ABI layout consistency
-cargo run --example hello_world   # two-stage passthrough pipeline, prints 0..9
-cargo bench                       # Criterion throughput suite (scheduling / queue / cross-boundary) → target/criterion/
+cargo build     # pure-Rust engine, no C++ compiled
+cargo test      # unit tests + ABI layout + Rust-kernel tests
+
+# The 18 bundled C++ kernels live outside the crate (lmflow/cpp) — opt in explicitly:
+cargo build --features builtin-kernels
+cargo test  --features builtin-kernels   # full suite (C ABI / memory / policies / …)
+cargo bench --features builtin-kernels   # Criterion throughput → target/criterion/
 ```
 
 Python:
@@ -148,8 +151,8 @@ Or build one yourself locally:
 
 ```bash
 cd lmflow/core
-cargo build --release          # → lmflow/core/target/release/liblmflow.{a,so}
-# the headers live under lmflow/core/include/lmflow
+cargo build --release --features builtin-kernels   # → lmflow/core/target/release/liblmflow.{a,so}
+# the headers live under lmflow/include/lmflow
 ```
 
 ### Build & consume with CMake

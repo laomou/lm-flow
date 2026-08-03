@@ -23,6 +23,6 @@ set(FLOW_CORE "${LMFLOW_SRC}/core/target/${RUST_TARGET}/release/liblmflow.a"
     CACHE FILEPATH "为该 ABI 预编的 liblmflow.a")
 
 add_library(lmflow_jni SHARED lmflow_jni.cc)
-target_include_directories(lmflow_jni PRIVATE "${LMFLOW_SRC}/core/include")
+target_include_directories(lmflow_jni PRIVATE "${LMFLOW_SRC}/include")
 # log:Android 系统日志;引擎的 C++ 算子需要 C++ 运行时,NDK 默认已带。
 target_link_libraries(lmflow_jni "${FLOW_CORE}" log)

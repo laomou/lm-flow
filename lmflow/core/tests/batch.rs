@@ -3,6 +3,8 @@
 //! 关键断言:攒够 N 个包一次交给算子(`process()` 用 `input_count`/`input_at` 读整批);
 //! 关流时不足一批也刷出(不丢数据);正常终止。
 
+#![cfg(feature = "builtin-kernels")] // 用内置 C++ 算子:纯 Rust 构建(--no-default-features)时整文件跳过
+
 use lmflow::{Graph, Packet, State, Timestamp};
 
 fn init() {

@@ -7,6 +7,8 @@
 //!     `docs/design.md` §3.4 专门警告过:引擎若多留一份引用,CoW 会静默退化成
 //!     每帧全拷贝 —— 不报错、只变慢。所以必须有测试钉住它。
 
+#![cfg(feature = "builtin-kernels")] // 用内置 C++ 算子:纯 Rust 构建(--no-default-features)时整文件跳过
+
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicIsize, Ordering};
 

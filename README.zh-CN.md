@@ -25,12 +25,12 @@
 ```text
 lm-flow/
 ├── lmflow/                    第一方源码
-│   ├── core/                  引擎 —— lmflow crate(包名=库名=lmflow → liblmflow.a;C ABI staticlib+cdylib)
-│   │   ├── build.rs           用 cc 编译 cpp/ 并链入
+│   ├── core/                  引擎 —— `lmflow` crate,**纯 Rust**(包名=库名=lmflow → liblmflow.a)
+│   │   ├── build.rs           可选地用 cc 编 ../cpp(feature builtin-kernels,默认关)
 │   │   ├── Cargo.toml · Cargo.lock
-│   │   ├── src/ · tests/      引擎源码 + ABI 布局一致性测试
-│   │   ├── include/lmflow/    公共头 —— flow.h(C ABI,唯一稳定接口)· flow.hpp(C++ 糖层)· flow_cv.hpp · flow_platform_log.hpp
-│   │   └── cpp/               C++ 算子:kernels/(内置)· abi_assert.cc · tests/
+│   │   └── src/ · tests/ · benches/
+│   ├── include/lmflow/        公共头 —— flow.h(C ABI,唯一稳定接口)· flow.hpp(C++ 算子糖层)· flow_cv.hpp · flow_platform_log.hpp
+│   ├── cpp/                   C++ 侧(非引擎)—— kernels/(18 个内置算子)· abi_assert.cc · tests/
 │   ├── python/                pybind11 绑定(src/)+ lmflow 包 + CMakeLists
 │   └── examples/              每个示例是独立工程:examples/<lang>/<name>/
 │       ├── cpp/hello_world/    独立 C++ 工程(find_package 或从源码构建)
@@ -61,10 +61,13 @@ lm-flow/
 
 ```bash
 cd lmflow/core
-cargo build                       # 编译引擎 + C++ 算子
-cargo test                        # 单测 + ABI 布局一致性
-cargo run --example hello_world   # 两级直通管线,输出 0..9
-cargo bench                       # Criterion 吞吐基准(调度 / 队列 / 跨界)→ target/criterion/
+cargo build     # 纯 Rust 引擎,不编任何 C++
+cargo test      # 单测 + ABI 布局 + Rust 算子测试
+
+# 18 个内置 C++ 算子在 crate 之外(lmflow/cpp),要显式开:
+cargo build --features builtin-kernels
+cargo test  --features builtin-kernels   # 全量套件(C ABI / 内存 / 策略 …)
+cargo bench --features builtin-kernels   # Criterion 吞吐 → target/criterion/
 ```
 
 Python:
@@ -152,8 +155,8 @@ g++ -std=c++17 -Iinclude my_host.cc lib/liblmflow.a -lpthread -ldl -lm -o my_hos
 
 ```bash
 cd lmflow/core
-cargo build --release          # → lmflow/core/target/release/liblmflow.{a,so}
-# 头文件在 lmflow/core/include/lmflow 下
+cargo build --release --features builtin-kernels   # → lmflow/core/target/release/liblmflow.{a,so}
+# 头文件在 lmflow/include/lmflow 下
 ```
 
 ### 用 CMake 构建与消费

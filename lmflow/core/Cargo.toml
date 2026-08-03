@@ -1,15 +1,21 @@
 [package]
 name = "lmflow"
 version = "0.2.0"
-description = "Dataflow-graph compute engine: a Rust scheduler behind a stable C ABI, with C++ kernels"
+description = "Dataflow-graph compute engine: a pure-Rust scheduler behind a stable C ABI"
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/laomou/lm-flow"
 readme = "README.md"
 keywords = ["dataflow", "graph", "pipeline", "realtime", "ffi"]
 categories = ["concurrency", "multimedia"]
-# C++ 单元测试不必进发布 tarball;cpp/kernels、cpp/abi_assert.cc、include/** 默认包含(build.rs 需要)。
-exclude = ["cpp/tests/**"]
+
+[features]
+# 默认纯 Rust:发布出去的 crate 不含、也不编译任何 C++(`cargo add lmflow` 无需 C++ 工具链)。
+default = []
+# 编译并链入 ../cpp/kernels/ 的 18 个内置 C++ 算子。**仅在 lm-flow 仓库内可用** ——
+# 那些源码在 crate 目录之外,不随发布的 crate 分发(cargo 只打包包目录内的文件);
+# 仓库内的 CMake / Python / 移动端 / CI 都显式带 `--features builtin-kernels`。
+builtin-kernels = []
 
 [lib]
 name = "lmflow"
@@ -32,3 +38,6 @@ criterion = { version = "0.5", features = ["html_reports"] }
 [[bench]]
 name = "throughput"
 harness = false
+# 基准跑的是内置 C++ 算子链,故需要 builtin-kernels(默认关,即默认不编 bench)。
+#(不能只靠文件内 #![cfg]:criterion_main! 生成的 main 会一起消失 → E0601)。
+required-features = ["builtin-kernels"]
