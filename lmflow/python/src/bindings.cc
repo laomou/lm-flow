@@ -665,8 +665,8 @@ class Graph {
     const char* s = lmflow_graph_dump(g_);
     return s ? s : "";
   }
-  std::string to_dot() const {
-    const char* s = lmflow_graph_to_dot(g_);
+  std::string to_dot(bool with_stats) const {
+    const char* s = lmflow_graph_to_dot(g_, with_stats);
     return s ? s : "";
   }
   std::string last_error() const {
@@ -703,6 +703,9 @@ class Graph {
     d["errors"] = st.errors;
     d["total_process_us"] = st.total_process_us;
     d["max_process_us"] = st.max_process_us;
+    d["packets_in"] = st.packets_in;
+    d["packets_out"] = st.packets_out;
+    d["peak_queue_depth"] = st.peak_queue_depth;
     d["queued"] = st.queued;
     return d;
   }
@@ -980,7 +983,7 @@ PYBIND11_MODULE(_lmflow, m) {
       .def("new_buffer", &Graph::new_buffer, py::arg("shape"), py::arg("dtype"))
       .def_property_readonly("state", &Graph::state)
       .def("dump", &Graph::dump)
-      .def("to_dot", &Graph::to_dot)
+      .def("to_dot", &Graph::to_dot, py::arg("with_stats") = false)
       .def("last_error", &Graph::last_error)
       .def("queue_depth", &Graph::queue_depth)
       .def("dropped_count", &Graph::dropped_count)

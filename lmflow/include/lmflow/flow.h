@@ -680,9 +680,11 @@ const char* lmflow_registered_kernel_name(size_t idx);
  * ⚠ 引擎**无法中断**卡住的算子(与 cancel 同理,没有抢占)。这一层能做的只有
  *   「让你看见」;真正的修复是算子自身要有超时逻辑。
  *
- * struct_size 约定:调用方填 sizeof(LMFlowNodeStats),引擎只写它认得且装得下的字段。
- * 这里用 struct_size 而非固定预留字段(与 LMFlowBuffer 的做法不同)—— 因为统计项
- * 天然会持续增加,而 LMFlowBuffer 在热路径上、形状稳定,两者取舍不同。 */
+ * struct_size 约定:调用方**必须**填 sizeof(LMFlowNodeStats)。引擎写出完整结构体,
+ * 故 struct_size 小于引擎的 sizeof 时会**明确失败**(返回 false + 置错误),而不是越界写坏
+ * 调用方的缓冲 —— 换句话说它是**溢出护栏**:统计项增加后,老宿主重编即可(拿到的是
+ * 干净的报错,不是内存损坏)。这里用 struct_size 而非固定预留字段(与 LMFlowBuffer 的
+ * 做法不同)—— 因为统计项天然会持续增加,而 LMFlowBuffer 在热路径上、形状稳定。 */
 typedef struct {
   uint32_t struct_size; /* 入参:sizeof(LMFlowNodeStats) */
   uint32_t reserved0;
@@ -694,6 +696,9 @@ typedef struct {
   uint64_t errors;         /* 累计失败次数 */
   int64_t total_process_us; /* 累计耗时,可算均值 */
   int64_t max_process_us;   /* 最慢的一次 */
+  uint64_t packets_in;      /* 累计从输入口取走的包数 */
+  uint64_t packets_out;     /* 累计产出并派发下游的包数 */
+  size_t peak_queue_depth;  /* 下游入队时观察到的队列深度峰值(高水位)*/
   size_t queued;            /* 该节点所有输入边的积压总数 */
 } LMFlowNodeStats;
 
@@ -709,8 +714,13 @@ const char* lmflow_graph_counter_name(LMFlowGraph*, size_t idx);
 const char* lmflow_graph_dump(LMFlowGraph*);
 /* 拓扑的 Graphviz DOT 导出(`dot -Tsvg` 可渲染):子图命名空间还原成 cluster,
  * 节点填色 = 所在执行器(线程池),图例列线程数 / 绑定核 / 实时优先级。
+ *
+ * with_stats = true:节点标签额外标出运行统计(处理数 · 平均延迟 · 收/发包数 ·
+ * 队列峰值 · 错误数),且填色改为**按平均延迟的热力图**(绿=快 → 红=慢),一眼看出
+ * 瓶颈节点;此时执行器仅以标签里的 @name 标出。可在图运行期间随时调用(读的是原子快照)。
+ *
  * 返回值同 dump:存放于线程局部缓冲,生命周期至本线程下次调用本函数,调用方不得 free。 */
-const char* lmflow_graph_to_dot(LMFlowGraph*);
+const char* lmflow_graph_to_dot(LMFlowGraph*, bool with_stats);
 /* 指定边的当前积压包数;端口不存在返回 LMFLOW_INVALID_ID。 */
 size_t lmflow_graph_queue_depth(LMFlowGraph*, const char* port);
 

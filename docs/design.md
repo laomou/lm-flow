@@ -1,8 +1,8 @@
 # lmflow 设计方案
 
 > 状态:**成品**。Rust 引擎、C ABI、C++ 糖层(含 OpenCV 互转)、18 个内置算子、
-> Python 绑定(pybind11)、原生 SDK 发布(各平台头文件+库)全部就位;**250 个测试**
-> (Rust 212 + Python 38)全绿,TSan 硬门禁 0 竞态。Rust / C++ / Python 三种宿主的
+> Python 绑定(pybind11)、原生 SDK 发布(各平台头文件+库)全部就位;**255 个测试**
+> (Rust 217 + Python 38)全绿,TSan 硬门禁 0 竞态。Rust / C++ / Python 三种宿主的
 > hello_world 都输出正确;支持线程池绑核 + 实时优先级(Linux/Android),可交叉编到
 > Android / iOS / 鸿蒙。
 > 定位:一个数据流图计算框架 —— 把计算描述成**有向图**,节点是**算子(Kernel)**,
@@ -72,6 +72,7 @@
 | 19 | **输入策略做成节点级可插拔**(`sync`/`immediate`/`fixed_size`/`sync_set`) | 实时丢帧与(A 阶段的)时间戳对齐共用同一扩展点;`fixed_size` 同时是「内部边无界」的配套内存约束 |
 | 20 | **全局水位兜底**,超限时转化为图输入口背压 | 内部边无界的直接后果:100 帧 × 6 条边 × 6MB ≈ 3.6GB。只在图输入口刹车不会重新引入 diamond 死锁 |
 | 21 | **节点级统计 + watchdog**,但**不做抢占中断** | 卡死必须能定位到具体节点;而中断一个正在跑的算子无法安全实现(同 `cancel` 语义),故只做可观测 |
+| 31 | **节点统计全用原子、不用 `Mutex`** | 每包每节点都要更新,放锁里就是在热路径加锁(改造前每包 4 次加锁:计时进/出 + 耗时 + processed)。改原子后实测端到端 **-4~5%**,且顺带满足 R1「调算子时不持任何引擎锁」。计数器用 `Relaxed`(不参与 happens-before);`started_us` 归零时**不清**,读侧按 `in_flight > 0` 判断,从而避开「清零 vs 新一次开始」的覆盖竞争 |
 | 22 | **`type_id` = FNV-1a(修饰名)**,而非 `typeid().hash_code()` | 后者实现定义、不保证跨动态库一致;而本项目 C++ 算子在 core、Python 绑定在另一 `.so`,天然跨产物。事后再改需全量重编,故一开始就用稳定方案 + `LMFLOW_DECLARE_TYPE_NAME` 逃生口 |
 | 23 | **时间戳单调性:图输入口强制校验,内部边仅 debug 构建校验** | 外部数据进入的唯一门校验一次即可挡住绝大多数乱序;内部边逐包校验是热路径开销,且算子产出乱序属算子 bug,用 `debug_assertions` 捕获即可 |
 | 24 | **不做 stream header**,用 side packet 覆盖 | header 会引入「流上的第二种数据」及其生命周期问题;side packet 已能表达「整条流不变的属性」。少一个概念优于多一个 |
@@ -281,7 +282,7 @@ bool       lmflow_ctx_has_side_packet(const LMFlowContext*, const char* name);
 | 算子自我信息 | `lmflow_ctx_node_name` `…_kernel_name` `lmflow_ctx_log` `lmflow_ctx_set_error` `lmflow_ctx_close_reason` `lmflow_ctx_counter_add` |
 | 参数(增强) | 点号路径嵌套、`lmflow_ctx_require_option_*`(必需参数)、`lmflow_ctx_option_*_array`(数组) |
 | 全局水位 | `lmflow_graph_total_queued` `…_total_queued_bytes`;YAML `max_queued_packets/bytes` |
-| 统计 | `lmflow_graph_node_stats`(`LMFlowNodeStats`)、`lmflow_graph_counter_value`;YAML `watchdog_ms` |
+| 统计 | `lmflow_graph_node_stats`(`LMFlowNodeStats`,**全原子无锁**采集)、`lmflow_graph_counter_value`;YAML `watchdog_ms` |
 | 状态 / 拓扑 | `lmflow_graph_state` `…_num_input_ports/output_ports/num_nodes` `lmflow_registered_kernel_*` |
 | 内省 | `lmflow_graph_dump` `lmflow_graph_to_dot`(Graphviz DOT) `lmflow_graph_queue_depth` `lmflow_graph_dropped_count` `lmflow_graph_last_error` `lmflow_packet_debug_string` |
 
@@ -294,7 +295,8 @@ bool       lmflow_ctx_has_side_packet(const LMFlowContext*, const char* name);
 - `lmflow_last_error()` 是**线程局部**的:算子在工作线程失败时,其文本不会出现在宿主线程。
   要拿那条信息用 `lmflow_graph_last_error(graph)`。
 - `lmflow_graph_dump` 返回**线程局部**缓冲,多线程同时调用不会互相踩踏。
-- `lmflow_graph_to_dot` 导出 Graphviz DOT(`dot -Tsvg` 可渲染):子图命名空间还原成嵌套 cluster,节点填色 = 所在执行器,图例列各线程池的线程数 / 绑定核(亲和力)/ 实时优先级。返回值同 dump(线程局部,不得 free)。
+- `lmflow_graph_to_dot(g, with_stats)` 导出 Graphviz DOT(`dot -Tsvg` 可渲染):子图命名空间还原成嵌套 cluster,节点填色 = 所在执行器,图例列各线程池的线程数 / 绑定核(亲和力)/ 实时优先级。返回值同 dump(线程局部,不得 free)。
+  `with_stats = true` 时节点标签额外标出运行统计(处理数 · 平均延迟 · 收/发包数 · 队列峰值 · 错误数),填色改为**按平均延迟的热力图**(绿=快 → 红=慢)—— 一眼定位瓶颈节点;此时执行器仅以标签里的 `@name` 标出。可在运行期间随时调用(读原子快照)。
 - 日志回调:引擎保证调用时**不持有任何内部锁**,故回调里可安全抢 GIL / 加锁。
 
 ---
@@ -1061,7 +1063,7 @@ lm-flow/                          仓库根
 
 ---
 
-## 13. 测试策略(已落地 250 个:Rust 212 + Python 38)
+## 13. 测试策略(已落地 255 个:Rust 217 + Python 38)
 
 | 测试文件 | 数量 | 覆盖 |
 |---|---|---|
@@ -1138,7 +1140,7 @@ lm-flow/                          仓库根
 | 时间戳单调性校验放在哪层 | 图输入口强制校验;内部边仅 `debug_assertions` 下校验(ADR #23) |
 | 内部边软水位的默认值与告警形式 | 软水位默认取顶层 `max_queue_size`(默认 100);每条边**首次**超限打 WARN,之后按 1/2/4/8… 指数退避,避免日志洪水;深度与丢弃数经 `queue_depth` / `dropped_count` 可查 |
 | `type_id` 是否改稳定方案 | **现在就改**为 FNV-1a(修饰名)+ `LMFLOW_DECLARE_TYPE_NAME` 逃生口(ADR #22) |
-| 生产可观测性 | 已落地:`LMFlowNodeStats`(含 running / running_for_us / 耗时统计)、`watchdog_ms`、算子自报计数器 |
+| 生产可观测性 | 已落地:`LMFlowNodeStats`(running / running_for_us / 耗时统计 / **收发包数 / 队列深度峰值**)、DOT 热力图、`watchdog_ms`、算子自报计数器 |
 | 是否启用 `LMFLOW_TYPE_HOST_OBJECT` | **不启用**(ADR #26) |
 | stream header | **不做**,用 side packet 覆盖(ADR #24) |
 | subgraph 组合 | **已支持**:建图期展开 + `include:` 引外部库(ADR #27,§7.11) |
@@ -1150,7 +1152,7 @@ lm-flow/                          仓库根
 | 结构体 | 做法 | 为什么 |
 |---|---|---|
 | `LMFlowBuffer` | 固定 `reserved` 字段 | 在**热路径**上、形状稳定(对齐 numpy buffer protocol),固定布局便于零开销传递 |
-| `LMFlowNodeStats` | 入参 `struct_size` | **诊断用**、字段天然会持续增加;调用方填 `sizeof`,引擎只写认得且装得下的部分 |
+| `LMFlowNodeStats` | 入参 `struct_size` | **诊断用**、字段天然会持续增加;调用方填 `sizeof`。引擎写出完整结构体,故 `struct_size` 偏小时**明确失败**(溢出护栏)—— 字段增加后老宿主重编即可,拿到的是干净报错而非内存损坏 |
 
 ### 15.2 实现阶段的验证结果
 

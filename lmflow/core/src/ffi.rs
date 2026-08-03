@@ -1944,16 +1944,30 @@ pub unsafe extern "C" fn lmflow_graph_dump(g: *mut LMFlowGraph) -> *const c_char
 }
 
 /// 拓扑的 Graphviz DOT 导出。返回值同 `dump`:线程局部缓冲,调用方不得 free。
+///
+/// `with_stats != 0` 时在节点标签上标出运行统计并按平均延迟上热力图(见
+/// `Graph::to_dot_with_stats`);可在运行期间随时调用。
 #[no_mangle]
-pub unsafe extern "C" fn lmflow_graph_to_dot(g: *mut LMFlowGraph) -> *const c_char {
+pub unsafe extern "C" fn lmflow_graph_to_dot(
+    g: *mut LMFlowGraph,
+    with_stats: bool,
+) -> *const c_char {
     guard_val(c"".as_ptr(), || {
         thread_local! {
             static BUF: std::cell::RefCell<std::ffi::CString> =
                 std::cell::RefCell::new(std::ffi::CString::default());
         }
         // 未初始化图 → 合法的空 digraph(而非文本占位符),便于直接喂 graphviz。
-        let text =
-            graph_of(g).map_or_else(|| "digraph lmflow {\n}\n".to_string(), |gr| gr.to_dot());
+        let text = graph_of(g).map_or_else(
+            || "digraph lmflow {\n}\n".to_string(),
+            |gr| {
+                if with_stats {
+                    gr.to_dot_with_stats()
+                } else {
+                    gr.to_dot()
+                }
+            },
+        );
         BUF.with(|b| {
             *b.borrow_mut() = std::ffi::CString::new(text).unwrap_or_default();
             b.borrow().as_ptr()
@@ -1973,6 +1987,9 @@ pub struct LMFlowNodeStats {
     pub errors: u64,
     pub total_process_us: i64,
     pub max_process_us: i64,
+    pub packets_in: u64,
+    pub packets_out: u64,
+    pub peak_queue_depth: usize,
     pub queued: usize,
 }
 
@@ -2010,6 +2027,9 @@ pub unsafe extern "C" fn lmflow_graph_node_stats(
                 errors: s.errors,
                 total_process_us: s.total_process_us,
                 max_process_us: s.max_process_us,
+                packets_in: s.packets_in,
+                packets_out: s.packets_out,
+                peak_queue_depth: s.peak_queue_depth,
                 queued: s.queued,
             },
         );

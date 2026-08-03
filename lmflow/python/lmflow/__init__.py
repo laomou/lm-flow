@@ -347,15 +347,22 @@ class Graph:
         """Human-readable snapshot of topology and state (node table shows running/elapsed — handy for locating a stall)."""
         return self._g.dump()
 
-    def to_dot(self) -> str:
+    def to_dot(self, with_stats: bool = False) -> str:
         """Graphviz DOT of the topology (pipe to ``dot -Tsvg``).
 
         Subgraph namespaces are restored as nested clusters; each node is
         coloured by the thread pool it runs on, and a legend lists every
         executor's thread count, pinned CPU cores (affinity), and realtime
         priority.
+
+        With ``with_stats=True`` each node label also carries its runtime
+        counters (packets processed, average latency, packets in/out, peak
+        queue depth, errors) and the fill colour becomes a **latency heat map**
+        (green = fast, red = slow), making the bottleneck node obvious. Safe to
+        call while the graph is running — the stats are read as an atomic
+        snapshot. Executors are then shown only as ``@name`` in the label.
         """
-        return self._g.to_dot()
+        return self._g.to_dot(with_stats)
 
     def last_error(self) -> str:
         """Graph-level error text — the only place to get a worker-thread kernel's failure reason."""

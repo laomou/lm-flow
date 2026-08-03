@@ -9,7 +9,7 @@
 use std::cell::UnsafeCell;
 use std::collections::{BTreeMap, VecDeque};
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Instant;
 
@@ -307,12 +307,55 @@ impl NodeSched {
     }
 }
 
+/// 节点级运行统计。**全原子、无锁** —— 每包每节点都要更新,放 `Mutex` 里就是在热路径上
+/// 加锁(改造前每包要拿 4 次锁:计时进/出 + 耗时 + processed)。
+///
+/// 计数器用 `Relaxed`:它们不参与任何 happens-before 推理,只被读侧当快照看。
+/// `max_in_flight > 1` 时同一节点会被多个工作线程并发更新,故必须是多写者安全的。
 #[derive(Debug, Default)]
 struct NodeStats {
-    processed: u64,
-    errors: u64,
-    total_us: i64,
-    max_us: i64,
+    processed: AtomicU64,
+    errors: AtomicU64,
+    total_us: AtomicI64,
+    max_us: AtomicI64,
+    /// 本节点从输入口取走的包数(在 `try_claim` 弹包处累加)
+    packets_in: AtomicU64,
+    /// 本节点产出并派发下游的包数(在 `flush_staging` 派发处累加)
+    packets_out: AtomicU64,
+    /// 下游入队时观察到的**队列深度峰值**(高水位)—— 定位积压点
+    peak_queue_depth: AtomicUsize,
+    /// 正在执行算子回调的并发数(> 0 即「在跑」)
+    in_flight: AtomicUsize,
+    /// 最近一次 `in_flight` 0→1 跃变的时刻(相对 [`GraphInner::epoch`] 的微秒)。
+    /// **归零时不清零** —— 读侧一律先看 `in_flight > 0` 再用它,从而避开
+    /// 「清零」与「新一次开始」互相覆盖的竞争(那会让诊断值瞬时错乱)。
+    started_us: AtomicI64,
+}
+
+/// 平均每次 process 耗时(µs);未跑过则 0。
+fn avg_process_us(st: &NodeStats) -> f64 {
+    let n = st.processed.load(Ordering::Relaxed);
+    if n == 0 {
+        0.0
+    } else {
+        st.total_us.load(Ordering::Relaxed) as f64 / n as f64
+    }
+}
+
+/// 热力图配色:按 `v / max` 从绿(快)线性过渡到红(慢)。`max <= 0` 时返回白色。
+fn heat_color(v: f64, max: f64) -> String {
+    if max <= 0.0 {
+        return "white".to_string();
+    }
+    let t = (v / max).clamp(0.0, 1.0);
+    // 绿 (0xB7E1A1) → 红 (0xE88A7D),在 RGB 空间线性插值(够直观,不必上 HSL)
+    let lerp = |a: u8, b: u8| (a as f64 + (b as f64 - a as f64) * t).round() as u8;
+    format!(
+        "#{:02X}{:02X}{:02X}",
+        lerp(0xB7, 0xE8),
+        lerp(0xE1, 0x8A),
+        lerp(0xA1, 0x7D)
+    )
 }
 
 pub struct Node {
@@ -336,7 +379,8 @@ pub struct Node {
     ctxs: Vec<UnsafeCell<Context>>,
     max_in_flight: usize,
     sched: Mutex<NodeSched>,
-    stats: Mutex<NodeStats>,
+    /// 全原子,无锁 —— 见 [`NodeStats`]
+    stats: NodeStats,
     /// 每个输入口一条独立队列(见模块头注释)
     input_queues: Vec<Mutex<VecDeque<Packet>>>,
     input_closed: Vec<AtomicBool>,
@@ -349,8 +393,6 @@ pub struct Node {
     /// 这是多输入口对齐的依据 —— 只有确知某口不会再来更早的包,
     /// 才能安全地在当前最小时间戳上组一次 Process。
     input_bounds: Vec<Mutex<Timestamp>>,
-    /// 正在执行算子回调的计时:(并发数, 最早开始时刻)—— 让「卡死」可定位。
-    running_timing: Mutex<(usize, Option<Instant>)>,
 }
 
 // 安全性:Node 内每个 UnsafeCell<Context> 槽只在被「认领」(从 free_slots 取出而未归还)
@@ -527,6 +569,8 @@ pub struct GraphInner {
     side_packets: Mutex<BTreeMap<String, Packet>>,
     /// 各算子在 GetContract 里声明的必需 side packet:(名字, 声明它的节点)
     required_side_packets: Vec<(String, String)>,
+    /// 计时基准。`Instant` 无法放进原子,故节点统计里存「相对本基准的微秒」。
+    epoch: Instant,
 }
 
 /// 图句柄。
@@ -749,7 +793,17 @@ impl Graph {
 
     /// 导出 Graphviz DOT(拓扑 + 子图命名空间 cluster + 执行器/绑核图例)。见 `GraphInner::to_dot`。
     pub fn to_dot(&self) -> String {
-        self.inner.to_dot()
+        self.inner.to_dot(false)
+    }
+
+    /// 同 [`to_dot`](Self::to_dot),但在每个节点标签上标出运行统计
+    /// (处理数 · 平均延迟 · 收/发包数 · 队列峰值 · 错误数),并把填充色换成
+    /// **按平均延迟的热力图**(绿=快 → 红=慢)—— 一眼看出瓶颈在哪个节点。
+    ///
+    /// 可在图运行期间随时调用(统计是原子读的快照),不必等跑完。
+    /// 注意:热力图占用了「按执行器上色」那一维,执行器仍以标签里的 `@name` 标出。
+    pub fn to_dot_with_stats(&self) -> String {
+        self.inner.to_dot(true)
     }
 
     pub fn node_stats(&self, i: usize) -> Option<NodeStatsSnapshot> {
@@ -829,6 +883,12 @@ pub struct NodeStatsSnapshot {
     pub errors: u64,
     pub total_process_us: i64,
     pub max_process_us: i64,
+    /// 从输入口取走的包数
+    pub packets_in: u64,
+    /// 产出并派发下游的包数
+    pub packets_out: u64,
+    /// 下游入队时观察到的队列深度峰值(高水位)
+    pub peak_queue_depth: usize,
     pub queued: usize,
 }
 
@@ -1073,7 +1133,7 @@ impl GraphInner {
                 ctxs,
                 max_in_flight: mif,
                 sched: Mutex::new(NodeSched::new(mif)),
-                stats: Mutex::new(NodeStats::default()),
+                stats: NodeStats::default(),
                 input_queues: (0..ins.len())
                     .map(|_| Mutex::new(VecDeque::new()))
                     .collect(),
@@ -1083,7 +1143,6 @@ impl GraphInner {
                 input_bounds: (0..ins.len())
                     .map(|_| Mutex::new(Timestamp::pre_stream()))
                     .collect(),
-                running_timing: Mutex::new((0, None)),
             });
             // 记录该算子声明的必需 side packet,start 时校验
             for name in &contract.required_side_packets {
@@ -1111,6 +1170,7 @@ impl GraphInner {
             paused: AtomicBool::new(false),
             side_packets: Mutex::new(BTreeMap::new()),
             required_side_packets: required,
+            epoch: Instant::now(),
         })
     }
 }
@@ -1402,6 +1462,11 @@ impl GraphInner {
                 q.push_back(pkt.clone());
             }
             let depth = q.len();
+            // 高水位:depth 本就为软限告警算好了,这里顺手 fetch_max —— 定位积压节点。
+            self.nodes[node]
+                .stats
+                .peak_queue_depth
+                .fetch_max(depth, Ordering::Relaxed);
             drop(q);
             // 入队后,该口不会再来 <= 最后这个包时间戳的数据
             if let Some(last) = packets.last() {
@@ -1563,6 +1628,7 @@ impl GraphInner {
                 for _ in 0..*size {
                     let Some(p) = q.pop_front() else { break };
                     self.shared.on_dequeue(p.byte_size());
+                    node.stats.packets_in.fetch_add(1, Ordering::Relaxed);
                     last_ts = p.timestamp();
                     ctx.input_batches[0].push(p);
                 }
@@ -1583,6 +1649,7 @@ impl GraphInner {
                     .pop_front()
                 {
                     self.shared.on_dequeue(p.byte_size());
+                    node.stats.packets_in.fetch_add(1, Ordering::Relaxed);
                     ctx.inputs[port] = Some(p);
                 }
                 ctx.inputs_done[port] =
@@ -1604,6 +1671,7 @@ impl GraphInner {
                     .pop_front()
                 {
                     self.shared.on_dequeue(p.byte_size());
+                    node.stats.packets_in.fetch_add(1, Ordering::Relaxed);
                     ctx.inputs[port] = Some(p);
                 }
             }
@@ -1672,7 +1740,7 @@ impl GraphInner {
         // 契约类型校验(在本槽上)。类型不符宁可报错,也不让算子按错误类型解读内存。
         let ok = match self.check_input_types(n, slot) {
             Err(e) => {
-                node.stats.lock().expect("stats lock poisoned").errors += 1;
+                node.stats.errors.fetch_add(1, Ordering::Relaxed);
                 self.shared.record_error(e);
                 false
             }
@@ -1684,11 +1752,11 @@ impl GraphInner {
                 }
                 if rc != 0 {
                     let e = unsafe { node.ctx_slot(slot) }.take_error(rc);
-                    node.stats.lock().expect("stats lock poisoned").errors += 1;
+                    node.stats.errors.fetch_add(1, Ordering::Relaxed);
                     self.shared.record_error(e);
                     false
                 } else {
-                    node.stats.lock().expect("stats lock poisoned").processed += 1;
+                    node.stats.processed.fetch_add(1, Ordering::Relaxed);
                     true
                 }
             }
@@ -1795,6 +1863,10 @@ impl GraphInner {
         };
         for (edge, packets, explicit_bound) in batches {
             if !packets.is_empty() {
+                self.nodes[n]
+                    .stats
+                    .packets_out
+                    .fetch_add(packets.len() as u64, Ordering::Relaxed);
                 self.dispatch(edge, packets);
                 self.schedule_consumers(edge);
                 continue;
@@ -2041,14 +2113,15 @@ impl GraphInner {
         // 直接交出 UnsafeCell 内部指针:不构造 Rust 引用,故与回调内
         // 从该指针造出的 `&mut Context` 不冲突(该槽此刻由本调用独占持有)。
         let ctx_ptr = node.ctxs[slot].get() as *mut c_void;
-        {
-            let mut t = node.running_timing.lock().expect("timing lock poisoned");
-            if t.0 == 0 {
-                t.1 = Some(Instant::now());
-            }
-            t.0 += 1;
-        }
+        // 记账全走原子:改造前这里每次调用要拿 2 次 running_timing 锁 + 1 次 stats 锁
+        // (再加 run_node 里的 processed 一次)。R1 要求「调算子时不持任何引擎锁」——
+        // 原子天然满足,也顺带把 4 对 mutex 从每包热路径上去掉了。
         let started = Instant::now();
+        // 一次时钟读两用:既作本次耗时起点,也作「本节点开始在跑」的时刻。
+        if node.stats.in_flight.fetch_add(1, Ordering::Relaxed) == 0 {
+            let since_epoch = started.saturating_duration_since(self.epoch).as_micros() as i64;
+            node.stats.started_us.store(since_epoch, Ordering::Relaxed);
+        }
 
         // 安全性:ctx_ptr 来自本槽的 UnsafeCell,该槽此刻独占。
         let rc = unsafe {
@@ -2060,19 +2133,12 @@ impl GraphInner {
         };
 
         let us = started.elapsed().as_micros() as i64;
-        {
-            let mut t = node.running_timing.lock().expect("timing lock poisoned");
-            t.0 -= 1;
-            if t.0 == 0 {
-                t.1 = None;
-            }
-        }
+        // 归零时**不清** started_us:读侧按 in_flight > 0 判断是否在跑,
+        // 故无需清零,也就不存在「清零」与「新一次开始」互相覆盖的竞争。
+        node.stats.in_flight.fetch_sub(1, Ordering::Relaxed);
         if matches!(phase, KernelPhase::Process) {
-            let mut st = node.stats.lock().expect("stats lock poisoned");
-            st.total_us += us;
-            if us > st.max_us {
-                st.max_us = us;
-            }
+            node.stats.total_us.fetch_add(us, Ordering::Relaxed);
+            node.stats.max_us.fetch_max(us, Ordering::Relaxed);
         }
         let wd = self.shared.config.watchdog_ms;
         if wd > 0 && us as u64 > wd * 1000 {
@@ -2097,18 +2163,27 @@ impl GraphInner {
 
     fn node_stats(&self, i: usize) -> Option<NodeStatsSnapshot> {
         let node = self.nodes.get(i)?;
-        let st = node.stats.lock().expect("stats lock poisoned");
-        let (run_count, earliest) = *node.running_timing.lock().expect("timing lock poisoned");
-        let since = if run_count > 0 { earliest } else { None };
+        let st = &node.stats;
+        // 先看 in_flight 再用 started_us —— 后者归零时不清,只在「在跑」时有意义。
+        let running = st.in_flight.load(Ordering::Relaxed) > 0;
+        let running_for_us = if running {
+            let now_us = self.epoch.elapsed().as_micros() as i64;
+            (now_us - st.started_us.load(Ordering::Relaxed)).max(0)
+        } else {
+            0
+        };
         Some(NodeStatsSnapshot {
             node_name: node.name.clone(),
             kernel_name: node.kernel_name.clone(),
-            running: since.is_some(),
-            running_for_us: since.map_or(0, |t| t.elapsed().as_micros() as i64),
-            processed: st.processed,
-            errors: st.errors,
-            total_process_us: st.total_us,
-            max_process_us: st.max_us,
+            running,
+            running_for_us,
+            processed: st.processed.load(Ordering::Relaxed),
+            errors: st.errors.load(Ordering::Relaxed),
+            total_process_us: st.total_us.load(Ordering::Relaxed),
+            max_process_us: st.max_us.load(Ordering::Relaxed),
+            packets_in: st.packets_in.load(Ordering::Relaxed),
+            packets_out: st.packets_out.load(Ordering::Relaxed),
+            peak_queue_depth: st.peak_queue_depth.load(Ordering::Relaxed),
             queued: (0..node.input_queues.len())
                 .map(|p| node.queue_len(p))
                 .sum(),
@@ -2167,7 +2242,7 @@ impl GraphInner {
     /// - 边标注端口名;图输入/输出口画成独立形状。
     ///
     /// DOT id 用 `n{下标}` / `pin{边}` / `pout{边}`(纯下标,绝不撞名;人名一律进 label)。
-    fn to_dot(&self) -> String {
+    fn to_dot(&self, with_stats: bool) -> String {
         // 执行器配色板(浅色填充);按执行器序号取模。
         const COLORS: &[&str] = &[
             "#cde4ff", "#d7f0d0", "#ffe4c7", "#f0d0e8", "#d0eeee", "#efe6b0", "#e0d4f0", "#ffd6d6",
@@ -2217,22 +2292,53 @@ impl GraphInner {
         out.push_str("  edge [fontsize=10];\n");
 
         // 预渲染每个节点(短名 + kernel + 执行器,按执行器上色),并建命名空间树。
+        // `with_stats` 时额外标出运行统计,并把填充色换成按平均延迟的热力图。
         let mut lines = vec![String::new(); self.nodes.len()];
         let mut tree = Ns::default();
+        // 热力图基准:全图最大平均延迟(0 则退化为不上色)。
+        let max_avg_us = if with_stats {
+            self.nodes
+                .iter()
+                .map(|n| avg_process_us(&n.stats))
+                .fold(0.0f64, f64::max)
+        } else {
+            0.0
+        };
         for (i, n) in self.nodes.iter().enumerate() {
             let short = n.name.rsplit('/').next().unwrap_or(n.name.as_str());
-            let (exec, fill) = match n.executor {
+            let (exec, mut fill) = match n.executor {
                 None => ("@main".to_string(), "white".to_string()),
                 Some(ei) => (
                     format!("@{}", self.executors[ei].name()),
                     COLORS[ei % COLORS.len()].to_string(),
                 ),
             };
+            let mut extra = String::new();
+            if with_stats {
+                let st = &n.stats;
+                let processed = st.processed.load(Ordering::Relaxed);
+                let avg = avg_process_us(st);
+                extra = format!(
+                    "\\n{} pkts · {:.0}µs avg\\nin {} / out {} · peakQ {}",
+                    processed,
+                    avg,
+                    st.packets_in.load(Ordering::Relaxed),
+                    st.packets_out.load(Ordering::Relaxed),
+                    st.peak_queue_depth.load(Ordering::Relaxed),
+                );
+                let errs = st.errors.load(Ordering::Relaxed);
+                if errs > 0 {
+                    extra.push_str(&format!(" · {errs} err"));
+                }
+                // 按平均延迟上色:绿(快)→ 红(慢)。执行器配色让位给热力图。
+                fill = heat_color(avg, max_avg_us);
+            }
             lines[i] = format!(
-                "  n{i} [label=\"{}\\n({})\\n{}\", fillcolor=\"{}\"];\n",
+                "  n{i} [label=\"{}\\n({})\\n{}{}\", fillcolor=\"{}\"];\n",
                 esc(short),
                 esc(&n.kernel_name),
                 esc(&exec),
+                extra,
                 fill
             );
             let path: Vec<&str> = n.name.split('/').collect();
