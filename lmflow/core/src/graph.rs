@@ -157,8 +157,10 @@ impl Edge {
     pub fn is_closed(&self) -> bool {
         self.closed.load(Ordering::SeqCst)
     }
+    /// 纯诊断计数器(经 `lmflow_graph_dropped_count` 读回),不承载任何 happens-before
+    /// → `Relaxed`。注意上面的 `closed` 是**真同步**(参与终止判定),必须留 SeqCst。
     pub fn dropped_count(&self) -> u64 {
-        self.dropped.load(Ordering::SeqCst)
+        self.dropped.load(Ordering::Relaxed)
     }
 }
 
@@ -1482,7 +1484,7 @@ impl GraphInner {
     /// 记录丢包。**绝不静默**:首次丢弃打 WARN,之后按指数退避,避免日志洪水。
     fn note_dropped(&self, edge_id: EdgeId, n: u64) {
         let e = &self.edges[edge_id];
-        let before = e.dropped.fetch_add(n, Ordering::SeqCst);
+        let before = e.dropped.fetch_add(n, Ordering::Relaxed); // 纯计数器
         let after = before + n;
         if before == 0 || after.is_power_of_two() {
             runtime::log_warn(&format!(

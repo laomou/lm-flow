@@ -192,35 +192,49 @@ impl GraphShared {
     }
 
     // ---- 全局水位 ----
+    //
+    // 这几个是**纯计数器**:除了自己被读回来跟阈值比一下(`over_watermark`),不承载任何
+    // 「发布数据」的语义 —— 没有任何东西经由它们建立 happens-before。所以用 `Relaxed`。
+    //
+    // 这不是抠常数:`on_enqueue`/`on_dequeue` 是**每包每消费者**都要走的,一包就是 4 次
+    // 原子 RMW。x86 上 `lock xadd` 与 ordering 无关,但 **aarch64 上 SeqCst 的 RMW 会生成
+    // 带全屏障的 `ldaxr/stlxr`**,而 Android / iOS arm64 正是发布目标。
+    //
+    // ⚠ 全库其余的 SeqCst 都**审过并有意保留**:终止判定(`input_closed[i] && queue_len==0`
+    // 这种两段式检查)、`has_error` / `cancelled` / `source_done` 的发布、执行器 stop 标志、
+    // 边与 poller 的 closed —— 那些是真同步,降级会坏掉终止正确性。别顺手一起改。
 
     pub fn on_enqueue(&self, bytes: u64) {
-        self.total_queued.fetch_add(1, Ordering::SeqCst);
-        self.total_queued_bytes.fetch_add(bytes, Ordering::SeqCst);
+        self.total_queued.fetch_add(1, Ordering::Relaxed);
+        self.total_queued_bytes.fetch_add(bytes, Ordering::Relaxed);
     }
 
     pub fn on_dequeue(&self, bytes: u64) {
         // 用 saturating 语义,避免任何计数不平衡导致下溢回绕成天文数字
         let _ = self
             .total_queued
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
                 Some(v.saturating_sub(1))
             });
         let _ = self
             .total_queued_bytes
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
                 Some(v.saturating_sub(bytes))
             });
     }
 
     pub fn total_queued(&self) -> usize {
-        self.total_queued.load(Ordering::SeqCst)
+        self.total_queued.load(Ordering::Relaxed)
     }
     pub fn total_queued_bytes(&self) -> u64 {
-        self.total_queued_bytes.load(Ordering::SeqCst)
+        self.total_queued_bytes.load(Ordering::Relaxed)
     }
 
     /// 是否已触及全局水位。超限时把压力转化为**图输入口**背压(只在入口刹车不会
     /// 引入 diamond 死锁,见 docs/design.md §7.5)。
+    ///
+    /// 水位是**软阈值**:读的是 `Relaxed` 快照,故判定可能滞后一两个包 —— 这正是
+    /// 「水位」该有的语义,不需要精确的那一瞬间。
     pub fn over_watermark(&self) -> bool {
         let c = &self.config;
         (c.max_queued_packets > 0 && self.total_queued() >= c.max_queued_packets)
