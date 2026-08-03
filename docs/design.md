@@ -1131,8 +1131,8 @@ lm-flow/                          仓库根
 | ABI 布局不一致 | 内存错乱 | `#[repr(C)]` + 双向 `static_assert`;`LMFLOW_ABI_VERSION` 运行期校验 |
 | CoW 静默失效 | 引擎多留一份引用 → 恒复制、不报错只变慢 | 写成显式不变量(§3.4)+ 加断言/测试 |
 | GIL 拖累吞吐 | Python 算子无法真并行 | 文档明示;重活写 C++;考虑 executor 隔离 |
-| 跨平台未验证 | Windows(MSVC)/macOS/交叉编译(ARM) | 列入 CI 矩阵 |
-| B 的简化偏离完整语义 | 丢了时间戳对齐 | 明确划入 A 阶段;B 只跑单口/透传场景 |
+| 跨平台未验证 | Windows(MSVC)—— **仅剩这一个**;macOS 原生 test 与 iOS/Android/linux-aarch64 交叉编译已在 CI | 已列入 CI 矩阵;Windows 待补 |
+| B 的简化偏离完整语义 | 丢了时间戳对齐 | 明确划入 A 阶段;**B/A 两阶段均已落地**,对齐语义有专门测试(§13) |
 
 ---
 
@@ -1164,20 +1164,33 @@ lm-flow/                          仓库根
 | 当初留给实现去验证的 | 结果 |
 |---|---|
 | CoW 不变量是否被意外破坏 —— 需专门的「不应发生拷贝」测试 | **确实被破坏了**,已修并留下三级管线的零拷贝测试(见 §13.2) |
-| 调度状态机的 `rescan` 逻辑 | 单线程下正确;**并发正确性未验证**(M3 才有线程池,届时须过 TSan) |
-| 全局水位的实际效果 | 已有测试证明能拦住无限增长;真实内存曲线待 M3 压测 |
-| 跨平台 | **仍未验证**:Windows(MSVC)/ macOS / 交叉编译(ARM) |
+| 调度状态机的 `rescan` 逻辑 | 线程池已落地,**并发正确性由 TSan 硬门禁常绿保证**(0 竞态);`max_in_flight > 1` 的认领/按序重排路径同在门禁内 |
+| 全局水位的实际效果 | 已有测试证明能拦住无限增长;**真实内存曲线仍未做长跑压测** |
+| 跨平台 | macOS(原生 test)、iOS / Android / linux-aarch64(交叉编译 + 桥接链接)均在 CI 内;**Windows(MSVC)仍未验证** |
 
 ### 15.3 当前实现的已知边界
 
-诚实记录,避免误以为已完成:
+诚实记录,避免误以为已完成。**本节只写当下仍然成立的边界** —— 一旦某条被实现,就从这里删掉
+(否则它会反过来低报完成度:曾有一版这里还写着「线程池尚未实现」,而线程池早已落地并进了 TSan 门禁)。
 
-- **只有主线程执行器**。YAML 里的 `executors:` 能被解析和校验,但线程池尚未实现,
-  所有节点都跑在宿主主线程(这正是默认行为,见 ADR #16 与 §7.9)。
-- **无时间戳同步**(阶段 A):多输入口节点的就绪条件是「每口至少一个包」,不做跨口对齐。
-- `lmflow_graph_pause/resume`、`observe_timestamp_bounds`、`lmflow_register_type_name` 尚未实现,
-  调用会得到明确的「尚未实现」而不是静默无效。
-- 带超时的 `wait_done_timeout` / `poller_next_timeout` 在主线程执行器下等价于不带超时版本
-  (没有「等别的线程」的情形);真正的超时语义随线程池一起落地。
+**引擎语义上的边界**
+
+- **不支持重跑**:`Terminated` 之后只能 `free`,不能再 `start`(ADR / §0.3)。
+- **`batch` 输入策略 v1 仅单输入口**:多口批对齐留后续(§7.10)。
+- **无引擎级 timer / 限速**:source 由**内核自定速**(`process` 里自行阻塞),故源节点必须挂
+  线程池执行器(config 强制校验)。非自定速的源会灌爆下游 —— 内部边不背压(§7.5)。
+- **`LMFLOW_TYPE_HOST_OBJECT` 未启用**(ADR #26):跨语言算子只收发内建类型。
+- **张量前处理组不支持 F16**:`dtype::F16` 常量与 `dtype_size` 存在(跨界描述符能表达它),
+  但 `Cast`/`Affine`/`Clamp`/`Reduce` 统一走 double 分派,遇 F16 **明确报错而非静默**
+  (`is_math_dtype` 拦下)。需要 half 转换才能支持。
 - `Packet::new`(Rust 原生值)的 `type_id` 是 `NONE`,**不参与跨语言类型校验**;
   要让 C++/Python 算子按类型读取,须用 `Packet::new_interop` + `fnv1a_type_id`,或内建类型。
+
+**验证覆盖上的边界**
+
+- **Windows(MSVC)未验证**:CI 覆盖 linux-x86_64/aarch64、macOS、iOS、Android;无 Windows。
+- **Miri 跑不动**:FFI 里大量 `extern "C"` 与外部 C++ 符号,Miri 无法执行,故只作 advisory
+  (`continue-on-error`),不是门禁。ASan 同样是 advisory(build-std + C++ 侧易误报)。
+- **全局水位只有功能测试,没有长跑内存曲线压测**。
+- **`pool4` 类多线程基准在本机噪声达 ±13~25%**,不能用于归因单次改动(见
+  `benches/dispatch.rs` 文件头;那里也记了本机系统调用被放大约 5 倍这件事)。
