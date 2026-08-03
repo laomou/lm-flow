@@ -137,6 +137,11 @@ class Packet {
   static Packet FromF64(double v) { return Adopt(lmflow_packet_from_f64(v, LMFLOW_TS_UNSET)); }
   static Packet FromBool(bool v) { return Adopt(lmflow_packet_from_bool(v, LMFLOW_TS_UNSET)); }
   static Packet FromStr(const char* s) { return Adopt(lmflow_packet_from_str(s, LMFLOW_TS_UNSET)); }
+  /// 让**引擎**分配一块连续 N 维缓冲,通过 out 返回可写视图(零拷贝写)。
+  /// 典型:BUFFER 算子按输入 shape 造输出。ts 默认 UNSET(提交时继承 input_ts)。
+  static Packet NewBuffer(int32_t ndim, const int64_t* shape, int32_t dtype, LMFlowBuffer* out) {
+    return Adopt(lmflow_packet_new_buffer(ndim, shape, dtype, LMFLOW_TS_UNSET, out));
+  }
 
   bool AsBytes(const void** d, size_t* n) const { return lmflow_packet_as_bytes(&raw_, d, n); }
   bool AsI64(int64_t* o) const { return lmflow_packet_as_i64(&raw_, o); }

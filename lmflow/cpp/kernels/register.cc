@@ -19,6 +19,11 @@
  *  RangeSource       源(0 输入)产 0..count        SourceDone、生成型算子            range_source.cc
  *  FeedbackAdd       反馈相加 out=正向+反馈(或0)  back-edge(最新值反馈寄存器)      feedback_add.cc
  *  BatchSum          每批求和(batch 策略)         input_policy batch、InputCount/At  batch_sum.cc
+ *  ---- 张量预处理(BUFFER,纯数值)----
+ *  Cast              dtype 转换(u8→f32 等)         BUFFER 读写 + NewBuffer            cast.cc
+ *  Affine            逐元素 x*scale+shift           参数化 BUFFER 变换                 affine.cc
+ *  Clamp             逐元素 clamp(x,min,max)         BUFFER 就地阈值                    clamp.cc
+ *  Reduce            全缓冲归约 sum/mean/min/max     BUFFER → F64 标量                  reduce.cc
  *
  * 由 Rust 侧 C ABI 包装 lmflow_register_builtin_kernels(见 crates/flow-core/src/lib.rs)
  * 调用一次。用**显式聚合**而非静态初始化:静态库会裁剪未被引用的静态初始化对象(ADR #14),
@@ -41,4 +46,8 @@ extern "C" void lmflow_register_builtin_kernels_impl(void) {
   RegisterRangeSourceKernel();
   RegisterFeedbackAddKernel();
   RegisterBatchSumKernel();
+  RegisterCastKernel();
+  RegisterAffineKernel();
+  RegisterClampKernel();
+  RegisterReduceKernel();
 }

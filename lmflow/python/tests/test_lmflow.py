@@ -409,6 +409,44 @@ output_ports: [out]
             with self.assertRaises(ValueError):
                 g.input("in").send(np.array(["a", "b"]), ts=0)
 
+    def test_buffer_preprocess_pipeline(self):
+        # 内置张量前处理链:u8 图 → Cast(f32) → Affine(×1/255) → Clamp(0,1)。
+        with graph(
+            """
+nodes:
+  - { name: cast,  kernel: CastKernel,   input_ports: [in], output_ports: [f],   options: { dtype: f32 } }
+  - { name: norm,  kernel: AffineKernel, input_ports: [f],  output_ports: [n],   options: { scale: 0.00392156862745098 } }
+  - { name: clamp, kernel: ClampKernel,  input_ports: [n],  output_ports: [out], options: { min: 0.0, max: 1.0 } }
+input_ports: [in]
+output_ports: [out]
+"""
+        ) as g:
+            out = g.add_poller("out")
+            g.start()
+            g.input("in").send(np.array([0, 128, 255], dtype=np.uint8), ts=0)
+            arr = out.next(timeout=5.0).as_numpy()
+            self.assertEqual(arr.dtype, np.float32)
+            np.testing.assert_allclose(arr, [0.0, 128 / 255, 1.0], atol=1e-4)
+            g.close_all_inputs()
+            g.wait_done(timeout=5.0)
+
+    def test_reduce_mean_emits_scalar(self):
+        # 全缓冲归约成 F64 标量。
+        with graph(
+            """
+nodes:
+  - { name: r, kernel: ReduceKernel, input_ports: [in], output_ports: [out], options: { op: mean } }
+input_ports: [in]
+output_ports: [out]
+"""
+        ) as g:
+            out = g.add_poller("out")
+            g.start()
+            g.input("in").send(np.array([2, 4, 6], dtype=np.float32), ts=0)
+            self.assertAlmostEqual(out.next(timeout=5.0).as_float(), 4.0)
+            g.close_all_inputs()
+            g.wait_done(timeout=5.0)
+
 
 # ---------------------------------------------------------------- GIL / 并发
 

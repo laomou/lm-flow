@@ -22,5 +22,9 @@ void RegisterMuxKernel();
 void RegisterRangeSourceKernel();
 void RegisterFeedbackAddKernel();
 void RegisterBatchSumKernel();
+void RegisterCastKernel();
+void RegisterAffineKernel();
+void RegisterClampKernel();
+void RegisterReduceKernel();
 
 #endif  // LMFLOW_CPP_KERNELS_BUILTINS_HPP_

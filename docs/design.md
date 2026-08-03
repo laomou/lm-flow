@@ -1,8 +1,8 @@
 # lmflow 设计方案
 
-> 状态:**成品**。Rust 引擎、C ABI、C++ 糖层(含 OpenCV 互转)、11 个内置算子、
-> Python 绑定(pybind11)、原生 SDK 发布(各平台头文件+库)全部就位;**193 个测试**
-> (Rust 164 + Python 29)全绿,TSan 硬门禁 0 竞态。Rust / C++ / Python 三种宿主的
+> 状态:**成品**。Rust 引擎、C ABI、C++ 糖层(含 OpenCV 互转)、18 个内置算子、
+> Python 绑定(pybind11)、原生 SDK 发布(各平台头文件+库)全部就位;**243 个测试**
+> (Rust 205 + Python 38)全绿,TSan 硬门禁 0 竞态。Rust / C++ / Python 三种宿主的
 > hello_world 都输出正确;支持线程池绑核 + 实时优先级(Linux/Android),可交叉编到
 > Android / iOS / 鸿蒙。
 > 定位:一个数据流图计算框架 —— 把计算描述成**有向图**,节点是**算子(Kernel)**,
@@ -324,6 +324,10 @@ LMFLOW_REGISTER_KERNEL(PassThroughKernel)    // 或 LMFLOW_REGISTER_KERNEL_AS(T,
 - `Context` 禁拷贝/移动,防止算子把只在回调期有效的句柄留存。
 - 注册:**内置算子用显式聚合注册**(`lmflow_register_builtin_kernels`),因为静态初始化
   对象在静态库中可能被链接器裁剪;用户算子可直接用宏。
+- 内置算子清单见 `cpp/kernels/register.cc` 表头。其中**张量前处理组**(纯数值 BUFFER):
+  `Cast`(dtype 转换)、`Affine`(`x*scale+shift`)、`Clamp`、`Reduce`(→F64 标量)——
+  统一走 double 做 dtype 分派,连续缓冲、暂不支持 F16。示例见
+  `examples/python/preprocess/preprocess.py`(u8 图 → f32 → 归一化 → clamp)。
 
 ### 5.2 Python 算子(pybind11,已实现)
 
@@ -995,7 +999,7 @@ lm-flow/                          仓库根
 │   │   ├── flow_cv.hpp           可选:LMFlowBuffer ↔ cv::Mat(仅需 OpenCV 者 include)
 │   │   └── flow_platform_log.hpp 可选:引擎日志接平台日志(logcat/os_log/HiLog)
 │   ├── cpp/                      C++ 算子
-│   │   ├── kernels/              内置算子集(11 个,一文件一算子 + register.cc)
+│   │   ├── kernels/              内置算子集(18 个,一文件一算子 + register.cc)
 │   │   ├── abi_assert.cc         跨界结构体布局的编译期校验
 │   │   └── tests/                flow_hpp_test.cc / flow_cv_test.cc + CMakeLists
 │   ├── python/                   src/bindings.cc(pybind11)+ lmflow 包 + CMakeLists
@@ -1027,7 +1031,7 @@ lm-flow/                          仓库根
 
 ---
 
-## 13. 测试策略(已落地 234 个:Rust 198 + Python 36)
+## 13. 测试策略(已落地 243 个:Rust 205 + Python 38)
 
 | 测试文件 | 数量 | 覆盖 |
 |---|---|---|
