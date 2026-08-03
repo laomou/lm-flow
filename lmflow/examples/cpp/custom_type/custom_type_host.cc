@@ -12,6 +12,9 @@
  *   - `LMFLOW_DECLARE_TYPE_NAME` 把 type_id 钉到一个稳定名(否则用修饰名,跨工具链不稳)。
  *   - `Packet::Make<T>` 把对象搬上边(引擎只搬指针 + drop_fn,不解读内容);
  *     下游 `Packet::Get<T>()` 类型安全取回;契约的 type_id 由引擎在收包时校验。
+ *   - `LMFLOW_REGISTER_KERNEL(K)` 一行 self-register:在**你自己控制链接**的宿主里
+ *     文件作用域写一句即可(main 之前静态注册),无需集中登记。引擎内置算子则用
+ *     显式聚合(静态库会裁未引用的注册对象,见 ADR #14)。
  *
  * 构建见同目录 CMakeLists.txt。运行应打印 out: 0..5 并以退出码 0 结束。
  */
@@ -44,6 +47,7 @@ class DetectKernel : public lmflow::Kernel {
     return lmflow::Status::Ok();
   }
 };
+LMFLOW_REGISTER_KERNEL(DetectKernel)  // 一行 self-register(名字取类名)—— main 之前静态注册
 
 // Detection → I64:类型安全取回对象,读出字段。
 class ReportKernel : public lmflow::Kernel {
@@ -59,6 +63,7 @@ class ReportKernel : public lmflow::Kernel {
     return lmflow::Status::Ok();
   }
 };
+LMFLOW_REGISTER_KERNEL(ReportKernel)
 
 }  // namespace
 
@@ -85,9 +90,8 @@ int main() {
     return 1;
   }
 
-  // 只注册本例的两个算子(不需要内置算子)。
-  lmflow_register_kernel("DetectKernel", lmflow::KernelAdapter<DetectKernel>::vtable(), nullptr);
-  lmflow_register_kernel("ReportKernel", lmflow::KernelAdapter<ReportKernel>::vtable(), nullptr);
+  // 两个算子已由文件作用域的 LMFLOW_REGISTER_KERNEL 宏在 main 之前自注册(见上)——
+  // 本例是自己控制链接的可执行,self-register 安全;引擎内置算子仍走显式聚合(ADR #14)。
 
   LMFlowGraph* graph = lmflow_graph_new();
   if (!graph) {
