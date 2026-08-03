@@ -11,6 +11,8 @@
 
 #include <cassert>
 #include <cstdint>
+#include <cstdio>
+#include <exception>
 #include <type_traits>
 #include <typeinfo>
 #include <utility>
@@ -407,7 +409,13 @@ struct KernelAdapter {
     try {
       Context cc(c);
       return static_cast<T*>(self)->Open(cc).code();
+    } catch (const std::exception& e) {
+      // 把 what() 带给引擎:否则异常这条路只剩一个错误码、诊断信息为零
+      //(返回失败 Status 的那条路靠 cc.Fail 已有文本)。
+      if (c != nullptr) Context(c).SetError(e.what());
+      return LMFLOW_ERR_KERNEL;
     } catch (...) {
+      if (c != nullptr) Context(c).SetError("Open threw a non-std exception");
       return LMFLOW_ERR_KERNEL;
     }
   }
@@ -416,7 +424,13 @@ struct KernelAdapter {
     try {
       Context cc(c);
       return static_cast<T*>(self)->Process(cc).code();
+    } catch (const std::exception& e) {
+      // 把 what() 带给引擎:否则异常这条路只剩一个错误码、诊断信息为零
+      //(返回失败 Status 的那条路靠 cc.Fail 已有文本)。
+      if (c != nullptr) Context(c).SetError(e.what());
+      return LMFLOW_ERR_KERNEL;
     } catch (...) {
+      if (c != nullptr) Context(c).SetError("Process threw a non-std exception");
       return LMFLOW_ERR_KERNEL;
     }
   }
@@ -425,7 +439,13 @@ struct KernelAdapter {
     try {
       Context cc(c);
       return static_cast<T*>(self)->Close(cc).code();
+    } catch (const std::exception& e) {
+      // 把 what() 带给引擎:否则异常这条路只剩一个错误码、诊断信息为零
+      //(返回失败 Status 的那条路靠 cc.Fail 已有文本)。
+      if (c != nullptr) Context(c).SetError(e.what());
+      return LMFLOW_ERR_KERNEL;
     } catch (...) {
+      if (c != nullptr) Context(c).SetError("Close threw a non-std exception");
       return LMFLOW_ERR_KERNEL;
     }
   }
@@ -451,6 +471,43 @@ struct KernelAdapter {
  * 注意:静态初始化在静态库中可能被链接器裁剪。若发现算子「未注册」,
  * 改用显式聚合注册(见设计文档 §9)或链接时加 --whole-archive。
  */
+/*
+ * 条件断言:不成立就**带着「哪个表达式、哪个文件哪一行」**返回算子失败。
+ *
+ * 为什么要传 `cc`:C ABI 跨界只能过一个 `int32_t`(ADR #1),错误**文本**得另走一条
+ * 通道 —— 经 `lmflow_ctx_set_error` 存进 Context。所以「返回失败」与「说明原因」在
+ * 本框架里是两件事,而直接 `return Status::Error()` 会让引擎只拿到一个码、原因为空。
+ * 这两个宏把它们绑成一个动作,让你**难以**漏掉文本:
+ *
+ *     lmflow::Status Process(lmflow::Context& cc) override {
+ *       LMFlowBuffer in{};
+ *       LMFLOW_RET_CHECK(cc, cc.Input(0).AsBuffer(&in));      // 自动文本
+ *       LMFLOW_RET_CHECK_MSG(cc, in.ndim == 4, "只接受 NCHW"); // 自定义 + 自动位置
+ *       ...
+ *     }
+ *
+ * 文本超长会被 snprintf 安全截断。只能用在返回 `lmflow::Status` 的函数里。
+ */
+#define LMFLOW_RET_CHECK_MSG(cc, cond, msg)                                            \
+  do {                                                                                 \
+    if (!(cond)) {                                                                     \
+      char lmflow_rc_buf_[256];                                                        \
+      std::snprintf(lmflow_rc_buf_, sizeof(lmflow_rc_buf_), "%s (check failed: %s at %s:%d)", \
+                    (msg), #cond, __FILE__, __LINE__);                                 \
+      return (cc).Fail(lmflow_rc_buf_);                                                \
+    }                                                                                  \
+  } while (0)
+
+#define LMFLOW_RET_CHECK(cc, cond)                                                     \
+  do {                                                                                 \
+    if (!(cond)) {                                                                     \
+      char lmflow_rc_buf_[256];                                                        \
+      std::snprintf(lmflow_rc_buf_, sizeof(lmflow_rc_buf_), "check failed: %s (at %s:%d)", \
+                    #cond, __FILE__, __LINE__);                                        \
+      return (cc).Fail(lmflow_rc_buf_);                                                \
+    }                                                                                  \
+  } while (0)
+
 #define LMFLOW_REGISTER_KERNEL_AS(T, name_str)                                             \
   namespace {                                                                            \
   struct LMFlowReg_##T {                                                                   \

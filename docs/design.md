@@ -78,7 +78,7 @@
 | 34 | **每次回调的计时可关**(`stats_timing`,默认开);但 `watchdog_ms > 0` 时**强制开** | 计时是每次 `process` **两次** `Instant::now()`(本机约 43 ns,占单跳派发约 15~18%)。实测同链 A/B:depth16 每包 4694 → 3861 ns(**-17.8%**)。关掉的代价是 `total_process_us`/`max_process_us`/`running_for_us` 恒 0、DOT 延迟热力图退化为单色 —— 属**显式取舍**,建图时打 INFO 说明,不静默。watchdog 依赖单次耗时,故与它冲突时强制开启并说明原因(静默失效是本项目明确拒绝的失败模式;有测试用一个睡 2ms 的算子钉住这条,去掉强制开启该测试即失败) |
 | 35 | **`max_in_flight == 1`(默认)时跳过按序重排的 BTreeMap;`flush_staging` 不再为整批产出建临时 `Vec`** | perf 采样(非估算)显示:`pending_flush: BTreeMap` 的每次调用插入+删除、以及 `flush_staging` 的临时 `Vec<OutputBatch>`,连带 malloc/free 共占约 13.5%。而 `max_in_flight == 1` 时同一时刻只有一次调用在飞,`seq` 必然等于 `next_flush_seq` —— 重排缓冲纯属白做,可直接接手。`dispatch` 只读 packets,故签名改 `&[Packet]`:图输入口的 `send` 不再为单包 `vec![pkt]` 分配,`staging` 的缓冲清空后放回、容量复用(不再 `finish_grow`)。实测每跳边际 279 → **236 ns**;`remove_leaf_kv` / `SpecFromIterNested` / `finish_grow` 三项从 2.96% / 1.93% / 1.13% 归零,malloc/free 总量 13.5% → 7.5% |
 | 36 | **`try_claim` 每个输入口只拿一次队列锁** | 原先每口把**同一把**队列锁拿 3 次:`front_ts`(读队首 ts)、`pop_front`、`queue_len`(算 `inputs_done`)。合成一个临界区。安全性来自 ADR #30:**只有 `try_claim` 会 pop 且全程持 `sched`**,别的线程只 push(追加尾部、不动队首),故队首稳定;`inputs_done` 那处也无差别 —— 它要求 `input_closed`,而关流后不再有 push、长度已稳定。实测每跳边际 236 → **213 ns**(pool1 -7%)。三个分支(正向口 / 反馈口 / 批处理)都合了。`readiness()` 里还有一次(它要跨口算就绪),没并 —— 要把观察值带出来会引入耦合、收益仅 ~20 ns,不值 |
-| 37 | **节点级 `on_error: abort\|skip`**,默认 `abort` | 长跑实时管线里一帧坏数据不该杀掉整条流水线,而原先任何一次算子失败都终止全图。`skip` 只丢那一个包并**推进下游边界**(不推进就把一帧错误升级成整图卡死);复用「无产出也要推进边界」那条既有路径,不新写机制。有损行为绝不静默:计入 `errors` + WARN(指数退避)。**只有两个值**——不设单独的 `log`,因为 `skip` 本身一定计数并打日志。定位:能在算子内处理的就在算子内处理(返回成功不产出),`skip` 专治**管不到**的失败(契约校验、panic / C++ 异常、第三方算子) |
+| 37 | **节点级 `on_error: abort\|skip`**,默认 `abort` | 长跑实时管线里一帧坏数据不该杀掉整条流水线,而原先任何一次算子失败都终止全图。`skip` 只丢那一个包并**推进下游边界**(不推进就把一帧错误升级成整图卡死);复用「无产出也要推进边界」那条既有路径,不新写机制。有损行为绝不静默:计入 `errors` + WARN(指数退避)。**只有两个值**——不设单独的 `log`,因为 `skip` 本身一定计数并打日志。定位:能在算子内处理的就在算子内处理(返回成功不产出),`skip` 专治**管不到**的失败(契约校验、panic / C++ 异常、第三方算子)。**只管逐包失败**:`Open` / `Close` 的一次性生命周期失败不受此策略影响(打不开就该让 `start()` 失败,而非空转着每帧报错) |
 | 22 | **`type_id` = FNV-1a(修饰名)**,而非 `typeid().hash_code()` | 后者实现定义、不保证跨动态库一致;而本项目 C++ 算子在 core、Python 绑定在另一 `.so`,天然跨产物。事后再改需全量重编,故一开始就用稳定方案 + `LMFLOW_DECLARE_TYPE_NAME` 逃生口 |
 | 23 | **时间戳单调性:图输入口强制校验,内部边仅 debug 构建校验** | 外部数据进入的唯一门校验一次即可挡住绝大多数乱序;内部边逐包校验是热路径开销,且算子产出乱序属算子 bug,用 `debug_assertions` 捕获即可 |
 | 24 | **不做 stream header**,用 side packet 覆盖 | header 会引入「流上的第二种数据」及其生命周期问题;side packet 已能表达「整条流不变的属性」。少一个概念优于多一个 |
@@ -330,6 +330,14 @@ LMFLOW_REGISTER_KERNEL(PassThroughKernel)    // 或 LMFLOW_REGISTER_KERNEL_AS(T,
 - 静态 `GetContract` 可选,有则经 SFINAE 自动接线。
 - `Packet::Get<T>()` 带 `type_id` 校验;`TryGet<T>()` 类型不符返回 `nullptr`(绝不 UB)。
 - `Context` 禁拷贝/移动,防止算子把只在回调期有效的句柄留存。
+- **写算子时的断言宏**:`LMFLOW_RET_CHECK(cc, cond)` / `LMFLOW_RET_CHECK_MSG(cc, cond, msg)` ——
+  不成立就带着**失败的表达式原文 + file:line** 返回算子失败。
+  为什么需要它:C ABI 跨界只能过一个 `int32_t`(ADR #1),错误**文本**必须另经
+  `lmflow_ctx_set_error` 存进 Context。也就是说「返回失败」与「说明原因」在本框架里是
+  两件事,直接 `return Status::Error()` 会让引擎只拿到一个码、原因为空。这两个宏把它们
+  绑成一个动作,让人**难以**漏掉文本。内置 `CastKernel` 是用法样板。
+- **异常路径也带原因**:`KernelAdapter` 的 `catch` 会把 `std::exception::what()` 写进 Context
+  (非 std 异常则给出固定说明)。此前异常这条路只剩一个错误码、诊断信息为零。
 - 注册:**内置算子用显式聚合注册**(`lmflow_register_builtin_kernels`),因为静态初始化
   对象在静态库中可能被链接器裁剪;用户算子可直接用宏。
 - **算子与引擎解耦**:注册表(`src/kernel.rs`)是唯一一张语言无关的 `name → vtable` 表,
@@ -677,6 +685,25 @@ DAG 有界的扇出倍数」间接约束。
   于是落到「无产出」分支自动 `propagate_bound(input_ts + 1)`,与 `Filter` 丢包时同一条路。
 - 有损行为**绝不静默**:计入 `LMFlowNodeStats.errors`,并打 WARN(指数退避,避免每帧都错
   时刷爆日志 —— 与边的 `note_dropped` 同法)。
+
+**`on_error` 到底管哪些失败**(容易误解,写清)。它只作用于 **Process 路径**,两个触发点:
+
+1. **算子还没跑就失败** —— 输入包的 `type_id` 与 `GetContract` 声明不符,引擎侧
+   `check_input_types` 拦下,`process` 根本没被调用。
+2. **`process` 返回非 0** —— 这一个条件涵盖:Rust 算子返回 `Err`、Rust 算子 **panic**
+   (`catch_unwind` → `PANIC`)、C++ 算子返回失败 `Status`、C++ 算子**抛异常**
+   (`catch (...)` → `KERNEL`)、以及 `create` 失败(构造 panic / 抛异常 → `self` 为 null)。
+   所以「算子失败」不只是「返回失败码」,**panic / 异常也算**。
+
+**不受 `on_error` 影响**:
+
+| 阶段 | 行为 | 为什么不适用 |
+|---|---|---|
+| `Open` 失败 | 一律 `record_error`,**`start()` 直接返回错误** | 算子连打开都没成功(如模型加载失败),它一个包也处理不了 —— `skip` 等于让图空转着每帧报错。这类**一次性生命周期失败**应当场让 `start()` 失败 |
+| `Close` 失败 | 一律 `record_error` | 那时已在关流,没有「下一个包」可跳 |
+
+一句话:`on_error` 管的是**逐包**失败(这一帧坏、下一帧可能好),不管**一次性的生命周期失败**
+(打不开就是打不开)。
 
 > **什么时候用哪个。** 能在算子内处理的错误,**就在算子内处理** —— 捕获后返回成功但
 > 不产出即可,引擎会自动推进边界(与上面 `skip` 走的是同一条路)。这样你能按错误类型

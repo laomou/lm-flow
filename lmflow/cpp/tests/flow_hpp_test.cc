@@ -8,6 +8,7 @@
 
 #include <cassert>
 #include <cstdio>
+#include <cstring>
 #include <stdexcept>
 
 #include "lmflow/flow.hpp"
@@ -30,7 +31,35 @@ struct OkKernel : lmflow::Kernel {
   lmflow::Status Process(lmflow::Context&) override { return lmflow::Status::Ok(); }
 };
 
+// 用 LMFLOW_RET_CHECK 的算子:条件不成立时应带着表达式与位置返回失败。
+struct RetCheckKernel : lmflow::Kernel {
+  bool pass = false;
+  lmflow::Status Process(lmflow::Context& cc) override {
+    LMFLOW_RET_CHECK(cc, pass);
+    return lmflow::Status::Ok();
+  }
+};
+
+struct RetCheckMsgKernel : lmflow::Kernel {
+  lmflow::Status Process(lmflow::Context& cc) override {
+    const int ndim = 3;
+    LMFLOW_RET_CHECK_MSG(cc, ndim == 4, "only NCHW is accepted");
+    return lmflow::Status::Ok();
+  }
+};
+
 }  // namespace
+
+// 引擎符号打桩:本测试不链引擎,但要验证 SetError 收到的**文本内容**。
+// 一个非空的假句柄即可 —— 糖层只把它原样传给下面这个桩。
+namespace {
+char g_last_error[512];
+LMFlowContext* const kFakeCtx = reinterpret_cast<LMFlowContext*>(1);
+}  // namespace
+
+extern "C" void lmflow_ctx_set_error(const LMFlowContext*, const char* msg) {
+  std::snprintf(g_last_error, sizeof(g_last_error), "%s", msg ? msg : "");
+}
 
 int main() {
   // 1) 构造抛异常:create 返回 nullptr,绝不让异常穿越 extern "C"。
