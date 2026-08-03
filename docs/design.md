@@ -1,8 +1,8 @@
 # lmflow 设计方案
 
 > 状态:**成品**。Rust 引擎、C ABI、C++ 糖层(含 OpenCV 互转)、18 个内置算子、
-> Python 绑定(pybind11)、原生 SDK 发布(各平台头文件+库)全部就位;**243 个测试**
-> (Rust 205 + Python 38)全绿,TSan 硬门禁 0 竞态。Rust / C++ / Python 三种宿主的
+> Python 绑定(pybind11)、原生 SDK 发布(各平台头文件+库)全部就位;**246 个测试**
+> (Rust 208 + Python 38)全绿,TSan 硬门禁 0 竞态。Rust / C++ / Python 三种宿主的
 > hello_world 都输出正确;支持线程池绑核 + 实时优先级(Linux/Android),可交叉编到
 > Android / iOS / 鸿蒙。
 > 定位:一个数据流图计算框架 —— 把计算描述成**有向图**,节点是**算子(Kernel)**,
@@ -343,6 +343,18 @@ class PyDouble(lmflow.Kernel):
 
 与 C++ 算子在 YAML 里**平等引用** —— 引擎不知道算子是什么语言写的。
 细节见 §8 专章。约束:只收发内建类型;回调期持 GIL;异常转错误码。
+
+### 5.2b Rust 算子(`trait Kernel`,已实现)
+
+Rust 也能一等公民地写算子:实现 `flow_core::Kernel`(`get_contract`/`open`/`process`/`close`)+
+运行期 `register_kernel::<T>("Name")`,YAML 用 `kernel: Name` 引用。安全的 `KernelCtx`/
+`KernelContract` 包装内部 `Context`/`Contract`(不裸调 C ABI);panic / `Err` 都被 `catch_unwind`
+兜成图错误、不穿越边界。这是**C ABI vtable 之上的糖**(和 `flow.hpp` 的 `KernelAdapter<T>` 对 C++
+做的一样),**不是**引擎绕过 vtable 的原生快路(见 ADR)。见 `flow-core/src/kernel_api.rs`。
+
+> **Rust 门面 crate `lmflow`**(`lmflow/rust/`):薄 re-export `flow-core` 公开 API,外部 Rust 工程
+> `use lmflow::{Graph, Packet, Timestamp, Kernel, register_kernel}`;`flow_core` 库名 /
+> `libflow_core.a` 不变(C ABI/CMake/Python 共用)。
 
 ### 5.3 内置算子清单(`cpp/kernels/`,一文件一算子)
 
@@ -1031,7 +1043,7 @@ lm-flow/                          仓库根
 
 ---
 
-## 13. 测试策略(已落地 243 个:Rust 205 + Python 38)
+## 13. 测试策略(已落地 246 个:Rust 208 + Python 38)
 
 | 测试文件 | 数量 | 覆盖 |
 |---|---|---|

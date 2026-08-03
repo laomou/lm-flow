@@ -1,0 +1,18 @@
+# lmflow —— 引擎的 Rust 门面 crate。
+#
+# 薄薄地 re-export `flow-core` 的公开 API,让外部 Rust 工程 `use lmflow::{Graph, Packet, ...}`
+# 而不必写 `use flow_core::`。引擎实体在 `flow-core`(库名 flow_core = libflow_core.a,被
+# C ABI / CMake / Python 共用,不改名);本 crate 只解决「引入名好看」。
+#
+# 外部用法:  lmflow = { git = "https://github.com/laomou/lm-flow.git", tag = "v0.2.0" }
+# (crate 在子目录,cargo 按包名 lmflow 自动定位;构建需 C++ 工具链——引擎的 C++ 算子经 cc 链入。)
+[package]
+name = "lmflow"
+version = "0.2.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Rust facade for the lmflow dataflow engine (re-exports flow-core)"
+publish = false
+
+[dependencies]
+flow-core = { path = "../flow-core" }

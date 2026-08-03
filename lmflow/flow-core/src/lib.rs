@@ -19,12 +19,14 @@ mod expand;
 pub mod ffi;
 pub mod graph;
 pub mod kernel;
+pub mod kernel_api;
 pub mod packet;
 pub mod runtime;
 pub mod status;
 pub mod timestamp;
 
 pub use graph::{Graph, Input, Poller, State};
+pub use kernel_api::{register_kernel, Kernel, KernelContract, KernelCtx};
 pub use packet::{BufferData, Builtin, Packet};
 pub use status::{Error, Result};
 pub use timestamp::Timestamp;

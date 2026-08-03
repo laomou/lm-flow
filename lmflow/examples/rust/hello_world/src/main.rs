@@ -4,7 +4,7 @@
 //! 算子是 C++ 写的(经 flow-core 的 build.rs 用 cc 编译链入),引擎与 host 是 Rust ——
 //! 一条 `cargo run` 即可跑通全链路。对应 C++ 版见 examples/cpp/hello_world。
 
-use flow_core::{Graph, Packet, Timestamp};
+use lmflow::{Graph, Packet, Timestamp};
 
 // 两个节点都未指定 executor,故都跑在**主线程**上 —— 任务在 poller.next() /
 // wait_done() 等阻塞调用期间被抽取执行。要并发就显式声明 executors 并给节点指定。
@@ -22,9 +22,9 @@ input_ports: ["input1"]
 output_ports: ["output2"]
 "#;
 
-fn main() -> flow_core::Result<()> {
+fn main() -> lmflow::Result<()> {
     // C++ 算子的注册:静态初始化可能被链接器裁剪,故显式聚合注册一次(见设计文档 §9)。
-    flow_core::register_builtin_kernels();
+    lmflow::register_builtin_kernels();
 
     let graph = Graph::from_yaml(CONFIG)?;
     let poller = graph.add_poller("output2")?;

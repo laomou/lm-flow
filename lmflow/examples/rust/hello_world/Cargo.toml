@@ -10,5 +10,6 @@ version = "0.0.0"
 edition = "2021"
 publish = false
 
+# 外部工程消费门面 crate `lmflow`(它 re-export flow-core);这里用 path 依赖。
 [dependencies]
-flow-core = { path = "../../../flow-core" }
+lmflow = { path = "../../../rust" }

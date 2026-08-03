@@ -1,5 +1,6 @@
 # Rust(引擎是独立 crate,target 落在 lmflow/flow-core 下;Cargo.lock 提交以复现构建)
 /lmflow/flow-core/target/
+/lmflow/rust/target/
 /lmflow/examples/rust/*/target/
 **/*.rs.bk
 
