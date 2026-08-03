@@ -1289,7 +1289,7 @@ impl GraphInner {
         // 批处理:从 0 号口整批弹给算子(单口)。input_ts = 末包 ts,下游单调。
         if let InputPolicy::Batch { size } = &node.policy {
             let mut last_ts = ts;
-            {
+            let remaining = {
                 let mut q = node.input_queues[0].lock().expect("queue lock poisoned");
                 for _ in 0..*size {
                     let Some(p) = q.pop_front() else { break };
@@ -1298,10 +1298,10 @@ impl GraphInner {
                     last_ts = p.timestamp();
                     ctx.input_batches[0].push(p);
                 }
-            }
+                q.len() // 顺手读,省一次同一把锁的再获取
+            };
             node.advance_bound(0, last_ts.next_allowed_in_stream());
-            ctx.inputs_done[0] =
-                node.input_closed[0].load(Ordering::SeqCst) && node.queue_len(0) == 0;
+            ctx.inputs_done[0] = node.input_closed[0].load(Ordering::SeqCst) && remaining == 0;
             ctx.input_ts = last_ts;
             return true;
         }
@@ -1309,17 +1309,18 @@ impl GraphInner {
             if node.input_is_back_edge[port] {
                 // 反馈寄存器:取最新一包(队列 cap-1),不参与 ts 对齐、不推进 bound。
                 // 首拍(尚无反馈)队列为空 → ctx.inputs[port] = None,内核看到空反馈,自处理。
-                if let Some(p) = node.input_queues[port]
-                    .lock()
-                    .expect("queue lock poisoned")
-                    .pop_front()
-                {
+                let (popped, remaining) = {
+                    let mut q = node.input_queues[port].lock().expect("queue lock poisoned");
+                    let p = q.pop_front();
+                    (p, q.len())
+                };
+                if let Some(p) = popped {
                     self.shared.on_dequeue(p.byte_size());
                     node.stats.packets_in.fetch_add(1, Ordering::Relaxed);
                     ctx.inputs[port] = Some(p);
                 }
                 ctx.inputs_done[port] =
-                    node.input_closed[port].load(Ordering::SeqCst) && node.queue_len(port) == 0;
+                    node.input_closed[port].load(Ordering::SeqCst) && remaining == 0;
                 continue;
             }
             // 只处理「参与本次触发」的口(SyncSet:就绪组;其余策略:全部口)。
@@ -1330,20 +1331,28 @@ impl GraphInner {
             }
             // 只取时间戳恰好等于 ts 的包;某口在该时刻没有数据是合法的(算子看到空包),
             // 这正是时间戳对齐的语义 —— 若无条件每口弹一个,就会把不同时刻的数据配到一起。
-            if node.front_ts(port) == Some(ts) {
-                if let Some(p) = node.input_queues[port]
-                    .lock()
-                    .expect("queue lock poisoned")
-                    .pop_front()
-                {
-                    self.shared.on_dequeue(p.byte_size());
-                    node.stats.packets_in.fetch_add(1, Ordering::Relaxed);
-                    ctx.inputs[port] = Some(p);
-                }
+            // 一次临界区办三件事:读队首 ts、按需弹包、读剩余长度。
+            // 原先 `front_ts` / `pop_front` / `queue_len` 各拿一次**同一把**队列锁(每口 3 次)。
+            // 安全性:全程持 `sched`,而只有 `try_claim` 会 pop(ADR #30 pop-at-claim),
+            // 别的线程只 push(追加尾部、不动队首)—— 故队首稳定。
+            // 只取时间戳恰好等于 ts 的包;某口在该时刻没有数据是合法的(算子看到空包),
+            // 这正是时间戳对齐的语义 —— 若无条件每口弹一个,就会把不同时刻的数据配到一起。
+            let (popped, remaining) = {
+                let mut q = node.input_queues[port].lock().expect("queue lock poisoned");
+                let hit = q.front().map(|p| p.timestamp()) == Some(ts);
+                let p = if hit { q.pop_front() } else { None };
+                (p, q.len())
+            };
+            if let Some(p) = popped {
+                self.shared.on_dequeue(p.byte_size());
+                node.stats.packets_in.fetch_add(1, Ordering::Relaxed);
+                ctx.inputs[port] = Some(p);
             }
             node.advance_bound(port, ts.next_allowed_in_stream());
+            // `remaining` 与 pop 同一临界区内读得。这不改语义:`inputs_done` 还要求
+            // `input_closed`,而关流后不再有 push,长度已稳定。
             ctx.inputs_done[port] =
-                node.input_closed[port].load(Ordering::SeqCst) && node.queue_len(port) == 0;
+                node.input_closed[port].load(Ordering::SeqCst) && remaining == 0;
         }
         // 源节点无输入包,用认领序号当单调时间戳(auto-emit 继承 → 下游单调,复用 seq 重排)。
         ctx.input_ts = if node.is_source() {
