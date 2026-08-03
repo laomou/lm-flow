@@ -283,6 +283,17 @@ class Graph:
         """Start the graph and begin scheduling. After this you cannot add_poller / set_side_packet / observe."""
         self._g.start()
 
+    def reset(self) -> None:
+        """Reset a finished graph so it can be started again, **keeping already-opened
+        kernel instances** — avoids rebuilding the graph and re-running ``open`` (e.g.
+        reloading a model) for every session.
+
+        The graph must be Terminated and idle (call :meth:`wait_done` first), else raises.
+        Queues / stats / timestamp state are cleared; injected side packets and registered
+        pollers/observers are kept, so you can reuse the same poller for the next run.
+        """
+        self._g.reset()
+
     # ---- 运行时 ----
 
     def input(self, port: str) -> Input:

@@ -1,8 +1,8 @@
 # lmflow 设计方案
 
 > 状态:**成品**。Rust 引擎、C ABI、C++ 糖层(含 OpenCV 互转)、18 个内置算子、
-> Python 绑定(pybind11)、原生 SDK 发布(各平台头文件+库)全部就位;**271 个测试**
-> (Rust 233 + Python 38)全绿,TSan 硬门禁 0 竞态。Rust / C++ / Python 三种宿主的
+> Python 绑定(pybind11)、原生 SDK 发布(各平台头文件+库)全部就位;**274 个测试**
+> (Rust 236 + Python 38)全绿,TSan 硬门禁 0 竞态。Rust / C++ / Python 三种宿主的
 > hello_world 都输出正确;支持线程池绑核 + 实时优先级(Linux/Android),可交叉编到
 > Android / iOS / 鸿蒙。
 > 定位:一个数据流图计算框架 —— 把计算描述成**有向图**,节点是**算子(Kernel)**,
@@ -41,7 +41,7 @@
 
 - 不做分布式 / 跨进程;单进程内多线程。
 - 不做 GPU 内存空间(`LMFlowBuffer.device` 已预留字段,但本版本只有 CPU)。
-- 不支持图跑完后重跑(`Terminated` 之后只能 `free`)。
+- ~~不支持图跑完后重跑~~ → **已支持** `reset`(§7.13):保留算子实例复位重跑。
 
 ---
 
@@ -80,6 +80,7 @@
 | 36 | **`try_claim` 每个输入口只拿一次队列锁** | 原先每口把**同一把**队列锁拿 3 次:`front_ts`(读队首 ts)、`pop_front`、`queue_len`(算 `inputs_done`)。合成一个临界区。安全性来自 ADR #30:**只有 `try_claim` 会 pop 且全程持 `sched`**,别的线程只 push(追加尾部、不动队首),故队首稳定;`inputs_done` 那处也无差别 —— 它要求 `input_closed`,而关流后不再有 push、长度已稳定。实测每跳边际 236 → **213 ns**(pool1 -7%)。三个分支(正向口 / 反馈口 / 批处理)都合了。`readiness()` 里还有一次(它要跨口算就绪),没并 —— 要把观察值带出来会引入耦合、收益仅 ~20 ns,不值 |
 | 37 | **节点级 `on_error: abort\|skip`**,默认 `abort` | 长跑实时管线里一帧坏数据不该杀掉整条流水线,而原先任何一次算子失败都终止全图。`skip` 只丢那一个包并**推进下游边界**(不推进就把一帧错误升级成整图卡死);复用「无产出也要推进边界」那条既有路径,不新写机制。有损行为绝不静默:计入 `errors` + WARN(指数退避)。**只有两个值**——不设单独的 `log`,因为 `skip` 本身一定计数并打日志。定位:能在算子内处理的就在算子内处理(返回成功不产出),`skip` 专治**管不到**的失败(契约校验、panic / C++ 异常、第三方算子)。**只管逐包失败**:`Open` / `Close` 的一次性生命周期失败不受此策略影响(打不开就该让 `start()` 失败,而非空转着每帧报错) |
 | 38 | **声明式源定速 `rate: N`(Hz)** | 源本要么内核自己写 sleep、要么灌爆下游。`rate` 让定速变成一行 YAML。实现走**路 A**(源的池线程里 sleep 到点)而非路 B(不占线程的定时唤醒):source 本就必须挂线程池、有专属线程,路 B「不占线程」的收益对它有限,却要新造一整套延迟调度设施并碰调度核心。节流在 `call_kernel` 调算子前、**不持任何引擎锁**(R1 未破),按实际放行时刻记基准防漂移 |
+| 39 | **`reset` 保留算子实例的复位重跑** | 每会话重建图 + 重跑 `open`(重载模型)是实打实的开销。reset 复用已 open 的算子跑下一轮。安全靠「静止相」:要求 `Terminated + is_idle`(与 Drop/start 同依据),故 `&self` + 内部可变即可无并发复位 —— **不用 `Arc::get_mut`**(Poller 也持 `Arc<GraphInner>`,宿主留着 poller 时拿不到独占)。不碰线程池(worker 随图存活、park 着复用)。`epoch` 不 reset(只是诊断基准)。最易漏:`Edge::last_sent`(单调性)、`GraphShared` 的 error(无现成清除路径)、`input_bounds` 回 `pre_stream` 而非 `done` |
 | 22 | **`type_id` = FNV-1a(修饰名)**,而非 `typeid().hash_code()` | 后者实现定义、不保证跨动态库一致;而本项目 C++ 算子在 core、Python 绑定在另一 `.so`,天然跨产物。事后再改需全量重编,故一开始就用稳定方案 + `LMFLOW_DECLARE_TYPE_NAME` 逃生口 |
 | 23 | **时间戳单调性:图输入口强制校验,内部边仅 debug 构建校验** | 外部数据进入的唯一门校验一次即可挡住绝大多数乱序;内部边逐包校验是热路径开销,且算子产出乱序属算子 bug,用 `debug_assertions` 捕获即可 |
 | 24 | **不做 stream header**,用 side packet 覆盖 | header 会引入「流上的第二种数据」及其生命周期问题;side packet 已能表达「整条流不变的属性」。少一个概念优于多一个 |
@@ -489,7 +490,7 @@ pub struct Graph {
 
 - 其它组合返回 **`LMFLOW_ERR_STATE`**(如 `start` 两次、未 `start` 就 `send`)。
 - **`add_poller` / `observe` 必须在 `start` 之前**,否则可能丢失已产出的包。
-- 本版本**不支持重跑**:`Terminated` 之后只能 `free`。
+- **重跑已支持**(§7.13):`Terminated` 后可 `reset` 复位重跑(保留算子实例);或 `free` 释放。
 
 ### 6.4 端口的命名与定位
 
@@ -923,6 +924,32 @@ output_ports: [out]
 
 **约束**:非 source 节点必须至少留一个正向输入(否则永不触发,`init` 报错);`back_edges` 名字须是本节点输入口;`sync_set` 分组不得含反馈口;**未被 `back_edges` 打断的拓扑环仍报错**。纯建图期 + 调度器局部改动,无新增阻塞 / 锁。内置 `FeedbackAddKernel`(`out = 正向 + 反馈`)为样板,自环即运行累加。
 
+### 7.13 重跑(reset)—— 保留算子实例的复位
+
+`Terminated` 后 `reset` 可把图复位为可再次 `start`,**保留已 open 的算子实例** —— 省掉每会话重建图 + 重跑 `open`(如重新加载模型)的开销。处理完视频 A 再处理 B,不必重建整张图。
+
+**前提**:图须 `Terminated` 且静止(`is_idle`,没有 worker 还在算子里),否则返回 `Error::State`。宿主通常先 `wait_done()`。这条静止依据与 `Drop` / `start` 用的是同一个 —— `in_flight == 0` 且 `main_queue` 空 ⇒ 没有 worker 在 `run_node` 中途,故复位无并发。
+
+**不碰线程池**:worker 随图存活、静止时都 park 在 condvar 上、`stop` 仍为 false,下一轮 `start` 直接复用;shutdown + join 只发生在 `Drop`。这也意味着 reset 不付重建线程的代价。
+
+字段分三类:
+
+| 类 | 例 | reset 动作 |
+|---|---|---|
+| 构建期常量 | 拓扑 / 端口表 / **算子实例** / executor / `on_error` / `min_period` | **不动** |
+| 运行期状态 | 队列 / 统计 / `next_seq` / `input_bounds` / `source_done` / `last_fire` / `closed` / `has_error` | **复位** |
+| 刻意保留 | `opened`(算子不重建)· `side_packets`(宿主注入的常量,不必重灌)· poller / observer(宿主复用同一句柄取下一轮输出) | 保留 |
+
+**最易漏的三个**(都有专门测试钉住):
+
+1. `Edge::last_sent` 必须回 `unset()` —— 否则单调性校验会拒掉下一轮从图输入口发的第一个包(时间戳通常又从小开始)。
+2. `GraphShared::{error, has_error, cancelled}` —— `record_error` 只「首因生效、不覆盖」,**没有反向清除路径**;不清则 reset 后的图带着旧错误出生,`start` 的 `try_claim` 立刻被挡回。为此新增 `reset_run_state()`。
+3. `input_bounds` 必须回 `pre_stream()`(**不是**上一轮 `close` 推到的 `done()`)—— 否则 `readiness` / 对齐会认为每个空口「已到流尾」,语义崩坏。
+
+`opened` 的保留由 `start` 侧配合:`start` 见 `opened == true` 就**跳过 `open`**(只重灌 side packet + 复位槽)。这正是「不重跑 open」= 不重载模型的价值所在。
+
+C ABI:`lmflow_graph_reset`;Python:`Graph.reset()`。四层同一语义。
+
 ---
 
 ## 8. Python 接口(已实现)
@@ -1114,7 +1141,7 @@ lm-flow/                          仓库根
 
 ---
 
-## 13. 测试策略(已落地 271 个:Rust 233 + Python 38)
+## 13. 测试策略(已落地 274 个:Rust 236 + Python 38)
 
 | 测试文件 | 数量 | 覆盖 |
 |---|---|---|
@@ -1221,7 +1248,6 @@ lm-flow/                          仓库根
 
 **引擎语义上的边界**
 
-- **不支持重跑**:`Terminated` 之后只能 `free`,不能再 `start`(ADR / §0.3)。
 - **`batch` 输入策略 v1 仅单输入口**:多口批对齐留后续(§7.10)。
 - **无引擎级 timer / 限速**:source 由**内核自定速**(`process` 里自行阻塞),故源节点必须挂
   线程池执行器(config 强制校验)。非自定速的源会灌爆下游 —— 内部边不背压(§7.5)。
