@@ -96,6 +96,16 @@ pub struct NodeConfig {
     /// 本项目不接受静默的有损行为,见 §7.6)。
     #[serde(default)]
     pub on_error: String,
+    /// **源节点(0 输入)**的产出速率上限,单位 Hz(每秒次数)。`0`(默认)= 不限速。
+    ///
+    /// 声明式定速:设了它,引擎保证每两次 `process` 之间至少间隔 `1/rate` 秒 ——
+    /// 算子不必自己写 sleep。用于「30fps 合成源」这类场景,也顺带避免非自定速的源
+    /// 灌爆下游(内部边不背压,见 §7.5)。
+    ///
+    /// 只对源节点有意义;非源节点由上游数据驱动,设了会在建图期报错。
+    /// 实现:在源的池线程里 sleep 到点(该节点本就必须挂线程池执行器)。
+    #[serde(default)]
+    pub rate: f64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -183,6 +193,7 @@ impl Default for NodeConfig {
             r#type: String::new(),
             back_edges: Vec::new(),
             on_error: String::new(),
+            rate: 0.0,
         }
     }
 }
@@ -260,6 +271,23 @@ impl GraphConfig {
                     "node `{who}`: a source node (no input ports) requires an executor (thread pool) -- \
                      it would otherwise block the host main thread and stall the whole graph"
                 )));
+            }
+            // rate 定速:只对源节点有意义(非源由上游数据驱动),且必须为正。
+            if n.rate != 0.0 {
+                if !n.input_ports.is_empty() {
+                    return Err(Error::InvalidArg(format!(
+                        "node `{who}`: rate only applies to source nodes (no input ports); \
+                         a non-source is driven by upstream data"
+                    )));
+                }
+                // 要求正的有限值。`> 0.0` 一并挡住 0、负数和 NaN(NaN 的比较恒假),
+                // `is_finite` 挡住 inf。
+                if !(n.rate.is_finite() && n.rate > 0.0) {
+                    return Err(Error::InvalidArg(format!(
+                        "node `{who}`: rate must be a positive, finite number (Hz), got {}",
+                        n.rate
+                    )));
+                }
             }
             match n.input_policy.r#type.as_str() {
                 "sync" | "immediate" => {}
