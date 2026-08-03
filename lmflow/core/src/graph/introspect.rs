@@ -21,7 +21,8 @@ impl GraphInner {
         let st = &node.stats;
         // 先看 in_flight 再用 started_us —— 后者归零时不清,只在「在跑」时有意义。
         let running = st.in_flight.load(Ordering::Relaxed) > 0;
-        let running_for_us = if running {
+        // 计时关闭时 started_us 从未写过 —— 必须报 0,不能拿它去算(见 GraphConfig::stats_timing)。
+        let running_for_us = if running && self.timing {
             let now_us = self.epoch.elapsed().as_micros() as i64;
             (now_us - st.started_us.load(Ordering::Relaxed)).max(0)
         } else {

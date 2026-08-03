@@ -286,6 +286,19 @@ impl GraphInner {
             }
         }
 
+        // 计时开关:watchdog 依赖单次耗时,故 `watchdog_ms > 0` 时**强制开启** ——
+        // 否则 watchdog 会静默失效,那正是本项目反复拒绝的失败模式。
+        let timing = shared.config.stats_timing || shared.config.watchdog_ms > 0;
+        if !shared.config.stats_timing && shared.config.watchdog_ms > 0 {
+            runtime::log_info(
+                "stats_timing=false is overridden to true because watchdog_ms > 0 (the watchdog needs per-call timing)",
+            );
+        } else if !timing {
+            runtime::log_info(
+                "stats_timing=false: per-call timing is off -- total_process_us / max_process_us / running_for_us stay 0, and the DOT latency heat map degenerates to one colour",
+            );
+        }
+
         Ok(Self {
             shared,
             nodes,
@@ -304,6 +317,7 @@ impl GraphInner {
             side_packets: Mutex::new(BTreeMap::new()),
             required_side_packets: required,
             epoch: Instant::now(),
+            timing,
         })
     }
 }

@@ -132,3 +132,96 @@ output_ports: ["out"]
     let dot = g.to_dot_with_stats();
     assert!(dot.contains("cluster_"), "子图 cluster 应保留:\n{dot}");
 }
+
+/// `stats_timing: false` 关掉每次回调的两次 `Instant::now()`:
+/// 耗时类字段归零、其余计数照常。这是**显式取舍**,不是 bug。
+#[test]
+fn stats_timing_off_zeroes_only_timing_fields() {
+    let g = Graph::from_yaml(
+        r#"
+stats_timing: false
+nodes:
+  - { name: a, kernel: PassThrough, input_ports: ["in"], output_ports: ["out"] }
+input_ports: ["in"]
+output_ports: ["out"]
+"#,
+    )
+    .unwrap();
+    let out = g.add_poller("out").unwrap();
+    g.start().unwrap();
+    let inp = g.input("in").unwrap();
+    for i in 0..4i64 {
+        inp.send(Packet::from_i64(i).at(Timestamp(i))).unwrap();
+    }
+    g.close_all_inputs();
+    let mut n = 0;
+    while n < 4 {
+        match out.next() {
+            Some(_) => n += 1,
+            None => break,
+        }
+    }
+    g.wait_done_timeout(Duration::from_secs(5)).unwrap();
+
+    let st = g.node_stats(0).unwrap();
+    // 计数照常
+    assert_eq!(st.processed, 4, "计数不受计时开关影响");
+    assert_eq!(st.packets_in, 4);
+    assert_eq!(st.packets_out, 4);
+    // 耗时归零
+    assert_eq!(st.total_process_us, 0, "关了计时,累计耗时应为 0");
+    assert_eq!(st.max_process_us, 0, "关了计时,最慢一次应为 0");
+    assert_eq!(st.running_for_us, 0);
+
+    // 热力图退化:全同色(不报错、不崩)
+    let dot = g.to_dot_with_stats();
+    assert!(dot.contains("4 pkts"), "包数仍应标出:\n{dot}");
+}
+
+/// `watchdog_ms > 0` 时,即使写了 `stats_timing: false` 也必须**强制开启**计时 ——
+/// 否则 watchdog 无从判断超时、会静默失效。
+///
+/// 用一个**故意睡 2ms** 的算子做决定性判据:强制开启则 `max_process_us >= 1000`;
+/// 若真被关掉,它会恒为 0。(PassThrough 快于 1µs、`as_micros()` 本就是 0,证明不了。)
+#[test]
+fn watchdog_forces_timing_on() {
+    #[derive(Default)]
+    struct Slow;
+    impl lmflow::Kernel for Slow {
+        fn process(&mut self, cc: &mut lmflow::KernelCtx) -> lmflow::Result<()> {
+            std::thread::sleep(Duration::from_millis(2));
+            cc.forward(0, 0)
+        }
+    }
+    lmflow::register_kernel::<Slow>("SlowForWatchdogTest").unwrap();
+
+    let g = Graph::from_yaml(
+        r#"
+stats_timing: false
+watchdog_ms: 1
+nodes:
+  - { name: a, kernel: SlowForWatchdogTest, input_ports: ["in"], output_ports: ["out"] }
+input_ports: ["in"]
+output_ports: ["out"]
+"#,
+    )
+    .unwrap();
+    let out = g.add_poller("out").unwrap();
+    g.start().unwrap();
+    g.input("in")
+        .unwrap()
+        .send(Packet::from_i64(1).at(Timestamp(0)))
+        .unwrap();
+    g.close_all_inputs();
+    let _ = out.next();
+    g.wait_done_timeout(Duration::from_secs(5)).unwrap();
+
+    let st = g.node_stats(0).unwrap();
+    assert_eq!(st.processed, 1);
+    assert!(
+        st.max_process_us >= 1000,
+        "watchdog_ms>0 必须强制开启计时(睡了 2ms,应测到 >=1000µs);实测 {}µs —— \
+         若为 0 说明计时被 stats_timing=false 关掉了,watchdog 会静默失效",
+        st.max_process_us
+    );
+}

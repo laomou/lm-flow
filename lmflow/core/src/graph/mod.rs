@@ -567,6 +567,9 @@ pub struct GraphInner {
     required_side_packets: Vec<(String, String)>,
     /// 计时基准。`Instant` 无法放进原子,故节点统计里存「相对本基准的微秒」。
     epoch: Instant,
+    /// 是否为每次算子回调计时。建图时由 `config.stats_timing` 与 `watchdog_ms` 定下,
+    /// 之后不变(故是普通 bool,不必原子)。见 `GraphConfig::stats_timing`。
+    timing: bool,
 }
 
 /// 图句柄。
@@ -1777,11 +1780,19 @@ impl GraphInner {
         // 记账全走原子:改造前这里每次调用要拿 2 次 running_timing 锁 + 1 次 stats 锁
         // (再加 run_node 里的 processed 一次)。R1 要求「调算子时不持任何引擎锁」——
         // 原子天然满足,也顺带把 4 对 mutex 从每包热路径上去掉了。
-        let started = Instant::now();
+        // 计时可关(见 `GraphConfig::stats_timing`):`Instant::now()` + 末尾的 `elapsed()`
+        // 是**每次 process 两次**时钟读,本机约 43 ns、占单跳派发成本约 15%。
         // 一次时钟读两用:既作本次耗时起点,也作「本节点开始在跑」的时刻。
+        let started = if self.timing {
+            Some(Instant::now())
+        } else {
+            None
+        };
         if node.stats.in_flight.fetch_add(1, Ordering::Relaxed) == 0 {
-            let since_epoch = started.saturating_duration_since(self.epoch).as_micros() as i64;
-            node.stats.started_us.store(since_epoch, Ordering::Relaxed);
+            if let Some(t) = started {
+                let since_epoch = t.saturating_duration_since(self.epoch).as_micros() as i64;
+                node.stats.started_us.store(since_epoch, Ordering::Relaxed);
+            }
         }
 
         // 安全性:ctx_ptr 来自本槽的 UnsafeCell,该槽此刻独占。
@@ -1793,10 +1804,11 @@ impl GraphInner {
             }
         };
 
-        let us = started.elapsed().as_micros() as i64;
         // 归零时**不清** started_us:读侧按 in_flight > 0 判断是否在跑,
         // 故无需清零,也就不存在「清零」与「新一次开始」互相覆盖的竞争。
         node.stats.in_flight.fetch_sub(1, Ordering::Relaxed);
+        let Some(t0) = started else { return rc }; // 计时关闭:统计与 watchdog 都不适用
+        let us = t0.elapsed().as_micros() as i64;
         if matches!(phase, KernelPhase::Process) {
             node.stats.total_us.fetch_add(us, Ordering::Relaxed);
             node.stats.max_us.fetch_max(us, Ordering::Relaxed);

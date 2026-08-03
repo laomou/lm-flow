@@ -35,6 +35,11 @@
 //! | `sink/pool4` | ~4000 ns | ~400 ns | **±13~25%,不可归因** |
 //! | `enqueue_only_paused` | ~80~100 ns | — | 跑间漂移大,只作数量级参照 |
 //!
+//! `stats/timing_{on,off}/depth16` 是同一条链只差 `stats_timing` 的 **A/B**:
+//! 4694 → 3861 ns/包(**-17.8%**),即每节点省约 49 ns —— 与「每次回调两次
+//! `Instant::now()`、单次 now()+elapsed 约 43 ns」的预测吻合,也反过来验证了
+//! 「静态数原语次数 × 单独测单价」这套估算方法。
+//!
 //! **`pool4` 与 `enqueue_only_paused` 的波动大到不能用来归因代码改动**(前者是 4 线程抢
 //! 2 节点的锁 + 线程落位靠运气;后者绝对值太小、易受机器负载影响)。判断某次改动有没有
 //! 效果,请看 `main_thread` / `pool1`。
@@ -71,7 +76,15 @@ const BATCH: u64 = 256;
 /// `pool > 0` 时全部节点挂线程池,否则走宿主主线程执行器。
 /// `max_queue_size` 调大,批量喂入不撞全局软水位(那会转成输入口背压,污染测量)。
 fn sink_chain_yaml(depth: usize, pool: usize) -> String {
+    sink_chain_yaml_timing(depth, pool, true)
+}
+
+/// 同上,但可关掉每次回调的计时(`stats_timing`)—— 用来量那两次 `Instant::now()` 的代价。
+fn sink_chain_yaml_timing(depth: usize, pool: usize, timing: bool) -> String {
     let mut s = String::from("max_queue_size: 1000000\n");
+    if !timing {
+        s += "stats_timing: false\n";
+    }
     if pool > 0 {
         s += &format!(
             "executors:\n  - {{ name: \"cpu\", type: \"ThreadPoolExecutor\", num_threads: {pool} }}\n"
@@ -160,5 +173,36 @@ fn bench_enqueue_only(c: &mut Criterion) {
     g.finish();
 }
 
-criterion_group!(benches, bench_enqueue_only, bench_dispatch);
+/// 计时开关的代价:同一条链,只差 `stats_timing`。差值 = 每次回调两次
+/// `Instant::now()` 的成本(本机单次 now()+elapsed 约 43 ns)。
+fn bench_timing_cost(c: &mut Criterion) {
+    let mut g = c.benchmark_group("dispatch");
+    g.throughput(Throughput::Elements(BATCH));
+    for (label, timing) in [("timing_on", true), ("timing_off", false)] {
+        let graph = Graph::from_yaml(&sink_chain_yaml_timing(16, 0, timing)).unwrap();
+        graph.start().unwrap();
+        let input = graph.input("in").unwrap();
+        let ts = Cell::new(0i64);
+        g.bench_function(format!("stats/{label}/depth16"), |b| {
+            b.iter(|| {
+                for _ in 0..BATCH {
+                    let t = ts.get();
+                    ts.set(t + 1);
+                    input.send(Packet::from_i64(0).at(Timestamp(t))).unwrap();
+                }
+                graph
+                    .wait_until_idle_timeout(Duration::from_secs(30))
+                    .unwrap();
+            });
+        });
+    }
+    g.finish();
+}
+
+criterion_group!(
+    benches,
+    bench_enqueue_only,
+    bench_dispatch,
+    bench_timing_cost
+);
 criterion_main!(benches);

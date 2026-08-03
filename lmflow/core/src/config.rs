@@ -119,6 +119,41 @@ pub struct GraphConfig {
     /// 单次算子回调超过该时长即打 WARN(0 = 关闭)
     #[serde(default)]
     pub watchdog_ms: u64,
+    /// 是否为每次算子回调计时(默认开)。
+    ///
+    /// 关掉可省下**每次 process 两次 `Instant::now()`**(本机约 43 ns,占单跳派发成本
+    /// 约 15%)。代价是 `LMFlowNodeStats` 的 `total_process_us` / `max_process_us` /
+    /// `running_for_us` 恒为 0,`to_dot(with_stats)` 的延迟热力图退化为单色。
+    ///
+    /// **`watchdog_ms > 0` 时本项被强制视为开启**(否则 watchdog 无从判断超时,
+    /// 那属于静默失效 —— 本项目不接受)。真关掉时会打一条 INFO 说明,不静默。
+    #[serde(default = "default_true")]
+    pub stats_timing: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// **必须与上面的 serde 默认值保持一致** —— 否则「YAML 省略该字段」与「Rust 里
+/// `..Default::default()`」两条路会得到不同行为(典型陷阱:`bool` 的 derive 默认是
+/// `false`,而 `stats_timing` 的 serde 默认是 `true`)。故手写而不 derive。
+impl Default for GraphConfig {
+    fn default() -> Self {
+        Self {
+            executors: Vec::new(),
+            nodes: Vec::new(),
+            include: Vec::new(),
+            subgraphs: std::collections::BTreeMap::new(),
+            input_ports: Vec::new(),
+            output_ports: Vec::new(),
+            max_queue_size: default_max_queue_size(),
+            max_queued_packets: 0,
+            max_queued_bytes: 0,
+            watchdog_ms: 0,
+            stats_timing: default_true(),
+        }
+    }
 }
 
 /// 子图定义:一张可复用的小图(ADR #27)。**不声明 executor** —— 内部节点按名引用主图的执行器。

@@ -311,6 +311,7 @@ output_ports: ["b"]
             max_queued_packets: 0,
             max_queued_bytes: 0,
             watchdog_ms: 0,
+            ..Default::default()
         };
         cfg.subgraphs.insert(
             "Denoise".into(),
@@ -351,6 +352,7 @@ output_ports: ["b"]
             max_queued_packets: 0,
             max_queued_bytes: 0,
             watchdog_ms: 0,
+            ..Default::default()
         };
         cfg.subgraphs
             .insert("Denoise".into(), sg(&["sin"], &["sout"], vec![]));
@@ -371,6 +373,7 @@ output_ports: ["b"]
             max_queued_packets: 0,
             max_queued_bytes: 0,
             watchdog_ms: 0,
+            ..Default::default()
         };
         // 子图要 2 个输入,实例只给 1 个。
         cfg.subgraphs
@@ -392,6 +395,7 @@ output_ports: ["b"]
             max_queued_packets: 0,
             max_queued_bytes: 0,
             watchdog_ms: 0,
+            ..Default::default()
         };
         // A 内部又实例化 A → 无限递归,须报错。
         cfg.subgraphs.insert(
@@ -421,6 +425,7 @@ output_ports: ["b"]
             max_queued_packets: 0,
             max_queued_bytes: 0,
             watchdog_ms: 0,
+            ..Default::default()
         };
         cfg.subgraphs
             .insert("Denoise".into(), sg(&["sin"], &["sout"], vec![]));
