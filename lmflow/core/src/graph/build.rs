@@ -23,7 +23,9 @@ use crate::runtime::{self, GraphShared};
 use crate::status::{Error, Result};
 use crate::timestamp::Timestamp;
 
-use super::{Activity, Edge, EdgeId, GraphInner, InputPolicy, Node, NodeSched, NodeStats, State};
+use super::{
+    Activity, Edge, EdgeId, GraphInner, InputPolicy, Node, NodeSched, NodeStats, OnError, State,
+};
 
 // ---------------------------------------------------------------- 构建与校验
 
@@ -271,6 +273,7 @@ impl GraphInner {
                     .map(|_| Mutex::new(VecDeque::new()))
                     .collect(),
                 input_closed: (0..ins.len()).map(|_| AtomicBool::new(false)).collect(),
+                on_error: OnError::from_config(&n.on_error),
                 input_is_back_edge: back_edge_mask[idx].clone(),
                 source_done: AtomicBool::new(false),
                 input_bounds: (0..ins.len())

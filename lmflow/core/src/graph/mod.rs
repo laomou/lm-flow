@@ -338,6 +338,29 @@ struct NodeStats {
     started_us: AtomicI64,
 }
 
+/// 算子失败时本节点怎么办(见 `NodeConfig::on_error`)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OnError {
+    /// 记录首个错误、终止全图(默认,历史行为)。
+    Abort,
+    /// 丢掉出错的那一个包、**推进下游时间戳边界**、计数并打 WARN,然后继续跑。
+    ///
+    /// 为什么必须推进边界:不推进的话下游会永远等这一刻的数据 ——
+    /// 那等于把「一帧出错」升级成「整图卡死」,比 abort 还糟。
+    Skip,
+}
+
+impl OnError {
+    fn from_config(s: &str) -> Self {
+        // 未知值已在 config 校验期拒掉,这里只认已知的两个。
+        if s == "skip" {
+            OnError::Skip
+        } else {
+            OnError::Abort
+        }
+    }
+}
+
 pub struct Node {
     pub name: String,
     pub kernel_name: String,
@@ -364,6 +387,8 @@ pub struct Node {
     /// 每个输入口一条独立队列(见模块头注释)
     input_queues: Vec<Mutex<VecDeque<Packet>>>,
     input_closed: Vec<AtomicBool>,
+    /// 算子失败时的处理策略(见 [`OnError`])。建图期定下,之后不变。
+    on_error: OnError,
     /// 每个输入口是否为 back-edge(反馈寄存器):true 的口不参与就绪 / 终止 / 对齐,
     /// 入队走 cap-1 drop-old(只留最新反馈)。长度恒 = 输入口数(无 back-edge 则全 false)。
     input_is_back_edge: Vec<bool>,
@@ -1414,11 +1439,7 @@ impl GraphInner {
 
         // 契约类型校验(在本槽上)。类型不符宁可报错,也不让算子按错误类型解读内存。
         let ok = match self.check_input_types(n, slot) {
-            Err(e) => {
-                node.stats.errors.fetch_add(1, Ordering::Relaxed);
-                self.shared.record_error(e);
-                false
-            }
+            Err(e) => self.on_node_error(n, slot, e),
             Ok(()) => {
                 let rc = self.call_kernel(n, slot, KernelPhase::Process);
                 // 源节点:内核调了 source_done() → 记下,readiness 不再放行、随后关流终止。
@@ -1427,9 +1448,7 @@ impl GraphInner {
                 }
                 if rc != 0 {
                     let e = unsafe { node.ctx_slot(slot) }.take_error(rc);
-                    node.stats.errors.fetch_add(1, Ordering::Relaxed);
-                    self.shared.record_error(e);
-                    false
+                    self.on_node_error(n, slot, e)
                 } else {
                     node.stats.processed.fetch_add(1, Ordering::Relaxed);
                     true
@@ -1441,6 +1460,38 @@ impl GraphInner {
 
     /// 调用完成:按 `seq` 顺序刷新输出并释放槽。保证下游看到的时间戳单调 ——
     /// 即使后面的时间戳先算完,也要等前面的先刷。
+    /// 算子失败时按本节点的 [`OnError`] 分流。返回值是给 `complete_invocation` 的 `ok`:
+    /// **`true` 表示「走刷新路径」**(而非「成功」)。
+    ///
+    /// `Skip` 之所以返回 `true`,是因为刷新路径才会**推进下游时间戳边界** ——
+    /// staging 已被 `discard_staging` 清空,于是 `flush_one` 落到「无产出」分支,
+    /// 自动 `propagate_bound(input_ts + 1)`。这正是 `Filter` 丢包时依赖的同一套机制。
+    /// 不推进边界的话下游会永远等这一刻,等于把一帧出错升级成整图卡死。
+    fn on_node_error(&self, n: NodeId, slot: usize, e: Error) -> bool {
+        let node = &self.nodes[n];
+        let before = node.stats.errors.fetch_add(1, Ordering::Relaxed);
+        match node.on_error {
+            OnError::Abort => {
+                self.shared.record_error(e);
+                false // 丢弃产出,不刷新;has_error 置位后调度不再放行 → 全图终止
+            }
+            OnError::Skip => {
+                // 有损行为绝不静默:计数(node_stats().errors)+ 打 WARN。
+                // 指数退避,避免每帧都错时刷爆日志(与 note_dropped 同法)。
+                let after = before + 1;
+                if before == 0 || after.is_power_of_two() {
+                    runtime::log_warn(&format!(
+                        "node `{}`: skipping a failed packet (on_error=skip), {} so far: {}",
+                        node.name, after, e
+                    ));
+                }
+                // 清掉这一包可能已写了一半的产出,再走刷新路径(仅为推进边界)。
+                unsafe { node.ctx_slot(slot) }.discard_staging();
+                true
+            }
+        }
+    }
+
     fn complete_invocation(&self, n: NodeId, slot: usize, seq: u64, ok: bool) {
         let node = &self.nodes[n];
         // 登记结果;当前无人刷新则由本线程担任刷新者。

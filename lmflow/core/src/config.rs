@@ -86,6 +86,16 @@ pub struct NodeConfig {
     /// 用它才能让边成环:未被 back_edge 打断的拓扑环仍在建图期报错。
     #[serde(default)]
     pub back_edges: Vec<String>,
+    /// 本节点算子失败时怎么办:`"abort"`(默认)或 `"skip"`。
+    ///
+    /// * `abort` —— 记录首个错误、终止全图(历史行为)。
+    /// * `skip` —— **丢掉出错的那一个包**、推进下游时间戳边界、计数并打 WARN,然后继续跑。
+    ///   用于长跑实时管线:一帧坏数据不该杀掉整条流水线。
+    ///
+    /// 只有这两个值(没有单独的 `log`:`skip` 本身一定会计数并打日志 ——
+    /// 本项目不接受静默的有损行为,见 §7.6)。
+    #[serde(default)]
+    pub on_error: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -152,6 +162,27 @@ impl Default for GraphConfig {
             max_queued_bytes: 0,
             watchdog_ms: 0,
             stats_timing: default_true(),
+        }
+    }
+}
+
+/// 与 serde 默认逐字段对齐(照 [`InputPolicyConfig`] 的先例手写、不 derive):
+/// `input_policy` 的默认 `type` 是 `"sync"` 而非空串,derive 会给错。
+/// 有了它,以后给 `NodeConfig` 加字段不会再打断仓库内的结构体字面量。
+impl Default for NodeConfig {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            kernel: String::new(),
+            input_ports: Vec::new(),
+            output_ports: Vec::new(),
+            executor: String::new(),
+            max_in_flight: 0,
+            options: serde_yaml::Value::default(),
+            input_policy: InputPolicyConfig::default(),
+            r#type: String::new(),
+            back_edges: Vec::new(),
+            on_error: String::new(),
         }
     }
 }
@@ -268,6 +299,14 @@ impl GraphConfig {
                     "node `{who}`: unknown input_policy `{other}` (valid: sync / immediate / fixed_size / sync_set / batch)"
                 )))
                 }
+            }
+
+            // 错误策略:未知值明确拒掉,不静默当默认(与 input_policy / executor type 同规矩)。
+            if !n.on_error.is_empty() && n.on_error != "abort" && n.on_error != "skip" {
+                return Err(Error::InvalidArg(format!(
+                    "node `{who}`: unknown on_error `{}` (expected \"abort\" or \"skip\")",
+                    n.on_error
+                )));
             }
 
             // 反馈环:back_edges 名字须是本节点输入口;须留至少一个正向输入口驱动;不得与 sync_set 冲突。

@@ -256,20 +256,13 @@ mod tests {
     }
 
     fn kernel_node(name: &str, kernel: &str, input: &[&str], output: &[&str]) -> NodeConfig {
-        let mut n = NodeConfig {
+        NodeConfig {
             name: name.to_string(),
             kernel: kernel.to_string(),
             input_ports: input.iter().map(|s| s.to_string()).collect(),
             output_ports: output.iter().map(|s| s.to_string()).collect(),
-            executor: String::new(),
-            max_in_flight: 0,
-            options: serde_yaml::Value::Null,
-            input_policy: Default::default(),
-            r#type: String::new(),
-            back_edges: Vec::new(),
-        };
-        n.name = name.to_string();
-        n
+            ..Default::default()
+        }
     }
 
     fn instance(name: &str, ty: &str, input: &[&str], output: &[&str]) -> NodeConfig {

@@ -1,8 +1,8 @@
 # lmflow 设计方案
 
 > 状态:**成品**。Rust 引擎、C ABI、C++ 糖层(含 OpenCV 互转)、18 个内置算子、
-> Python 绑定(pybind11)、原生 SDK 发布(各平台头文件+库)全部就位;**258 个测试**
-> (Rust 220 + Python 38)全绿,TSan 硬门禁 0 竞态。Rust / C++ / Python 三种宿主的
+> Python 绑定(pybind11)、原生 SDK 发布(各平台头文件+库)全部就位;**263 个测试**
+> (Rust 225 + Python 38)全绿,TSan 硬门禁 0 竞态。Rust / C++ / Python 三种宿主的
 > hello_world 都输出正确;支持线程池绑核 + 实时优先级(Linux/Android),可交叉编到
 > Android / iOS / 鸿蒙。
 > 定位:一个数据流图计算框架 —— 把计算描述成**有向图**,节点是**算子(Kernel)**,
@@ -78,6 +78,7 @@
 | 34 | **每次回调的计时可关**(`stats_timing`,默认开);但 `watchdog_ms > 0` 时**强制开** | 计时是每次 `process` **两次** `Instant::now()`(本机约 43 ns,占单跳派发约 15~18%)。实测同链 A/B:depth16 每包 4694 → 3861 ns(**-17.8%**)。关掉的代价是 `total_process_us`/`max_process_us`/`running_for_us` 恒 0、DOT 延迟热力图退化为单色 —— 属**显式取舍**,建图时打 INFO 说明,不静默。watchdog 依赖单次耗时,故与它冲突时强制开启并说明原因(静默失效是本项目明确拒绝的失败模式;有测试用一个睡 2ms 的算子钉住这条,去掉强制开启该测试即失败) |
 | 35 | **`max_in_flight == 1`(默认)时跳过按序重排的 BTreeMap;`flush_staging` 不再为整批产出建临时 `Vec`** | perf 采样(非估算)显示:`pending_flush: BTreeMap` 的每次调用插入+删除、以及 `flush_staging` 的临时 `Vec<OutputBatch>`,连带 malloc/free 共占约 13.5%。而 `max_in_flight == 1` 时同一时刻只有一次调用在飞,`seq` 必然等于 `next_flush_seq` —— 重排缓冲纯属白做,可直接接手。`dispatch` 只读 packets,故签名改 `&[Packet]`:图输入口的 `send` 不再为单包 `vec![pkt]` 分配,`staging` 的缓冲清空后放回、容量复用(不再 `finish_grow`)。实测每跳边际 279 → **236 ns**;`remove_leaf_kv` / `SpecFromIterNested` / `finish_grow` 三项从 2.96% / 1.93% / 1.13% 归零,malloc/free 总量 13.5% → 7.5% |
 | 36 | **`try_claim` 每个输入口只拿一次队列锁** | 原先每口把**同一把**队列锁拿 3 次:`front_ts`(读队首 ts)、`pop_front`、`queue_len`(算 `inputs_done`)。合成一个临界区。安全性来自 ADR #30:**只有 `try_claim` 会 pop 且全程持 `sched`**,别的线程只 push(追加尾部、不动队首),故队首稳定;`inputs_done` 那处也无差别 —— 它要求 `input_closed`,而关流后不再有 push、长度已稳定。实测每跳边际 236 → **213 ns**(pool1 -7%)。三个分支(正向口 / 反馈口 / 批处理)都合了。`readiness()` 里还有一次(它要跨口算就绪),没并 —— 要把观察值带出来会引入耦合、收益仅 ~20 ns,不值 |
+| 37 | **节点级 `on_error: abort\|skip`**,默认 `abort` | 长跑实时管线里一帧坏数据不该杀掉整条流水线,而原先任何一次算子失败都终止全图。`skip` 只丢那一个包并**推进下游边界**(不推进就把一帧错误升级成整图卡死);复用「无产出也要推进边界」那条既有路径,不新写机制。有损行为绝不静默:计入 `errors` + WARN(指数退避)。**只有两个值**——不设单独的 `log`,因为 `skip` 本身一定计数并打日志。定位:能在算子内处理的就在算子内处理(返回成功不产出),`skip` 专治**管不到**的失败(契约校验、panic / C++ 异常、第三方算子) |
 | 22 | **`type_id` = FNV-1a(修饰名)**,而非 `typeid().hash_code()` | 后者实现定义、不保证跨动态库一致;而本项目 C++ 算子在 core、Python 绑定在另一 `.so`,天然跨产物。事后再改需全量重编,故一开始就用稳定方案 + `LMFLOW_DECLARE_TYPE_NAME` 逃生口 |
 | 23 | **时间戳单调性:图输入口强制校验,内部边仅 debug 构建校验** | 外部数据进入的唯一门校验一次即可挡住绝大多数乱序;内部边逐包校验是热路径开销,且算子产出乱序属算子 bug,用 `debug_assertions` 捕获即可 |
 | 24 | **不做 stream header**,用 side packet 覆盖 | header 会引入「流上的第二种数据」及其生命周期问题;side packet 已能表达「整条流不变的属性」。少一个概念优于多一个 |
@@ -661,10 +662,27 @@ DAG 有界的扇出倍数」间接约束。
 
 ### 7.7 错误路径
 
+节点级策略 `on_error`(YAML 节点字段,默认 `abort`;未知值建图期明确报错,不静默):
+
+**`abort`(默认,历史行为)**
 - 算子返回非 0 → `record_error` → 置 `AtomicBool has_error`(快路径)+ 存首个错误(含文本)。
 - **失败时丢弃该次的 staging**,不传播半成品输出。
 - 此后 `try_claim` 一律返回 false(停止调度)、`send` 返回错误、所有 poller 被唤醒返回 false、
   `wait_done` 返回该错误码,`lmflow_graph_last_error` 可取文本。
+
+**`skip`(长跑实时管线用)**
+- 丢掉**出错的那一个包**,不置 `has_error`,其余包照常流过,图能正常终止。
+- **必须推进下游时间戳边界**,否则下游会永远等这一刻 —— 那等于把「一帧出错」升级成
+  「整图卡死」,比 abort 还糟。实现上不新写机制:清空 staging 后**照常走刷新路径**,
+  于是落到「无产出」分支自动 `propagate_bound(input_ts + 1)`,与 `Filter` 丢包时同一条路。
+- 有损行为**绝不静默**:计入 `LMFlowNodeStats.errors`,并打 WARN(指数退避,避免每帧都错
+  时刷爆日志 —— 与边的 `note_dropped` 同法)。
+
+> **什么时候用哪个。** 能在算子内处理的错误,**就在算子内处理** —— 捕获后返回成功但
+> 不产出即可,引擎会自动推进边界(与上面 `skip` 走的是同一条路)。这样你能按错误类型
+> 精确决定哪些可恢复。`on_error: skip` 是给你**管不到**的失败用的:
+> 引擎侧的契约类型校验失败、以及算子的 **panic / C++ 异常**(那些没法「返回成功」);
+> 以及你不拥有源码的第三方算子 —— 用 YAML 就能加固,不必改算子。
 
 ### 7.8 竞态 / 死锁自查表
 
@@ -1068,7 +1086,7 @@ lm-flow/                          仓库根
 
 ---
 
-## 13. 测试策略(已落地 258 个:Rust 220 + Python 38)
+## 13. 测试策略(已落地 263 个:Rust 225 + Python 38)
 
 | 测试文件 | 数量 | 覆盖 |
 |---|---|---|
