@@ -30,15 +30,29 @@
 //!
 //! | 配置 | 每包 | 每跳边际 | 可信度 |
 //! |---|---|---|---|
-//! | `sink/main_thread` | 573 ns | **279 ns** | 区间 ±0.3%,可用于归因 |
-//! | `sink/pool1` | 3973 ns | 2077 ns | 区间 ±0.5%,可用于归因 |
+//! | `sink/main_thread` | 448 ns | **236 ns** | 区间 ±0.3%,可用于归因 |
+//! | `sink/pool1` | 3762 ns | 1962 ns | 区间 ±0.5%,可用于归因 |
 //! | `sink/pool4` | ~4000 ns | ~400 ns | **±13~25%,不可归因** |
 //! | `enqueue_only_paused` | ~80~100 ns | — | 跑间漂移大,只作数量级参照 |
 //!
 //! `stats/timing_{on,off}/depth16` 是同一条链只差 `stats_timing` 的 **A/B**:
-//! 4694 → 3861 ns/包(**-17.8%**),即每节点省约 49 ns —— 与「每次回调两次
+//! 4188 → 3281 ns/包(**-21.7%**),即每节点省约 53 ns —— 与「每次回调两次
 //! `Instant::now()`、单次 now()+elapsed 约 43 ns」的预测吻合,也反过来验证了
 //! 「静态数原语次数 × 单独测单价」这套估算方法。
+//!
+//! # 用 perf 采样(比上面的估算更靠得住)
+//!
+//! ```sh
+//! sudo sysctl kernel.perf_event_paranoid=1          # 默认可能禁到连用户态都不许采
+//! CARGO_PROFILE_BENCH_DEBUG=true cargo build --benches
+//! BIN=$(ls -t target/release/deps/dispatch-* | grep -v '\.d$' | head -1)
+//! perf record -F 3000 -g --call-graph dwarf,16384 -- \
+//!     "$BIN" --bench --profile-time 8 'main_thread/depth/16'
+//! perf report --stdio --no-children -g none -F overhead,symbol
+//! ```
+//!
+//! `--profile-time` 是 Criterion 专为 profiler 提供的:跑固定时长、跳过统计分析。
+//! 注意 `try_claim` 会被**内联进 `schedule_node`**,故后者的自身占比其实就是它。
 //!
 //! **`pool4` 与 `enqueue_only_paused` 的波动大到不能用来归因代码改动**(前者是 4 线程抢
 //! 2 节点的锁 + 线程落位靠运气;后者绝对值太小、易受机器负载影响)。判断某次改动有没有

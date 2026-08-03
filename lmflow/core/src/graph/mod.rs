@@ -1013,7 +1013,7 @@ impl GraphInner {
         self.check_input_monotonic(edge, &pkt)?;
 
         // 分发给该边的所有消费者(各自一份引用)与 poller/observer
-        self.dispatch(edge, vec![pkt]);
+        self.dispatch(edge, std::slice::from_ref(&pkt)); // 单包不必为它分配 Vec
         self.schedule_consumers(edge);
         Ok(())
     }
@@ -1038,7 +1038,9 @@ impl GraphInner {
     }
 
     /// 把一批包投递到边的消费者与订阅者。
-    fn dispatch(&self, edge_id: EdgeId, packets: Vec<Packet>) {
+    /// 把一批包投递到边的每个消费者队列。**只读 `packets`**(逐个 `clone` 引用计数),
+    /// 故取切片而非 `Vec` —— 让调用方保留缓冲的所有权与容量。
+    fn dispatch(&self, edge_id: EdgeId, packets: &[Packet]) {
         let edge = &self.edges[edge_id];
 
         // 订阅者(poller / observer)各自独立一份
@@ -1046,7 +1048,7 @@ impl GraphInner {
             let pollers = edge.pollers.lock().expect("poller list lock poisoned");
             let mut any = false;
             for p in pollers.iter() {
-                for pkt in &packets {
+                for pkt in packets {
                     p.push(pkt.clone());
                     any = true;
                 }
@@ -1068,7 +1070,7 @@ impl GraphInner {
                 }
             };
             for o in &observers {
-                for pkt in &packets {
+                for pkt in packets {
                     match o {
                         Observer::C { cb, user } => {
                             let ffi = crate::ffi::borrow_packet(pkt);
@@ -1094,7 +1096,7 @@ impl GraphInner {
             let mut q = self.nodes[node].input_queues[port]
                 .lock()
                 .expect("queue lock poisoned");
-            for pkt in &packets {
+            for pkt in packets {
                 // fixed_size:满则丢最旧的。这是**有意的有损**策略,且不阻塞上游,
                 // 故与「内部边不背压」不冲突,而是其配套的内存约束手段。
                 if let Some(cap) = cap {
@@ -1433,27 +1435,43 @@ impl GraphInner {
     fn complete_invocation(&self, n: NodeId, slot: usize, seq: u64, ok: bool) {
         let node = &self.nodes[n];
         // 登记结果;当前无人刷新则由本线程担任刷新者。
+        //
+        // **快路**:重排缓冲为空、本次恰好就是待刷新序号、且当前无人刷新 —— 直接接手,
+        // 不必经 `pending_flush`。`max_in_flight == 1`(默认)时这条恒成立:同一时刻只有
+        // 一次调用在飞,`seq` 必然等于 `next_flush_seq`。避免每次调用一次 BTreeMap
+        // 插入 + 删除(perf 实测这对增删连带堆分配约占 5~6%)。
+        let mut first: Option<(usize, bool)> = None;
         let be_flusher = {
             let mut s = node.sched.lock().expect("scheduler lock poisoned");
-            s.pending_flush.insert(seq, (slot, ok));
-            if s.flushing {
-                false
-            } else {
+            if !s.flushing && s.pending_flush.is_empty() && seq == s.next_flush_seq {
                 s.flushing = true;
+                first = Some((slot, ok));
                 true
+            } else {
+                s.pending_flush.insert(seq, (slot, ok));
+                if s.flushing {
+                    false
+                } else {
+                    s.flushing = true;
+                    true
+                }
             }
         };
         if be_flusher {
             loop {
                 // 严格按 next_flush_seq 取;取不到就在同一临界区里让出刷新者身份,避免丢刷新。
-                let item = {
-                    let mut s = node.sched.lock().expect("scheduler lock poisoned");
-                    let next = s.next_flush_seq;
-                    match s.pending_flush.remove(&next) {
-                        Some(v) => Some(v),
-                        None => {
-                            s.flushing = false;
-                            None
+                // 快路拿到的那一个先用掉(它就是 next_flush_seq 对应的项)。
+                let item = match first.take() {
+                    Some(v) => Some(v),
+                    None => {
+                        let mut s = node.sched.lock().expect("scheduler lock poisoned");
+                        let next = s.next_flush_seq;
+                        match s.pending_flush.remove(&next) {
+                            Some(v) => Some(v),
+                            None => {
+                                s.flushing = false;
+                                None
+                            }
                         }
                     }
                 };
@@ -1508,43 +1526,53 @@ impl GraphInner {
     /// 把某个槽暂存区的输出分发到下游(此时不持有任何算子回调栈)。
     fn flush_staging(&self, n: NodeId, slot: usize) {
         let node = &self.nodes[n];
-        let (input_ts, batches): (Timestamp, Vec<OutputBatch>) = {
-            let ctx = unsafe { node.ctx_slot(slot) };
-            let ts = ctx.input_ts;
-            let v = node
-                .outputs
-                .iter()
-                .enumerate()
-                .map(|(i, &e)| {
-                    (
-                        e,
-                        std::mem::take(&mut ctx.staging[i]),
-                        ctx.next_bounds[i].take(),
-                    )
-                })
-                .collect();
-            (ts, v)
-        };
-        for (edge, packets, explicit_bound) in batches {
-            if !packets.is_empty() {
-                self.nodes[n]
-                    .stats
-                    .packets_out
-                    .fetch_add(packets.len() as u64, Ordering::Relaxed);
-                self.dispatch(edge, packets);
-                self.schedule_consumers(edge);
-                continue;
-            }
-            // **没有产出时也必须推进下游边界**,否则下游会永远等这一路。
-            // 这是自动的:算子不显式调 SetNextTimestampBound 也不会卡住管线
-            // (Filter 这类会丢包的算子因此不必自己操心)。
-            let bound = match explicit_bound {
-                Some(b) => b,
-                None if input_ts.is_allowed_in_stream() => input_ts.next_allowed_in_stream(),
-                None => continue,
+        let input_ts = unsafe { node.ctx_slot(slot) }.input_ts;
+        // 逐口处理,不再先 `collect` 成一个临时 `Vec<OutputBatch>`(perf 显示那个临时
+        // Vec 连带 malloc/free 可观)。仍然**不在调用 `dispatch` 时持有 `&mut Context`** ——
+        // 那是本函数原有的安全性质(避免与回调期交出的 `*mut Context` 形成别名),保留。
+        for i in 0..node.outputs.len() {
+            let edge = node.outputs[i];
+            let (mut packets, explicit_bound) = {
+                let ctx = unsafe { node.ctx_slot(slot) };
+                (
+                    std::mem::take(&mut ctx.staging[i]),
+                    ctx.next_bounds[i].take(),
+                )
             };
-            self.propagate_bound(edge, bound);
+            self.flush_one(n, edge, &packets, explicit_bound, input_ts);
+            // 归还缓冲:清空后放回 staging,容量得以复用 —— 否则下次产出要重新分配。
+            packets.clear();
+            unsafe { node.ctx_slot(slot) }.staging[i] = packets;
         }
+    }
+
+    /// `flush_staging` 的单个输出口分支(拆出来只为让上面的循环短一点,逻辑未变)。
+    fn flush_one(
+        &self,
+        n: NodeId,
+        edge: EdgeId,
+        packets: &[Packet],
+        explicit_bound: Option<Timestamp>,
+        input_ts: Timestamp,
+    ) {
+        if !packets.is_empty() {
+            self.nodes[n]
+                .stats
+                .packets_out
+                .fetch_add(packets.len() as u64, Ordering::Relaxed);
+            self.dispatch(edge, packets);
+            self.schedule_consumers(edge);
+            return;
+        }
+        // **没有产出时也必须推进下游边界**,否则下游会永远等这一路。
+        // 这是自动的:算子不显式调 SetNextTimestampBound 也不会卡住管线
+        // (Filter 这类会丢包的算子因此不必自己操心)。
+        let bound = match explicit_bound {
+            Some(b) => b,
+            None if input_ts.is_allowed_in_stream() => input_ts.next_allowed_in_stream(),
+            None => return,
+        };
+        self.propagate_bound(edge, bound);
     }
 
     /// 把时间戳边界推给某条边的所有消费者,并重扫其就绪性。
@@ -2018,11 +2046,6 @@ impl Drop for GraphInner {
         }
     }
 }
-
-/// 一个输出口在本次调用中要向下游投递的内容:边 + 包 + 可选的显式时间戳边界。
-///
-/// 即便没有包也要带上边界:否则下游会永远等这一路(见 `flush_staging`)。
-type OutputBatch = (EdgeId, Vec<Packet>, Option<Timestamp>);
 
 #[derive(Debug, Clone, Copy)]
 enum KernelPhase {
