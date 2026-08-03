@@ -1,4 +1,4 @@
-# cmake/engine.cmake —— 公共基座:cargo 构建 Rust 引擎 → IMPORTED lmflow::flow_core。
+# cmake/engine.cmake —— 公共基座:cargo 构建 Rust 引擎 → IMPORTED lmflow::core。
 # 由根 CMakeLists include;各子目录(cpp/tests、python)都用这个 target。
 # 需要调用方先 set 好:LMFLOW_ROOT(仓库根)、LMFLOW_SRC(lmflow/ 源码根)。
 
@@ -11,7 +11,7 @@ else()
 endif()
 
 # 引擎 crate(lmflow)的 target 落在它自己目录下。
-set(FLOW_LIB "${LMFLOW_SRC}/core/target/${_cargo_dir}/liblmflow.a")
+set(LMFLOW_LIB "${LMFLOW_SRC}/core/target/${_cargo_dir}/liblmflow.a")
 
 find_program(CARGO cargo REQUIRED)
 find_package(Threads REQUIRED)
@@ -22,16 +22,16 @@ find_package(Threads REQUIRED)
 # .rs 变更、会复用陈旧的 .a(本地增量构建曾因此链到旧符号)。cargo 只在 .a 真变时更新它,
 # 故下游链接仍按需重链。
 add_custom_target(flow_engine ALL
-  BYPRODUCTS "${FLOW_LIB}"
+  BYPRODUCTS "${LMFLOW_LIB}"
   COMMAND ${CARGO} build ${_cargo_flags} --features builtin-kernels
   WORKING_DIRECTORY "${LMFLOW_SRC}/core"
   COMMENT "cargo build ${_cargo_flags} — Rust engine + C++ kernels → liblmflow.a"
   VERBATIM USES_TERMINAL)
 
-add_library(flow_core STATIC IMPORTED GLOBAL)
-set_target_properties(flow_core PROPERTIES IMPORTED_LOCATION "${FLOW_LIB}")
-target_include_directories(flow_core INTERFACE
+add_library(lmflow_core STATIC IMPORTED GLOBAL)
+set_target_properties(lmflow_core PROPERTIES IMPORTED_LOCATION "${LMFLOW_LIB}")
+target_include_directories(lmflow_core INTERFACE
   "$<BUILD_INTERFACE:${LMFLOW_SRC}/include>"
   "$<INSTALL_INTERFACE:include>")
-target_link_libraries(flow_core INTERFACE Threads::Threads ${CMAKE_DL_LIBS} m)
-add_library(lmflow::flow_core ALIAS flow_core)
+target_link_libraries(lmflow_core INTERFACE Threads::Threads ${CMAKE_DL_LIBS} m)
+add_library(lmflow::core ALIAS lmflow_core)

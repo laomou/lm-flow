@@ -19,7 +19,7 @@ option(LMFLOW_BUILD_TESTS  "Build C++ tests"                          ON)
 option(LMFLOW_BUILD_PYTHON "Build the pybind11 Python extension"      OFF)
 option(LMFLOW_WITH_CV_TEST "Compile the CV test kernel into _lmflow"  OFF)
 
-include("${LMFLOW_ROOT}/cmake/engine.cmake")     # → lmflow::flow_core(cargo 驱动)
+include("${LMFLOW_ROOT}/cmake/engine.cmake")     # → lmflow::core(cargo 驱动)
 
 if(LMFLOW_BUILD_PYTHON)
   add_subdirectory(lmflow/python)                 # 只编 + 装 pybind11 扩展(供 wheel)

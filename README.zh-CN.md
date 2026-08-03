@@ -174,7 +174,7 @@ cmake --install build --prefix /opt/lmflow   # → headers + lib + lib/cmake/lmf
 
 ```cmake
 find_package(lmflow REQUIRED)
-target_link_libraries(my_app PRIVATE lmflow::flow_core)   # 头 + liblmflow.a + 系统库
+target_link_libraries(my_app PRIVATE lmflow::core)   # 头 + liblmflow.a + 系统库
 ```
 
 > Rust 开发者在 `lmflow/core` 里用 `cargo`;Python 用户直接 `pip install lm-lmflow`(预编 wheel)。

@@ -25,7 +25,7 @@ endif()
 
 pybind11_add_module(_lmflow ${_srcs})
 target_include_directories(_lmflow PRIVATE "${LMFLOW_SRC}/include" "${NUMPY_INCLUDE}")
-target_link_libraries(_lmflow PRIVATE lmflow::flow_core)
+target_link_libraries(_lmflow PRIVATE lmflow::core)
 add_dependencies(_lmflow flow_engine)  # cargo 先出库再链
 
 if(LMFLOW_WITH_CV_TEST)

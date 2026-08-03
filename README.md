@@ -170,7 +170,7 @@ Consumers then just:
 
 ```cmake
 find_package(lmflow REQUIRED)
-target_link_libraries(my_app PRIVATE lmflow::flow_core)   # headers + liblmflow.a + system libs
+target_link_libraries(my_app PRIVATE lmflow::core)   # headers + liblmflow.a + system libs
 ```
 
 > Rust developers use `cargo` in `lmflow/core`; Python users just `pip install lm-lmflow` (prebuilt wheels). The wheel is built by **scikit-build-core driving this same root CMake** (`-DLMFLOW_BUILD_PYTHON=ON`), so there is one build definition, not three.
