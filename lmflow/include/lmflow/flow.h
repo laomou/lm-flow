@@ -538,6 +538,12 @@ LMFlowStatus lmflow_graph_init_from_yaml(LMFlowGraph*, const char* yaml);
 /* 同上,从文件读取(读文件失败亦返回错误并置 lmflow_last_error)。 */
 LMFlowStatus lmflow_graph_init_from_yaml_file(LMFlowGraph*, const char* path);
 LMFlowStatus lmflow_graph_start(LMFlowGraph*);
+/* 复位已结束的图,使其可再次 start —— **保留已 open 的算子实例**(省掉每会话
+ * 重建图 + 重跑 open,如重新加载模型)。图须处于 Terminated 且静止(通常先
+ * lmflow_graph_wait_done),否则返回 LMFLOW_ERR_STATE。
+ * 复位后队列/统计/时间戳状态归零;已注入的 side packet 与已注册的 poller/observer
+ * 保留 —— 宿主可复用同一 poller 句柄取下一轮输出。 */
+LMFlowStatus lmflow_graph_reset(LMFlowGraph*);
 void lmflow_graph_free(LMFlowGraph*); /* 内部先 cancel + wait,再释放 */
 
 /* ---------- 图输入 ----------

@@ -622,6 +622,7 @@ class Graph {
   }
 
   void start() { check(lmflow_graph_start(g_), "start"); }
+  void reset() { check(lmflow_graph_reset(g_), "reset"); }
 
   Input* input(const std::string& port) {
     LMFlowInput* h = lmflow_graph_input(g_, port.c_str());
@@ -972,6 +973,7 @@ PYBIND11_MODULE(_lmflow, m) {
       .def("add_poller", &Graph::add_poller)
       .def("observe", &Graph::observe, py::arg("port"), py::arg("fn"))
       .def("start", &Graph::start)
+      .def("reset", &Graph::reset)
       .def("input", &Graph::input)
       .def("close_input", &Graph::close_input)
       .def("close_all_inputs", &Graph::close_all_inputs)

@@ -118,6 +118,13 @@ pub unsafe extern "C" fn lmflow_graph_start(g: *mut LMFlowGraph) -> i32 {
     guard(|| with_graph(g, |gr| to_status(gr.start())))
 }
 
+/// 复位已结束的图,使其可再次 `start`,保留已 open 的算子实例(见 flow.h)。
+/// 图须处于 Terminated 且静止,否则返回 LMFLOW_ERR_STATE。
+#[no_mangle]
+pub unsafe extern "C" fn lmflow_graph_reset(g: *mut LMFlowGraph) -> i32 {
+    guard(|| with_graph(g, |gr| to_status(gr.reset())))
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn lmflow_graph_set_side_packet(
     g: *mut LMFlowGraph,

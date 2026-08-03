@@ -201,6 +201,13 @@ impl Context {
         self.input_ts = Timestamp::unset();
         self.error_msg = None;
         self.source_done = false;
+        // 下面两项在正常流程里使用前会被重写(claim 时写 inputs_done、进 close 前写
+        // close_reason),故单次调用不清也不出错;但 `reset` 要能用于「彻底静态复位」
+        // (图 reset 重跑),所以这里一并归位,不留任何上一轮残留。
+        for d in &mut self.inputs_done {
+            *d = false;
+        }
+        self.close_reason = crate::runtime::CLOSE_NORMAL;
     }
 
     /// 处理结束后**立即释放**本次输入的引用。

@@ -176,6 +176,22 @@ impl GraphShared {
         }
     }
 
+    /// 复位所有**运行期**状态,供图 reset 重跑用(`config` 等构建期数据不动)。
+    /// `record_error` 只「首因生效、不覆盖」,没有反向清除路径 —— 这里补上,
+    /// 否则 reset 后的图会带着上一轮的 error / cancelled 出生(start 立刻被挡回)。
+    ///
+    /// 只应在图**静止**时调用(Terminated + is_idle,见 `GraphInner::reset`),故用
+    /// `&self` + 内部可变即可,无并发。
+    pub fn reset_run_state(&self) {
+        *self.error.lock().expect("error lock poisoned") = None;
+        self.has_error.store(false, Ordering::SeqCst);
+        self.cancelled.store(false, Ordering::SeqCst);
+        self.total_queued.store(0, Ordering::Relaxed);
+        self.total_queued_bytes.store(0, Ordering::Relaxed);
+        // 算子自报计数器:新一轮从零计(诊断语义;要跨轮累计的宿主自己在算子里存)。
+        self.counters.lock().expect("counter lock poisoned").clear();
+    }
+
     pub fn has_error(&self) -> bool {
         self.has_error.load(Ordering::SeqCst)
     }
