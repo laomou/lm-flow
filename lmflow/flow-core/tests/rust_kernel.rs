@@ -2,9 +2,7 @@
 //!
 //! 用纯 Rust 写算子、注册、建图跑通;并验证 `process` 返 `Err` / panic 都被兜住成图错误(不崩)。
 
-use lmflow::{
-    register_kernel, Graph, Kernel, KernelContract, KernelCtx, Packet, State, Timestamp,
-};
+use lmflow::{register_kernel, Graph, Kernel, KernelContract, KernelCtx, Packet, State, Timestamp};
 
 // ---- 一个读 option 的 Rust 算子:out = in * factor ----
 #[derive(Default)]
