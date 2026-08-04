@@ -12,6 +12,11 @@ to each GitHub Release.
 
 ### Added
 
+- **Cooperative lossless backpressure for internal edges.** A node can set
+  `input_queue_capacity` to bound each forward input queue without blocking executor threads.
+  Producers retain completed staging and yield; dequeue resumes the pending flush. Source nodes,
+  diamond fanout/join graphs, close output, cancellation, and impossible alignment stalls are
+  covered by dedicated tests. The option is mutually exclusive with lossy `fixed_size`.
 - **Bounded Poller queues and complete output accounting.** Poller-retained packets now count
   toward global packet/byte watermarks. New bounded Pollers support `block`, `drop_oldest`,
   `drop_newest`, and capacity-1 `latest`; lossy policies expose drop counts and warnings.

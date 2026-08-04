@@ -652,9 +652,11 @@ void lmflow_graph_resume(LMFlowGraph*);
 const char* lmflow_graph_last_error(LMFlowGraph*);
 
 /* ---------- 全局水位:内部边与 Poller 队列的统计 ----------
- * 设计上内部边不对生产者背压(否则「扇出后汇合」的 DAG 会死锁,见设计文档 §7.5),
- * 代价是内部边可以无限增长:图输入口 100 帧 × 扇出 6 条边 × 每帧 6MB ≈ 3.6GB,
- * 而且若某条分支偏慢,单条边就能堆到内存耗尽 —— 没有任何机制会拦它。
+ * 默认内部边不限容量。需要逐节点无损限制时,在 YAML 节点上设置:
+ *     input_queue_capacity: 8
+ * 它限制每个正向输入口;满时生产者保留已完成输出并让出 worker,下游出队后恢复,
+ * 因此不会用「阻塞 worker」的方式把 diamond 图锁死。0 = 不限;不可与有损
+ * input_policy: fixed_size 同时使用。
  *
  * 因此给整张图一个总预算(YAML 顶层):
  *     max_queued_packets: 500          # 全图在途包数上限(0 = 不限)

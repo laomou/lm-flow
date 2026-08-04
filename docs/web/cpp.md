@@ -694,7 +694,13 @@ stats_timing: true
 ```
 
 Node fields: `name`, `kernel` (or `type` for a subgraph instance), `input_ports`, `output_ports`,
-`executor`, `max_in_flight`, `options`, `input_policy`, `back_edges`, `on_error`, `rate`.
+`executor`, `max_in_flight`, `options`, `input_policy`, `input_queue_capacity`, `back_edges`,
+`on_error`, `rate`.
+
+`input_queue_capacity` applies the same lossless capacity to every forward input port on the
+node. A full queue pauses the producer with its completed output retained, but releases the
+executor thread; dequeue resumes the pending flush. `0` means unbounded. Do not combine it with
+lossy `input_policy: fixed_size`.
 
 Graph fields: `executors`, `nodes`, `subgraphs`, `include`, `input_ports`, `output_ports`,
 `max_queue_size`, `max_queued_packets`, `max_queued_bytes`, `watchdog_ms`, `stats_timing`.

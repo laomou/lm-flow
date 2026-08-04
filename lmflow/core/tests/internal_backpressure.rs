@@ -1,0 +1,329 @@
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
+
+use lmflow::{register_kernel, Graph, Kernel, KernelContract, KernelCtx, Packet, Timestamp};
+
+#[derive(Default)]
+struct SlowPass;
+
+impl Kernel for SlowPass {
+    fn process(&mut self, context: &mut KernelCtx) -> lmflow::Result<()> {
+        std::thread::sleep(Duration::from_millis(2));
+        context.forward(0, 0)
+    }
+}
+
+#[derive(Default)]
+struct CountingSource {
+    next: i64,
+}
+
+impl Kernel for CountingSource {
+    fn get_contract(contract: &mut KernelContract) {
+        contract.output_type(0, lmflow::packet::type_id::I64);
+    }
+
+    fn process(&mut self, context: &mut KernelCtx) -> lmflow::Result<()> {
+        if self.next == 100 {
+            context.source_done();
+            return Ok(());
+        }
+        context.emit(0, Packet::from_i64(self.next))?;
+        self.next += 1;
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+struct Duplicate;
+
+impl Kernel for Duplicate {
+    fn process(&mut self, context: &mut KernelCtx) -> lmflow::Result<()> {
+        let packet = context.input(0).cloned().unwrap();
+        context.emit(0, packet.clone())?;
+        context.emit(1, packet)
+    }
+}
+
+#[derive(Default)]
+struct Burst;
+
+impl Kernel for Burst {
+    fn process(&mut self, context: &mut KernelCtx) -> lmflow::Result<()> {
+        let packet = context.input(0).cloned().unwrap();
+        context.emit(0, packet.clone())?;
+        context.emit(0, packet)
+    }
+}
+
+#[derive(Default)]
+struct EmitOnClose;
+
+impl Kernel for EmitOnClose {
+    fn process(&mut self, context: &mut KernelCtx) -> lmflow::Result<()> {
+        context.forward(0, 0)
+    }
+
+    fn close(&mut self, context: &mut KernelCtx) -> lmflow::Result<()> {
+        context.emit(0, Packet::from_i64(99).at(Timestamp(1)))
+    }
+}
+
+#[derive(Default)]
+struct JoinCount;
+
+static JOINED: AtomicUsize = AtomicUsize::new(0);
+
+impl Kernel for JoinCount {
+    fn process(&mut self, _context: &mut KernelCtx) -> lmflow::Result<()> {
+        JOINED.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+struct CloseJoinCount;
+
+static CLOSE_JOINED: AtomicUsize = AtomicUsize::new(0);
+
+impl Kernel for CloseJoinCount {
+    fn process(&mut self, _context: &mut KernelCtx) -> lmflow::Result<()> {
+        CLOSE_JOINED.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+fn register_test_kernels() {
+    let _ = register_kernel::<SlowPass>("InternalBpSlowPass");
+    let _ = register_kernel::<CountingSource>("InternalBpCountingSource");
+    let _ = register_kernel::<Duplicate>("InternalBpDuplicate");
+    let _ = register_kernel::<Burst>("InternalBpBurst");
+    let _ = register_kernel::<EmitOnClose>("InternalBpEmitOnClose");
+    let _ = register_kernel::<JoinCount>("InternalBpJoinCount");
+    let _ = register_kernel::<CloseJoinCount>("InternalBpCloseJoinCount");
+}
+
+#[test]
+fn bounded_internal_queue_preserves_all_packets() {
+    register_test_kernels();
+    let graph = Graph::from_yaml(
+        r#"
+executors:
+  - { name: pool, num_threads: 1 }
+nodes:
+  - { name: producer, kernel: PassThrough, input_ports: [in], output_ports: [mid] }
+  - name: consumer
+    kernel: InternalBpSlowPass
+    input_ports: [mid]
+    output_ports: [out]
+    executor: pool
+    input_queue_capacity: 2
+input_ports: [in]
+output_ports: [out]
+"#,
+    )
+    .unwrap();
+    let output = graph.add_poller("out").unwrap();
+    graph.start().unwrap();
+    let input = graph.input("in").unwrap();
+    for value in 0..40 {
+        input
+            .send(Packet::from_i64(value).at(Timestamp(value)))
+            .unwrap();
+    }
+    graph.close_all_inputs();
+    graph.wait_done_timeout(Duration::from_secs(5)).unwrap();
+
+    let values: Vec<_> =
+        std::iter::from_fn(|| output.next().and_then(|packet| packet.as_i64())).collect();
+    assert_eq!(values, (0..40).collect::<Vec<_>>());
+    assert!(
+        graph.node_stats(1).unwrap().peak_queue_depth <= 2,
+        "bounded consumer queue exceeded capacity"
+    );
+}
+
+#[test]
+fn fast_source_is_cooperatively_paused_by_slow_sink() {
+    register_test_kernels();
+    let graph = Graph::from_yaml(
+        r#"
+executors:
+  - { name: source_pool, num_threads: 1 }
+  - { name: sink_pool, num_threads: 1 }
+nodes:
+  - name: source
+    kernel: InternalBpCountingSource
+    input_ports: []
+    output_ports: [mid]
+    executor: source_pool
+  - name: sink
+    kernel: InternalBpSlowPass
+    input_ports: [mid]
+    output_ports: [out]
+    executor: sink_pool
+    input_queue_capacity: 3
+output_ports: [out]
+"#,
+    )
+    .unwrap();
+    let output = graph.add_poller("out").unwrap();
+    graph.start().unwrap();
+    graph.wait_done_timeout(Duration::from_secs(5)).unwrap();
+    let count = std::iter::from_fn(|| output.next()).count();
+    assert_eq!(count, 100);
+    assert!(graph.node_stats(1).unwrap().peak_queue_depth <= 3);
+}
+
+#[test]
+fn bounded_diamond_does_not_deadlock() {
+    register_test_kernels();
+    JOINED.store(0, Ordering::SeqCst);
+    let graph = Graph::from_yaml(
+        r#"
+executors:
+  - { name: pool, num_threads: 3 }
+nodes:
+  - { name: split, kernel: InternalBpDuplicate, input_ports: [in], output_ports: [left, right], executor: pool }
+  - { name: slow, kernel: InternalBpSlowPass, input_ports: [left], output_ports: [slow_out], executor: pool, input_queue_capacity: 2 }
+  - { name: fast, kernel: PassThrough, input_ports: [right], output_ports: [fast_out], executor: pool, input_queue_capacity: 2 }
+  - { name: join, kernel: InternalBpJoinCount, input_ports: [slow_out, fast_out], output_ports: [], executor: pool, input_queue_capacity: 2 }
+input_ports: [in]
+"#,
+    )
+    .unwrap();
+    graph.start().unwrap();
+    let input = graph.input("in").unwrap();
+    for value in 0..50 {
+        input
+            .send(Packet::from_i64(value).at(Timestamp(value)))
+            .unwrap();
+    }
+    graph.close_all_inputs();
+    graph.wait_done_timeout(Duration::from_secs(5)).unwrap();
+    assert_eq!(JOINED.load(Ordering::SeqCst), 50);
+    for node in 1..4 {
+        assert!(graph.node_stats(node).unwrap().peak_queue_depth <= 2);
+    }
+}
+
+#[test]
+fn capacity_smaller_than_one_emitted_batch_fails_loudly() {
+    register_test_kernels();
+    let graph = Graph::from_yaml(
+        r#"
+nodes:
+  - { name: burst, kernel: InternalBpBurst, input_ports: [in], output_ports: [mid] }
+  - { name: sink, kernel: Sink, input_ports: [mid], output_ports: [], input_queue_capacity: 1 }
+input_ports: [in]
+"#,
+    )
+    .unwrap();
+    graph.start().unwrap();
+    graph
+        .input("in")
+        .unwrap()
+        .send(Packet::from_i64(1).at(Timestamp(0)))
+        .unwrap();
+    graph.close_all_inputs();
+    let error = graph.wait_done().unwrap_err();
+    assert!(error.to_string().contains("emits a batch of 2"));
+}
+
+#[test]
+fn lossless_capacity_cannot_be_combined_with_fixed_size() {
+    register_test_kernels();
+    let error = Graph::from_yaml(
+        r#"
+nodes:
+  - name: sink
+    kernel: Sink
+    input_ports: [in]
+    output_ports: []
+    input_queue_capacity: 2
+    input_policy: { type: fixed_size, capacity: 2 }
+input_ports: [in]
+"#,
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("cannot be combined"));
+}
+
+#[test]
+fn cancel_releases_blocked_staging() {
+    register_test_kernels();
+    let graph = Graph::from_yaml(
+        r#"
+executors:
+  - { name: pool, num_threads: 1 }
+nodes:
+  - { name: producer, kernel: PassThrough, input_ports: [in], output_ports: [mid], executor: pool }
+  - { name: waiting_join, kernel: InternalBpJoinCount, input_ports: [mid, never], output_ports: [], executor: pool, input_queue_capacity: 1 }
+input_ports: [in, never]
+"#,
+    )
+    .unwrap();
+    graph.start().unwrap();
+    let input = graph.input("in").unwrap();
+    input.send(Packet::from_i64(0).at(Timestamp(0))).unwrap();
+    input.send(Packet::from_i64(1).at(Timestamp(1))).unwrap();
+    std::thread::sleep(Duration::from_millis(20));
+    graph.cancel();
+    let error = graph.wait_done_timeout(Duration::from_secs(2)).unwrap_err();
+    assert_eq!(error.code(), lmflow::status::code::CANCELLED);
+}
+
+#[test]
+fn close_output_resumes_after_downstream_dequeue() {
+    register_test_kernels();
+    CLOSE_JOINED.store(0, Ordering::SeqCst);
+    let graph = Graph::from_yaml(
+        r#"
+executors:
+  - { name: pool, num_threads: 2 }
+nodes:
+  - { name: producer, kernel: InternalBpEmitOnClose, input_ports: [in], output_ports: [mid], executor: pool }
+  - { name: join, kernel: InternalBpCloseJoinCount, input_ports: [mid, gate], output_ports: [], executor: pool, input_queue_capacity: 1 }
+input_ports: [in, gate]
+"#,
+    )
+    .unwrap();
+    graph.start().unwrap();
+    graph
+        .input("in")
+        .unwrap()
+        .send(Packet::from_i64(0).at(Timestamp(0)))
+        .unwrap();
+    graph.close_input("in").unwrap();
+    std::thread::sleep(Duration::from_millis(20));
+
+    let gate = graph.input("gate").unwrap();
+    gate.send(Packet::from_i64(0).at(Timestamp(0))).unwrap();
+    gate.send(Packet::from_i64(1).at(Timestamp(1))).unwrap();
+    gate.close();
+    graph.wait_done_timeout(Duration::from_secs(2)).unwrap();
+    assert_eq!(CLOSE_JOINED.load(Ordering::SeqCst), 2);
+}
+
+#[test]
+fn impossible_alignment_reports_backpressure_stall() {
+    register_test_kernels();
+    let graph = Graph::from_yaml(
+        r#"
+nodes:
+  - { name: producer, kernel: PassThrough, input_ports: [in], output_ports: [mid] }
+  - { name: waiting_join, kernel: InternalBpJoinCount, input_ports: [mid, never], output_ports: [], input_queue_capacity: 1 }
+input_ports: [in, never]
+"#,
+    )
+    .unwrap();
+    graph.start().unwrap();
+    let input = graph.input("in").unwrap();
+    input.send(Packet::from_i64(0).at(Timestamp(0))).unwrap();
+    input.send(Packet::from_i64(1).at(Timestamp(1))).unwrap();
+    let error = graph
+        .wait_until_idle_timeout(Duration::from_secs(1))
+        .unwrap_err();
+    assert!(error.to_string().contains("cannot make progress"));
+    graph.cancel();
+}

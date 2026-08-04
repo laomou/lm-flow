@@ -9,7 +9,7 @@
 //! `mod.rs`,它们在派发路径上,属于并发核心的一部分。
 
 use std::cell::UnsafeCell;
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::sync::{Arc, Condvar, Mutex};
@@ -293,6 +293,9 @@ impl GraphInner {
                 input_queues: (0..ins.len())
                     .map(|_| Mutex::new(VecDeque::new()))
                     .collect(),
+                input_queue_capacity: (n.input_queue_capacity != 0)
+                    .then_some(n.input_queue_capacity),
+                input_queue_reserved: (0..ins.len()).map(|_| AtomicUsize::new(0)).collect(),
                 input_closed: (0..ins.len()).map(|_| AtomicBool::new(false)).collect(),
                 on_error: OnError::from_config(&n.on_error),
                 min_period: if n.rate > 0.0 {
@@ -344,6 +347,7 @@ impl GraphInner {
             in_flight: AtomicUsize::new(0),
             activity: (Mutex::new(Activity::default()), Condvar::new()),
             paused: AtomicBool::new(false),
+            blocked_flush_nodes: Mutex::new(BTreeSet::new()),
             side_packets: Mutex::new(BTreeMap::new()),
             required_side_packets: required,
             epoch: Instant::now(),

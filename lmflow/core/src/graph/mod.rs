@@ -9,7 +9,7 @@
 //! are dispatched per consumer — cloning a reference, never the payload.
 
 use std::cell::UnsafeCell;
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -422,8 +422,16 @@ struct NodeSched {
     next_flush_seq: u64,
     /// 完成但等待按序刷新的调用:seq -> (slot, 是否成功)。
     pending_flush: BTreeMap<u64, (usize, bool)>,
+    /// 当前按序轮到、但因下游内部输入队列已满而暂缓刷新的槽。
+    blocked_flush: Option<BlockedFlush>,
     /// 是否已有线程在做刷新 —— 保证刷新按序、串行(否则并发刷新会打乱下游顺序)。
     flushing: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum BlockedFlush {
+    Invocation { slot: usize, ok: bool },
+    Close,
 }
 
 impl NodeSched {
@@ -438,6 +446,7 @@ impl NodeSched {
             next_seq: 0,
             next_flush_seq: 0,
             pending_flush: BTreeMap::new(),
+            blocked_flush: None,
             flushing: false,
         }
     }
@@ -533,6 +542,10 @@ pub struct Node {
     stats: NodeStats,
     /// 每个输入口一条独立队列(见模块头注释)
     input_queues: Vec<Mutex<VecDeque<Packet>>>,
+    /// 每个正向输入口的无损容量。`None` = 不限;back-edge / fixed_size 走各自有损语义。
+    input_queue_capacity: Option<usize>,
+    /// 已由上游刷新预留、尚未真正入队的槽数。与 queue len 合计做并发容量判定。
+    input_queue_reserved: Vec<AtomicUsize>,
     input_closed: Vec<AtomicBool>,
     /// 算子失败时的处理策略(见 [`OnError`])。建图期定下,之后不变。
     on_error: OnError,
@@ -815,6 +828,8 @@ pub struct GraphInner {
     activity: (Mutex<Activity>, Condvar),
     /// 暂停调度(调试/限速)。已在执行的算子不受影响。
     paused: AtomicBool,
+    /// 因下游无损输入队列已满而保留 staging 的节点。下游每次出队后重试这些刷新。
+    blocked_flush_nodes: Mutex<BTreeSet<NodeId>>,
     side_packets: Mutex<BTreeMap<String, Packet>>,
     /// 各算子在 GetContract 里声明的必需 side packet:(名字, 声明它的节点)
     required_side_packets: Vec<(String, String)>,
@@ -975,6 +990,7 @@ impl Graph {
 
     pub fn cancel(&self) {
         self.inner.shared.cancel();
+        self.inner.resume_blocked_flushes();
         self.inner.notify_activity();
     }
 
@@ -1327,7 +1343,7 @@ impl GraphInner {
             }
             // 本线程推不动。若线程池还有在飞任务,就等它们排水(这才是真正的背压);
             // 若全图都空了水位却下不去(如下游无人消费),那是真卡死 —— 报错而非永久阻塞。
-            if self.is_idle() {
+            if self.workers_idle() {
                 return Err(Error::WouldBlock);
             }
             self.wait_activity_since(before, std::time::Duration::from_millis(100));
@@ -1522,16 +1538,29 @@ impl GraphInner {
     pub fn run_node_on_worker(&self, n: NodeId) {
         self.run_node(n);
         self.in_flight.fetch_sub(1, Ordering::SeqCst);
+        if self.shared.is_cancelled() || self.shared.has_error() {
+            self.resume_blocked_flushes();
+        }
         self.notify_activity();
     }
 
-    /// 空闲 = 主线程队列为空 **且** 线程池里没有在飞任务。
-    fn is_idle(&self) -> bool {
+    /// 执行器空闲 = 主线程队列为空且线程池里没有在飞任务。
+    fn workers_idle(&self) -> bool {
         self.in_flight.load(Ordering::SeqCst) == 0
             && self
                 .main_queue
                 .lock()
                 .expect("main queue lock poisoned")
+                .is_empty()
+    }
+
+    /// 逻辑空闲还要求没有因内部容量不足而保留的待刷新 staging。
+    fn is_idle(&self) -> bool {
+        self.workers_idle()
+            && self
+                .blocked_flush_nodes
+                .lock()
+                .expect("blocked flush lock poisoned")
                 .is_empty()
     }
 
@@ -1592,6 +1621,9 @@ impl GraphInner {
         let mut s = node.sched.lock().expect("scheduler lock poisoned");
         if !s.opened || s.close_started {
             return false;
+        }
+        if s.blocked_flush.is_some() {
+            return false; // 先把已完成调用的 staging 刷出去,再认领新输入
         }
         if s.in_flight >= node.max_in_flight {
             return false; // 达容量上限;释放槽后由 finish→schedule_node 重扫
@@ -1720,6 +1752,8 @@ impl GraphInner {
     fn schedule_node(&self, n: NodeId) {
         while self.try_claim(n) {
             self.dispatch_task(n);
+            // 本次认领已从某些内部输入队列弹包,可能为上游腾出了容量。
+            self.resume_blocked_flushes();
         }
     }
 
@@ -1832,7 +1866,11 @@ impl GraphInner {
         let mut first: Option<(usize, bool)> = None;
         let be_flusher = {
             let mut s = node.sched.lock().expect("scheduler lock poisoned");
-            if !s.flushing && s.pending_flush.is_empty() && seq == s.next_flush_seq {
+            if !s.flushing
+                && s.blocked_flush.is_none()
+                && s.pending_flush.is_empty()
+                && seq == s.next_flush_seq
+            {
                 s.flushing = true;
                 first = Some((slot, ok));
                 true
@@ -1847,41 +1885,170 @@ impl GraphInner {
             }
         };
         if be_flusher {
-            loop {
-                // 严格按 next_flush_seq 取;取不到就在同一临界区里让出刷新者身份,避免丢刷新。
-                // 快路拿到的那一个先用掉(它就是 next_flush_seq 对应的项)。
-                let item = match first.take() {
-                    Some(v) => Some(v),
-                    None => {
-                        let mut s = node.sched.lock().expect("scheduler lock poisoned");
-                        let next = s.next_flush_seq;
-                        match s.pending_flush.remove(&next) {
-                            Some(v) => Some(v),
+            self.drive_invocation_flushes(n, first);
+        }
+        self.finish(n);
+    }
+
+    /// 驱动按序刷新。下游容量不足时保留槽与 staging,让出 worker;由下游出队后重试。
+    fn drive_invocation_flushes(&self, n: NodeId, mut first: Option<(usize, bool)>) {
+        let node = &self.nodes[n];
+        loop {
+            let item = match first.take() {
+                Some(value) => Some(value),
+                None => {
+                    let mut sched = node.sched.lock().expect("scheduler lock poisoned");
+                    if let Some(BlockedFlush::Invocation { slot, ok }) = sched.blocked_flush.take()
+                    {
+                        Some((slot, ok))
+                    } else {
+                        let next = sched.next_flush_seq;
+                        match sched.pending_flush.remove(&next) {
+                            Some(value) => Some(value),
                             None => {
-                                s.flushing = false;
+                                sched.flushing = false;
                                 None
                             }
                         }
                     }
-                };
-                let Some((fslot, fok)) = item else { break };
-                // 锁外刷新;因 flushing 独占,刷新严格单线程按序。
-                if fok {
-                    self.flush_staging(n, fslot);
-                } else {
-                    unsafe { node.ctx_slot(fslot) }.discard_staging();
                 }
-                // CoW 卫生:立刻释放本次输入的引用(否则上游 CoW 退化成全量拷贝)。
-                unsafe { node.ctx_slot(fslot) }.clear_inputs();
-                {
-                    let mut s = node.sched.lock().expect("scheduler lock poisoned");
-                    s.next_flush_seq += 1;
-                    s.in_flight -= 1;
-                    s.free_slots.push(fslot);
+            };
+            let Some((slot, ok)) = item else {
+                self.blocked_flush_nodes
+                    .lock()
+                    .expect("blocked flush lock poisoned")
+                    .remove(&n);
+                return;
+            };
+
+            if ok && !self.shared.is_cancelled() && !self.shared.has_error() {
+                match self.flush_staging(n, slot) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        let mut sched = node.sched.lock().expect("scheduler lock poisoned");
+                        sched.blocked_flush = Some(BlockedFlush::Invocation { slot, ok });
+                        sched.flushing = false;
+                        drop(sched);
+                        self.blocked_flush_nodes
+                            .lock()
+                            .expect("blocked flush lock poisoned")
+                            .insert(n);
+                        return;
+                    }
+                    Err(error) => {
+                        unsafe { node.ctx_slot(slot) }.discard_staging();
+                        self.shared.record_error(error);
+                    }
                 }
+            } else {
+                unsafe { node.ctx_slot(slot) }.discard_staging();
+            }
+            unsafe { node.ctx_slot(slot) }.clear_inputs();
+            {
+                let mut sched = node.sched.lock().expect("scheduler lock poisoned");
+                sched.next_flush_seq += 1;
+                sched.in_flight -= 1;
+                sched.free_slots.push(slot);
             }
         }
-        self.finish(n);
+    }
+
+    fn resume_blocked_flushes(&self) {
+        let blocked: Vec<NodeId> = self
+            .blocked_flush_nodes
+            .lock()
+            .expect("blocked flush lock poisoned")
+            .iter()
+            .copied()
+            .collect();
+        for node_id in blocked {
+            let blocked = {
+                let mut sched = self.nodes[node_id]
+                    .sched
+                    .lock()
+                    .expect("scheduler lock poisoned");
+                if sched.flushing || sched.blocked_flush.is_none() {
+                    None
+                } else {
+                    sched.flushing = true;
+                    sched.blocked_flush
+                }
+            };
+            match blocked {
+                Some(BlockedFlush::Invocation { .. }) => {
+                    self.drive_invocation_flushes(node_id, None);
+                    self.finish(node_id);
+                }
+                Some(BlockedFlush::Close) => {
+                    self.resume_blocked_close(node_id);
+                }
+                None => {}
+            }
+        }
+    }
+
+    fn resume_blocked_close(&self, n: NodeId) {
+        let node = &self.nodes[n];
+        if self.shared.is_cancelled() || self.shared.has_error() {
+            unsafe { node.ctx_slot(0) }.discard_staging();
+            unsafe { node.ctx_slot(0) }.clear_inputs();
+            {
+                let mut sched = node.sched.lock().expect("scheduler lock poisoned");
+                sched.blocked_flush = None;
+                sched.flushing = false;
+                sched.closed = true;
+            }
+            self.blocked_flush_nodes
+                .lock()
+                .expect("blocked flush lock poisoned")
+                .remove(&n);
+            for &edge in &node.outputs {
+                self.close_edge(edge);
+            }
+            self.notify_activity();
+            return;
+        }
+        match self.flush_staging(n, 0) {
+            Ok(true) => {
+                unsafe { node.ctx_slot(0) }.clear_inputs();
+                {
+                    let mut sched = node.sched.lock().expect("scheduler lock poisoned");
+                    sched.blocked_flush = None;
+                    sched.flushing = false;
+                    sched.closed = true;
+                }
+                self.blocked_flush_nodes
+                    .lock()
+                    .expect("blocked flush lock poisoned")
+                    .remove(&n);
+                for &edge in &node.outputs {
+                    self.close_edge(edge);
+                }
+                self.notify_activity();
+            }
+            Ok(false) => {
+                node.sched.lock().expect("scheduler lock poisoned").flushing = false;
+            }
+            Err(error) => {
+                unsafe { node.ctx_slot(0) }.discard_staging();
+                unsafe { node.ctx_slot(0) }.clear_inputs();
+                self.shared.record_error(error);
+                {
+                    let mut sched = node.sched.lock().expect("scheduler lock poisoned");
+                    sched.blocked_flush = None;
+                    sched.flushing = false;
+                    sched.closed = true;
+                }
+                self.blocked_flush_nodes
+                    .lock()
+                    .expect("blocked flush lock poisoned")
+                    .remove(&n);
+                for &edge in &node.outputs {
+                    self.close_edge(edge);
+                }
+                self.notify_activity();
+            }
+        }
     }
 
     /// 契约声明的输入类型校验。类型不符宁可报错,也不让算子按错误类型解读内存。
@@ -1990,9 +2157,22 @@ impl GraphInner {
     }
 
     /// 把某个槽暂存区的输出分发到下游(此时不持有任何算子回调栈)。
-    fn flush_staging(&self, n: NodeId, slot: usize) {
+    fn flush_staging(&self, n: NodeId, slot: usize) -> Result<bool> {
         let node = &self.nodes[n];
         let input_ts = unsafe { node.ctx_slot(slot) }.input_ts;
+        let reservations = {
+            let ctx = unsafe { node.ctx_slot(slot) };
+            let output_counts: Vec<(EdgeId, usize)> = node
+                .outputs
+                .iter()
+                .copied()
+                .zip(ctx.staging.iter().map(Vec::len))
+                .collect();
+            let Some(reservations) = self.reserve_internal_capacity(n, &output_counts)? else {
+                return Ok(false);
+            };
+            reservations
+        };
         // 逐口处理,不再先 `collect` 成一个临时 `Vec<OutputBatch>`(perf 显示那个临时
         // Vec 连带 malloc/free 可观)。仍然**不在调用 `dispatch` 时持有 `&mut Context`** ——
         // 那是本函数原有的安全性质(避免与回调期交出的 `*mut Context` 形成别名),保留。
@@ -2009,6 +2189,80 @@ impl GraphInner {
             // 归还缓冲:清空后放回 staging,容量得以复用 —— 否则下次产出要重新分配。
             packets.clear();
             unsafe { node.ctx_slot(slot) }.staging[i] = packets;
+        }
+        self.release_internal_reservations(&reservations);
+        // 真正入队后 reservation 已转化为 queue len；此刻重新尝试其它被容量挡住的刷新。
+        self.resume_blocked_flushes();
+        Ok(true)
+    }
+
+    fn reserve_internal_capacity(
+        &self,
+        producer: NodeId,
+        outputs: &[(EdgeId, usize)],
+    ) -> Result<Option<Vec<(NodeId, usize, usize)>>> {
+        let mut reservations = Vec::new();
+        for &(edge, count) in outputs {
+            if count == 0 {
+                continue;
+            }
+            for &(consumer, port) in &self.edges[edge].consumers {
+                let node = &self.nodes[consumer];
+                if node.input_is_back_edge[port]
+                    || matches!(node.policy, InputPolicy::FixedSize { .. })
+                {
+                    continue;
+                }
+                let Some(capacity) = node.input_queue_capacity else {
+                    continue;
+                };
+                if count > capacity {
+                    self.release_internal_reservations(&reservations);
+                    return Err(Error::Kernel(format!(
+                        "node `{}` emits a batch of {count} packets to edge `{}`, exceeding consumer \
+                         `{}` input_queue_capacity {capacity}; increase the capacity or emit smaller batches",
+                        self.nodes[producer].name, self.edges[edge].name, node.name,
+                    )));
+                }
+                // queue len 与 reservation 必须在同一把 queue 锁下观察/更新。
+                // 否则可能读到旧 len，恰逢另一刷新已入队并释放 reservation，
+                // 两个刷新都以为有空位而共同越过容量。
+                let queue = node.input_queues[port].lock().expect("queue lock poisoned");
+                let queued = queue.len();
+                let reserved = &node.input_queue_reserved[port];
+                let mut current = reserved.load(Ordering::Relaxed);
+                loop {
+                    if queued + current + count > capacity {
+                        drop(queue);
+                        self.release_internal_reservations(&reservations);
+                        return Ok(None);
+                    }
+                    match reserved.compare_exchange_weak(
+                        current,
+                        current + count,
+                        Ordering::SeqCst,
+                        Ordering::Relaxed,
+                    ) {
+                        Ok(_) => {
+                            reservations.push((consumer, port, count));
+                            drop(queue);
+                            break;
+                        }
+                        Err(next) => current = next,
+                    }
+                }
+            }
+        }
+        Ok(Some(reservations))
+    }
+
+    fn release_internal_reservations(&self, reservations: &[(NodeId, usize, usize)]) {
+        for &(node, port, count) in reservations {
+            let _ = self.nodes[node].input_queue_reserved[port].fetch_update(
+                Ordering::SeqCst,
+                Ordering::Relaxed,
+                |reserved| Some(reserved.saturating_sub(count)),
+            );
         }
     }
 
@@ -2092,7 +2346,24 @@ impl GraphInner {
             unsafe { node.ctx_slot(0) }.discard_staging();
             self.shared.record_error(e);
         } else {
-            self.flush_staging(n, 0);
+            match self.flush_staging(n, 0) {
+                Ok(true) => {}
+                Ok(false) => {
+                    let mut sched = node.sched.lock().expect("scheduler lock poisoned");
+                    sched.blocked_flush = Some(BlockedFlush::Close);
+                    sched.flushing = false;
+                    drop(sched);
+                    self.blocked_flush_nodes
+                        .lock()
+                        .expect("blocked flush lock poisoned")
+                        .insert(n);
+                    return false;
+                }
+                Err(error) => {
+                    unsafe { node.ctx_slot(0) }.discard_staging();
+                    self.shared.record_error(error);
+                }
+            }
         }
         unsafe { node.ctx_slot(0) }.clear_inputs();
         node.sched.lock().expect("scheduler lock poisoned").closed = true;
@@ -2146,6 +2417,10 @@ impl GraphInner {
         // 2. 清 GraphShared:先清 error/cancelled,否则下一轮 start 的 try_claim 会被旧
         //    has_error 挡回(mod.rs try_claim 首判)。
         self.shared.reset_run_state();
+        self.blocked_flush_nodes
+            .lock()
+            .expect("blocked flush lock poisoned")
+            .clear();
 
         // 3. 逐 Edge 复位。last_sent 必须回 unset() —— 否则单调性校验会拒掉下一轮
         //    从图输入口发的第一个包(时间戳通常又从小开始)。
@@ -2175,6 +2450,9 @@ impl GraphInner {
             node.stats.reset();
             for q in &node.input_queues {
                 q.lock().expect("queue lock poisoned").clear();
+            }
+            for reserved in &node.input_queue_reserved {
+                reserved.store(0, Ordering::SeqCst);
             }
             for c in &node.input_closed {
                 c.store(false, Ordering::SeqCst);
@@ -2253,7 +2531,22 @@ impl GraphInner {
             }
             // 在判断是否空闲**之前**捕获活动代数,再据此等待 —— 否则会丢唤醒。
             let before = self.activity_gen();
-            if self.is_idle() {
+            if self.workers_idle() {
+                self.resume_blocked_flushes();
+                let blocked: Vec<&str> = self
+                    .blocked_flush_nodes
+                    .lock()
+                    .expect("blocked flush lock poisoned")
+                    .iter()
+                    .map(|&node| self.nodes[node].name.as_str())
+                    .collect();
+                if !blocked.is_empty() {
+                    return Err(Error::Kernel(format!(
+                        "wait_done: internal backpressure cannot make progress; blocked producers: [{}]. \
+                         increase input_queue_capacity or inspect downstream alignment",
+                        blocked.join(", ")
+                    )));
+                }
                 // 空闲且未全关:再推一轮关流
                 if self.try_advance_closing() {
                     continue;
@@ -2320,10 +2613,24 @@ impl GraphInner {
     fn wait_until_idle(&self, deadline: Option<std::time::Instant>) -> Result<()> {
         loop {
             while self.run_one_main_task() {}
+            self.resume_blocked_flushes();
             // 判断空闲**之前**捕获代数,防止丢唤醒(见 activity_gen)。
             let before = self.activity_gen();
             if self.is_idle() {
                 break;
+            }
+            if self.workers_idle() {
+                let blocked: Vec<&str> = self
+                    .blocked_flush_nodes
+                    .lock()
+                    .expect("blocked flush lock poisoned")
+                    .iter()
+                    .map(|&node| self.nodes[node].name.as_str())
+                    .collect();
+                return Err(Error::Kernel(format!(
+                    "wait_until_idle: internal backpressure cannot make progress; blocked producers: [{}]",
+                    blocked.join(", ")
+                )));
             }
             match self.remaining(deadline) {
                 Some(d) => {
