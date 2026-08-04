@@ -10,6 +10,8 @@ to each GitHub Release.
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-08-04
+
 ### Added
 
 - **Layered Graphviz views and live node states.** Rust, C, and Python hosts can select topology,
@@ -212,6 +214,7 @@ cross-compilation to Android / iOS / HarmonyOS.
 Note: the `v0.1.0` git tag and its GitHub Release were removed after publication; the
 crates.io and PyPI artifacts remain available.
 
+[0.3.0]: https://github.com/laomou/lm-flow/releases/tag/v0.3.0
 [0.2.0]: https://github.com/laomou/lm-flow/releases/tag/v0.2.0
 [0.1.1]: https://github.com/laomou/lm-flow/releases/tag/v0.1.1
 [0.1.0]: https://pypi.org/project/lm-lmflow/0.1.0/
