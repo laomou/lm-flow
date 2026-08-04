@@ -765,6 +765,13 @@ impl Graph {
                 "side packets must be injected before start".into(),
             ));
         }
+        if pkt.type_id() == crate::packet::type_id::HOST_OBJECT {
+            return Err(Error::InvalidArg(format!(
+                "side packet `{name}` carries LMFLOW_TYPE_HOST_OBJECT, which is reserved and \
+                 not enabled (see ADR #26); use LMFLOW_TYPE_BUFFER for numeric collections, \
+                 or LMFLOW_TYPE_STR carrying JSON for arbitrary metadata"
+            )));
+        }
         self.inner
             .side_packets
             .lock()
@@ -1618,6 +1625,8 @@ impl GraphInner {
                 if rc != 0 {
                     let e = unsafe { node.ctx_slot(slot) }.take_error(rc);
                     self.on_node_error(n, slot, e)
+                } else if let Err(e) = self.check_output_types(n, slot) {
+                    self.on_node_error(n, slot, e)
                 } else {
                     node.stats.processed.fetch_add(1, Ordering::Relaxed);
                     true
@@ -1792,6 +1801,29 @@ impl GraphInner {
         Ok(())
     }
 
+    /// 算子暂存输出的类型校验。必须在离开回调后、派发前统一做,因为 C/C++/Python 的
+    /// `emit` ABI 是 `void`:不能依赖算子检查返回值。放在这里也能覆盖源节点、图输出、
+    /// `close` 产出以及所有语言的算子。
+    fn check_output_types(&self, n: NodeId, slot: usize) -> Result<()> {
+        let node = &self.nodes[n];
+        let ctx = unsafe { node.ctx_slot(slot) };
+        for (port, packets) in ctx.staging.iter().enumerate() {
+            if packets
+                .iter()
+                .any(|pkt| pkt.type_id() == crate::packet::type_id::HOST_OBJECT)
+            {
+                return Err(Error::Kernel(format!(
+                    "[{}] output port `{}` carries LMFLOW_TYPE_HOST_OBJECT, which is reserved \
+                     and not enabled (see ADR #26); use LMFLOW_TYPE_BUFFER for numeric \
+                     collections, or LMFLOW_TYPE_STR carrying JSON for arbitrary metadata",
+                    node.name,
+                    node.out_ports.name(port).unwrap_or("?"),
+                )));
+            }
+        }
+        Ok(())
+    }
+
     /// 把某个槽暂存区的输出分发到下游(此时不持有任何算子回调栈)。
     fn flush_staging(&self, n: NodeId, slot: usize) {
         let node = &self.nodes[n];
@@ -1890,6 +1922,9 @@ impl GraphInner {
             let ctx = unsafe { node.ctx_slot(0) };
             let e = ctx.take_error(rc);
             ctx.discard_staging();
+            self.shared.record_error(e);
+        } else if let Err(e) = self.check_output_types(n, 0) {
+            unsafe { node.ctx_slot(0) }.discard_staging();
             self.shared.record_error(e);
         } else {
             self.flush_staging(n, 0);
