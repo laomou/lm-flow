@@ -37,6 +37,14 @@ jobs:
         run: |
           g++ -std=c++17 -Wall -Wextra -Werror -Iinclude cpp/tests/flow_hpp_test.cc -o /tmp/flow_hpp_test
           /tmp/flow_hpp_test
+      - name: buffer_util.hpp 的 F16 软件转换测试(自写实现,无编译器兜底)
+        # -O0 与 -O2 都跑:浮点位操作是优化敏感的,只测一档不够。
+        run: |
+          for opt in -O0 -O2; do
+            g++ -std=c++17 $opt -Wall -Wextra -Werror -Iinclude -Icpp/kernels \
+                cpp/tests/buffer_util_test.cc -o /tmp/buffer_util_test
+            /tmp/buffer_util_test
+          done
       - name: flow_platform_log.hpp 可编译(桌面 stderr 分支)
         run: |
           printf '#include "lmflow/flow_platform_log.hpp"\nint main(){ lmflow::InstallPlatformLogSink(); }\n' > /tmp/plog.cc

@@ -21,6 +21,22 @@ fn u8_buf(vals: &[u8]) -> Packet {
     Packet::from_builtin(Builtin::Buffer(bd)).at(Timestamp(0))
 }
 
+/// 造一个一维 F16 缓冲包。入参是**原始 binary16 位模式**(不是浮点值)——
+/// 这样测试不需要在 Rust 侧再实现一份 half 转换,期望值也就无从「两边一起错」。
+fn f16_buf(halves: &[u16]) -> Packet {
+    let mut bd = BufferData::new(&[halves.len() as i64], DT_F16).unwrap();
+    bd.bytes = halves.iter().flat_map(|h| h.to_ne_bytes()).collect();
+    Packet::from_builtin(Builtin::Buffer(bd)).at(Timestamp(0))
+}
+
+/// 读回 F16 缓冲的原始位模式。
+fn as_f16(bd: &BufferData) -> Vec<u16> {
+    bd.bytes
+        .chunks_exact(2)
+        .map(|c| u16::from_ne_bytes([c[0], c[1]]))
+        .collect()
+}
+
 /// 从收到的包里借出缓冲。
 fn as_buf(p: &Packet) -> &BufferData {
     match p.payload() {
@@ -124,9 +140,13 @@ output_ports: ["out"]
     }
 }
 
-/// F16 输入不被这些数值算子支持 → 清晰报错(不静默算错)。
+/// F16 输入被正确读取(binary16 → f32 精确加宽)。
+///
+/// 期望值是**硬编码的 IEEE 754 binary16 位模式**,C++ 侧的转换是自己实现的
+/// (不用 `_Float16`,它在 MSVC 上不可移植),转换本身的穷举验证在
+/// `cpp/tests/buffer_util_test.cc`;这里只验「端到端穿过真实图后值还对」。
 #[test]
-fn f16_input_is_rejected() {
+fn cast_f16_to_f32() {
     init();
     let cfg = r#"
 nodes:
@@ -134,8 +154,77 @@ nodes:
 input_ports: ["in"]
 output_ports: ["out"]
 "#;
-    let mut bd = BufferData::new(&[2], DT_F16).unwrap(); // 2 个 f16 零
-    bd.bytes = vec![0u8; 4];
+    // 0.0 · 0.5 · -1.5 · 2.0 —— 都在 half 里精确可表示,故可用等号断言
+    let out = run_one(cfg, f16_buf(&[0x0000, 0x3800, 0xBE00, 0x4000])).expect("output");
+    assert_eq!(as_f32(as_buf(&out)), vec![0.0, 0.5, -1.5, 2.0]);
+}
+
+/// F16 作为**输出** dtype:写出的位模式必须与 IEEE binary16 逐位一致。
+#[test]
+fn cast_f32_to_f16() {
+    init();
+    let cfg = r#"
+nodes:
+  - { name: c, kernel: CastKernel, input_ports: ["in"], output_ports: ["out"], options: { dtype: f16 } }
+input_ports: ["in"]
+output_ports: ["out"]
+"#;
+    // u8 0/64/128/255 原样转 half(整数,精确)
+    let out = run_one(cfg, u8_buf(&[0, 64, 128, 255])).expect("output");
+    assert_eq!(as_f16(as_buf(&out)), vec![0x0000, 0x5400, 0x5800, 0x5BF8]);
+}
+
+/// 真实的移动端推理前处理链:u8 图 → f32 → ×(1/255) → **f16 张量**。
+/// F16 之所以要支持,就是因为它是移动端推理的标准张量 dtype。
+#[test]
+fn preprocess_to_f16_tensor() {
+    init();
+    let cfg = r#"
+nodes:
+  - { name: cast, kernel: CastKernel,   input_ports: ["in"], output_ports: ["f"], options: { dtype: f32 } }
+  - { name: norm, kernel: AffineKernel, input_ports: ["f"],  output_ports: ["n"], options: { scale: 0.00392156862745098 } }
+  - { name: half, kernel: CastKernel,   input_ports: ["n"],  output_ports: ["out"], options: { dtype: f16 } }
+input_ports: ["in"]
+output_ports: ["out"]
+"#;
+    let out = run_one(cfg, u8_buf(&[0, 64, 128, 255])).expect("output");
+    // 0 → 0x0000;64/255 → 0x3404;128/255 → 0x3804;255/255 = 1.0 → 0x3C00
+    assert_eq!(as_f16(as_buf(&out)), vec![0x0000, 0x3404, 0x3804, 0x3C00]);
+    assert_eq!(
+        as_buf(&out).bytes.len(),
+        8,
+        "f16 每元素 2 字节 —— 相比 f32 省一半带宽,这正是用它的理由"
+    );
+}
+
+/// F16 也能参与归约(读侧转 double,输出仍是 F64 标量)。
+#[test]
+fn reduce_mean_on_f16() {
+    init();
+    let cfg = r#"
+nodes:
+  - { name: r, kernel: ReduceKernel, input_ports: ["in"], output_ports: ["out"], options: { op: mean } }
+input_ports: ["in"]
+output_ports: ["out"]
+"#;
+    // 1.0 · 2.0 · 3.0 → 均值 2.0
+    let out = run_one(cfg, f16_buf(&[0x3C00, 0x4000, 0x4200])).expect("output");
+    assert_eq!(out.as_f64(), Some(2.0));
+}
+
+/// 未知 dtype 仍被拒(F16 放开了,但闸门本身还在 —— 别把「支持 F16」做成「什么都放过」)。
+#[test]
+fn unknown_dtype_is_still_rejected() {
+    init();
+    let cfg = r#"
+nodes:
+  - { name: c, kernel: CastKernel, input_ports: ["in"], output_ports: ["out"], options: { dtype: f32 } }
+input_ports: ["in"]
+output_ports: ["out"]
+"#;
+    let mut bd = BufferData::new(&[2], DT_U8).unwrap();
+    bd.bytes = vec![0u8; 2];
+    bd.dtype = 99; // 不存在的 dtype
     let graph = Graph::from_yaml(cfg).unwrap();
     graph.add_poller("out").unwrap();
     graph.start().unwrap();
@@ -145,7 +234,10 @@ output_ports: ["out"]
         .send(Packet::from_builtin(Builtin::Buffer(bd)).at(Timestamp(0)))
         .unwrap();
     graph.close_all_inputs();
-    assert!(graph.wait_done().is_err(), "F16 应让算子失败、图报错");
+    assert!(
+        graph.wait_done().is_err(),
+        "未知 dtype 应让算子失败、图报错"
+    );
 }
 
 /// 非连续缓冲被拒(strides 不匹配 packed 行优先)。
