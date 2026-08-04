@@ -301,16 +301,10 @@ impl GraphConfig {
                     }
                 }
                 "batch" => {
-                    // batch:攒够 capacity 个包一次交给算子。v1 仅单输入口。
+                    // batch:攒够 capacity 个**对齐元组**一次交给算子。
                     if n.input_policy.capacity == 0 {
                         return Err(Error::InvalidArg(format!(
                             "node `{who}`: batch policy capacity (the batch size) must be >= 1"
-                        )));
-                    }
-                    if n.input_ports.len() != 1 {
-                        return Err(Error::InvalidArg(format!(
-                            "node `{who}`: batch policy requires exactly one input port (multi-input batching is not supported yet), got {}",
-                            n.input_ports.len()
                         )));
                     }
                 }
