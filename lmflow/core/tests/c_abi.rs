@@ -53,7 +53,7 @@ output_ports: ["out"]
 fn abi_version_and_handshake() {
     assert_eq!(
         lmflow_abi_version(),
-        1,
+        2,
         "matches LMFLOW_ABI_VERSION in include/flow.h"
     );
 }
@@ -498,7 +498,7 @@ fn to_dot_on_uninitialized_graph_is_valid_empty_digraph() {
     unsafe {
         let g = lmflow_graph_new();
         // 没 init 也不能崩:返回合法的空 digraph,可直接喂 graphviz
-        let dot = CStr::from_ptr(lmflow_graph_to_dot(g, false))
+        let dot = CStr::from_ptr(lmflow_graph_to_dot_view(g, LMFLOW_DOT_TOPOLOGY))
             .to_string_lossy()
             .into_owned();
         assert!(dot.contains("digraph"), "{dot}");
@@ -549,7 +549,7 @@ fn introspection_through_c_abi() {
             .into_owned();
         assert!(dump.contains("n1") && dump.contains("n2"), "{dump}");
 
-        let dot = CStr::from_ptr(lmflow_graph_to_dot(g, false))
+        let dot = CStr::from_ptr(lmflow_graph_to_dot_view(g, LMFLOW_DOT_TOPOLOGY))
             .to_string_lossy()
             .into_owned();
         assert!(
@@ -581,14 +581,24 @@ fn introspection_through_c_abi() {
         st.struct_size = std::mem::size_of::<LMFlowNodeStats>() as u32;
         assert!(lmflow_graph_node_stats(g, 0, &mut st));
         // 统计模式的 DOT:标注 + 热力图,经 C ABI 也要能出
-        let dot_stats = CStr::from_ptr(lmflow_graph_to_dot(g, true))
+        let dot_stats = CStr::from_ptr(lmflow_graph_to_dot_view(g, LMFLOW_DOT_DIAGNOSTICS))
             .to_str()
             .unwrap()
             .to_string();
         assert!(
             dot_stats.contains("digraph lmflow") && dot_stats.contains("pkts"),
-            "with_stats 应标出统计:{dot_stats}"
+            "diagnostics 应标出统计:{dot_stats}"
         );
+        let dot_compact = CStr::from_ptr(lmflow_graph_to_dot_view(g, LMFLOW_DOT_COMPACT))
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert!(dot_compact.contains("CREATED · 0 pkts"));
+        assert!(!dot_compact.contains("ports:"));
+        assert!(CStr::from_ptr(lmflow_graph_to_dot_view(g, 99))
+            .to_bytes()
+            .is_empty());
+        assert!(last_error().contains("invalid DOT view"));
         assert_eq!(
             CStr::from_ptr(st.kernel_name).to_str().unwrap(),
             "PassThroughKernel"

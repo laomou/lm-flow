@@ -6,9 +6,36 @@
 //!   * `running` 靠 `in_flight > 0` 判断 —— `started_us` 归零时不清,故不能直接看它;
 //!   * `to_dot_with_stats` 在标注统计的同时,**不破坏** subgraph cluster 与执行器图例。
 
+use std::sync::{Condvar, Mutex};
 use std::time::Duration;
 
-use lmflow::{Graph, Packet, Timestamp};
+use lmflow::{DotView, Graph, Kernel, KernelCtx, Packet, Timestamp};
+
+static RUNNING_GATE: (Mutex<bool>, Condvar) = (Mutex::new(false), Condvar::new());
+
+#[derive(Default)]
+struct DotRunning;
+
+impl Kernel for DotRunning {
+    fn process(&mut self, context: &mut KernelCtx) -> lmflow::Result<()> {
+        let (lock, wake) = &RUNNING_GATE;
+        let mut released = lock.lock().unwrap();
+        while !*released {
+            released = wake.wait(released).unwrap();
+        }
+        let _ = context;
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+struct DotError;
+
+impl Kernel for DotError {
+    fn process(&mut self, _context: &mut KernelCtx) -> lmflow::Result<()> {
+        Err(lmflow::Error::Kernel("intentional DOT state error".into()))
+    }
+}
 
 const CHAIN: &str = r#"
 nodes:
@@ -129,6 +156,103 @@ fn dot_with_stats_annotates_and_keeps_structure() {
         count(&stats, "[label="),
         "节点数不应因统计模式改变"
     );
+}
+
+#[test]
+fn dot_view_modes_separate_compact_and_diagnostics() {
+    let graph = Graph::from_yaml(CHAIN).unwrap();
+    let compact = graph.to_dot_compact();
+    let explicit = graph.to_dot_with_view(DotView::Compact);
+    let diagnostics = graph.to_dot_with_stats();
+
+    assert_eq!(compact, explicit);
+    assert!(compact.contains("CREATED · 0 pkts"));
+    assert!(compact.contains("cluster_node_state_legend"));
+    assert!(!compact.contains("ports:"));
+    assert!(!compact.contains("cluster_diagnostics_legend"));
+    assert!(diagnostics.contains("ports:"));
+    assert!(diagnostics.contains("cluster_diagnostics_legend"));
+}
+
+#[test]
+fn dot_node_state_tracks_idle_running_closed_and_error() {
+    let _ = lmflow::register_kernel::<DotRunning>("DotRunning");
+    let _ = lmflow::register_kernel::<DotError>("DotError");
+
+    let idle = Graph::from_yaml(
+        r#"
+nodes:
+  - { name: idle, kernel: PassThrough, input_ports: [in], output_ports: [] }
+input_ports: [in]
+"#,
+    )
+    .unwrap();
+    idle.start().unwrap();
+    let idle_dot = idle.to_dot_compact();
+    assert!(idle_dot.contains("IDLE · 0 pkts"));
+    assert!(idle_dot.contains("color=\"#4c78a8\""));
+    idle.close_all_inputs();
+    idle.wait_done_timeout(Duration::from_secs(2)).unwrap();
+    let closed_dot = idle.to_dot_compact();
+    assert!(closed_dot.contains("CLOSED · 0 pkts"));
+
+    *RUNNING_GATE.0.lock().unwrap() = false;
+    let running = Graph::from_yaml(
+        r#"
+executors:
+  - { name: pool, num_threads: 1 }
+nodes:
+  - { name: running, kernel: DotRunning, input_ports: [in], output_ports: [], executor: pool }
+input_ports: [in]
+"#,
+    )
+    .unwrap();
+    running.start().unwrap();
+    running
+        .input("in")
+        .unwrap()
+        .send(Packet::from_i64(1).at(Timestamp(0)))
+        .unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        let dot = running.to_dot_compact();
+        if dot.contains("RUNNING · 0 pkts") {
+            assert!(dot.contains("color=\"#2ca02c\", penwidth=3"));
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "node never entered RUNNING state"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    *RUNNING_GATE.0.lock().unwrap() = true;
+    RUNNING_GATE.1.notify_all();
+    running.close_all_inputs();
+    running.wait_done_timeout(Duration::from_secs(2)).unwrap();
+
+    let failed = Graph::from_yaml(
+        r#"
+nodes:
+  - { name: failed, kernel: DotError, input_ports: [in], output_ports: [] }
+input_ports: [in]
+"#,
+    )
+    .unwrap();
+    failed.start().unwrap();
+    failed
+        .input("in")
+        .unwrap()
+        .send(Packet::from_i64(1).at(Timestamp(0)))
+        .unwrap();
+    failed.close_all_inputs();
+    let error = failed
+        .wait_done_timeout(Duration::from_secs(2))
+        .unwrap_err();
+    assert!(error.to_string().contains("intentional DOT state error"));
+    let error_dot = failed.to_dot_compact();
+    assert!(error_dot.contains("ERROR · 0 pkts"));
+    assert!(error_dot.contains("color=\"#d62728\", penwidth=3"));
 }
 
 /// 子图 cluster 与统计模式共存(热力图不该吃掉 cluster)。

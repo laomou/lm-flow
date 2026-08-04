@@ -69,7 +69,7 @@ built with it enabled.
 
 ```c
 #if 0 /* illustrative */
-#define LMFLOW_ABI_VERSION 1u
+#define LMFLOW_ABI_VERSION 2u
 #endif
 uint32_t lmflow_abi_version(void);
 ```
@@ -813,8 +813,10 @@ waiters, block events, current/cumulative blocked time, and the relevant capacit
 `graph.dump()` includes matching `watermark` and `poller` diagnostic lines. The same information is
 reported through exponentially rate-limited WARN messages and matching recovery INFO messages.
 
-No additional host-side query API is required for visualization:
-`lmflow_graph_to_dot(g, true)` includes the global watermark once in the graph title. Graph input
+No additional host-side query API is required for visualization. Use
+`lmflow_graph_to_dot_view(g, LMFLOW_DOT_COMPACT)` for a lower-noise live view, or
+`LMFLOW_DOT_DIAGNOSTICS` for full queue and backpressure detail. Diagnostics includes the global
+watermark once in the graph title. Graph input
 ports show only their own wait count/duration, avoiding the impression that the graph-wide limit is
 per-port. Consumer edges show queue capacity/occupancy/reservations and block history; each Poller
 is a cylinder with its policy, capacity, occupancy, drops, and block history. Active stalls are red
@@ -827,12 +829,17 @@ A diagnostics legend explains red/yellow/amber states and dashed Poller subscrip
 also carries hover tooltips with the full node, input-edge, and Poller snapshot. Every duration in
 one statistics-enabled export is calculated from the same snapshot timestamp.
 
+Both compact and diagnostics views label each node as `CREATED`, `IDLE`, `RUNNING`, `CLOSED`, or
+`ERROR`. The border carries that state (green and thick for running, red and thick for error), while
+the fill remains the latency heat map. Compact mode omits the per-port table, detailed edge
+backpressure labels, Poller cylinders, and diagnostics legend.
+
 ```c
 int64_t      lmflow_graph_counter_value(LMFlowGraph*, const char* name);
 size_t       lmflow_graph_counter_count(LMFlowGraph*);
 const char*  lmflow_graph_counter_name(LMFlowGraph*, size_t idx);
 const char*  lmflow_graph_dump(LMFlowGraph*);
-const char*  lmflow_graph_to_dot(LMFlowGraph*, bool with_stats);
+const char*  lmflow_graph_to_dot_view(LMFlowGraph*, LMFlowDotView view);
 size_t       lmflow_graph_queue_depth(LMFlowGraph*, const char* port);
 uint64_t     lmflow_graph_dropped_count(LMFlowGraph*, const char* port);
 size_t       lmflow_graph_total_queued(LMFlowGraph*);
@@ -840,9 +847,10 @@ uint64_t     lmflow_graph_total_queued_bytes(LMFlowGraph*);
 LMFlowGraphState lmflow_graph_state(LMFlowGraph*);
 ```
 
-`lmflow_graph_to_dot(g, true)` emits Graphviz DOT with a per-node latency heat map — pipe it through
-`dot -Tsvg` to see where time goes. Nodes also show aggregate queued/peak bytes, block event count,
-total blocked time, and the number of currently blocked input ports. Counters set with
+`lmflow_graph_to_dot_view(g, LMFLOW_DOT_DIAGNOSTICS)` emits Graphviz DOT with a per-node latency
+heat map — pipe it through `dot -Tsvg` to see where time goes. Nodes also show aggregate
+queued/peak bytes, block event count, total blocked time, and the number of currently blocked input
+ports. Counters set with
 `Context::CounterAdd` are aggregated per graph and are far easier to assert on in a test than log
 output.
 

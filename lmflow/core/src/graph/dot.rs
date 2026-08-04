@@ -5,8 +5,38 @@
 //! 与 `mod.rs` 里的并发核心放在一起只会让后者更难审。本模块是 `graph` 的子模块,
 //! 故仍可访问 `Node` / `GraphInner` 的私有字段。
 
-use super::{GraphInner, InputPolicy, NodeStats};
+use super::{DotView, GraphInner, InputPolicy, NodeStats};
 use std::sync::atomic::Ordering;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NodeRunState {
+    Created,
+    Idle,
+    Running,
+    Closed,
+    Error,
+}
+
+impl NodeRunState {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Created => "CREATED",
+            Self::Idle => "IDLE",
+            Self::Running => "RUNNING",
+            Self::Closed => "CLOSED",
+            Self::Error => "ERROR",
+        }
+    }
+
+    fn color(self) -> &'static str {
+        match self {
+            Self::Created | Self::Closed => "#777777",
+            Self::Idle => "#4c78a8",
+            Self::Running => "#2ca02c",
+            Self::Error => "#d62728",
+        }
+    }
+}
 
 /// 平均每次 process 耗时(µs);未跑过则 0。
 fn avg_process_us(st: &NodeStats) -> f64 {
@@ -57,7 +87,9 @@ impl GraphInner {
     /// - 边标注端口名;图输入/输出口画成独立形状。
     ///
     /// DOT id 用 `n{下标}` / `pin{边}` / `pout{边}`(纯下标,绝不撞名;人名一律进 label)。
-    pub(super) fn to_dot(&self, with_stats: bool) -> String {
+    pub(super) fn to_dot(&self, view: DotView) -> String {
+        let with_stats = view != DotView::Topology;
+        let diagnostics = view == DotView::Diagnostics;
         let snapshot_us = with_stats.then(|| self.epoch_us());
         // 执行器配色板(浅色填充);按执行器序号取模。
         const COLORS: &[&str] = &[
@@ -147,6 +179,21 @@ impl GraphInner {
         };
         for (i, n) in self.nodes.iter().enumerate() {
             let short = n.name.rsplit('/').next().unwrap_or(n.name.as_str());
+            let (opened, closed) = {
+                let sched = n.sched.lock().expect("scheduler lock poisoned");
+                (sched.opened, sched.closed)
+            };
+            let node_state = if n.stats.errors.load(Ordering::Relaxed) > 0 {
+                NodeRunState::Error
+            } else if n.stats.in_flight.load(Ordering::Relaxed) > 0 {
+                NodeRunState::Running
+            } else if closed {
+                NodeRunState::Closed
+            } else if opened {
+                NodeRunState::Idle
+            } else {
+                NodeRunState::Created
+            };
             let (exec, mut fill) = match n.executor {
                 None => ("@main".to_string(), "white".to_string()),
                 Some(ei) => (
@@ -198,7 +245,8 @@ impl GraphInner {
                     }
                 }
                 extra.push_str(&format!(
-                    "\\n{} pkts · {} avg\\nin {} / out {} · peakQ {} / {}B",
+                    "\\n{} · {} pkts · {} avg\\nin {} / out {} · peakQ {} / {}B",
+                    node_state.label(),
                     processed,
                     duration_us_f64(avg),
                     st.packets_in.load(Ordering::Relaxed),
@@ -221,7 +269,7 @@ impl GraphInner {
                 if errs > 0 {
                     extra.push_str(&format!(" · {errs} err"));
                 }
-                if !n.input_queues.is_empty() {
+                if diagnostics && !n.input_queues.is_empty() {
                     let waiting_ports = self.dot_waiting_ports(i);
                     extra.push_str("\\nports:");
                     for port in 0..n.input_queues.len() {
@@ -257,18 +305,33 @@ impl GraphInner {
                 // 按平均延迟上色:绿(快)→ 红(慢)。执行器配色让位给热力图。
                 fill = heat_color(avg, max_avg_us);
             }
+            let state_color = if with_stats {
+                node_state.color()
+            } else {
+                "#333333"
+            };
+            let state_penwidth = if with_stats
+                && matches!(node_state, NodeRunState::Running | NodeRunState::Error)
+            {
+                3
+            } else {
+                1
+            };
             lines[i] = format!(
-                "  n{i} [label=\"{}\\n({})\\n{}{}\", fillcolor=\"{}\", tooltip=\"{}\"];\n",
+                "  n{i} [label=\"{}\\n({})\\n{}{}\", fillcolor=\"{}\", color=\"{}\", penwidth={}, tooltip=\"{}\"];\n",
                 esc(short),
                 esc(&n.kernel_name),
                 esc(&exec),
                 extra,
                 fill,
+                state_color,
+                state_penwidth,
                 esc(&format!(
-                    "{} ({}) on {}: processed {}, avg {}, in {}, out {}, errors {}",
+                    "{} ({}) on {}: state {}, processed {}, avg {}, in {}, out {}, errors {}",
                     n.name,
                     n.kernel_name,
                     exec,
+                    node_state.label(),
                     n.stats.processed.load(Ordering::Relaxed),
                     duration_us_f64(avg_process_us(&n.stats)),
                     n.stats.packets_in.load(Ordering::Relaxed),
@@ -288,7 +351,7 @@ impl GraphInner {
             let mut fill = "#e8e8e8";
             let mut color = "#777777";
             let mut penwidth = 1;
-            let stats = with_stats.then(|| {
+            let stats = diagnostics.then(|| {
                 self.edges[e]
                     .watermark_backpressure
                     .snapshot(snapshot_us.expect("statistics snapshot timestamp exists"))
@@ -344,12 +407,24 @@ impl GraphInner {
             let label = esc(&e.name);
             if e.is_graph_input {
                 for &(c, port) in &e.consumers {
-                    let attrs = self.dot_edge_stats_attrs(c, port, &label, snapshot_us);
+                    let attrs = self.dot_edge_stats_attrs(
+                        c,
+                        port,
+                        &label,
+                        diagnostics
+                            .then(|| snapshot_us.expect("statistics snapshot timestamp exists")),
+                    );
                     out.push_str(&format!("  pin{ei} -> n{c} [{attrs}];\n"));
                 }
             } else if let Some(p) = e.producer {
                 for &(c, port) in &e.consumers {
-                    let attrs = self.dot_edge_stats_attrs(c, port, &label, snapshot_us);
+                    let attrs = self.dot_edge_stats_attrs(
+                        c,
+                        port,
+                        &label,
+                        diagnostics
+                            .then(|| snapshot_us.expect("statistics snapshot timestamp exists")),
+                    );
                     out.push_str(&format!("  n{p} -> n{c} [{attrs}];\n"));
                 }
             }
@@ -358,7 +433,7 @@ impl GraphInner {
                     out.push_str(&format!("  n{p} -> pout{ei} [label=\"{label}\"];\n"));
                 }
             }
-            if with_stats {
+            if diagnostics {
                 for (poller_index, poller) in e
                     .pollers
                     .lock()
@@ -421,11 +496,16 @@ impl GraphInner {
             }
         }
 
-        // 执行器图例:填色 → 线程池,列线程数 / 绑核 / 优先级。
+        // 执行器图例:拓扑模式填色 → 线程池;统计模式仍用标签标出 placement。
         if !self.executors.is_empty() {
-            out.push_str(
-                "  subgraph cluster_legend {\n    label=\"executors (node fill = placement)\"; style=dashed; color=\"#888888\";\n",
-            );
+            let legend_label = if with_stats {
+                "executors (node label = placement)"
+            } else {
+                "executors (node fill = placement)"
+            };
+            out.push_str(&format!(
+                "  subgraph cluster_legend {{\n    label=\"{legend_label}\"; style=dashed; color=\"#888888\";\n",
+            ));
             for (i, ex) in self.executors.iter().enumerate() {
                 let cores = if ex.affinity().is_empty() {
                     "cores: any".to_string()
@@ -459,6 +539,27 @@ impl GraphInner {
             out.push_str("  }\n");
         }
         if with_stats {
+            out.push_str(
+                "  subgraph cluster_node_state_legend {\n    label=\"node state (border)\"; style=dashed; color=\"#888888\";\n",
+            );
+            out.push_str(
+                "    legend_state_created [shape=box, style=filled, fillcolor=white, color=\"#777777\", label=\"CREATED\"];\n",
+            );
+            out.push_str(
+                "    legend_state_idle [shape=box, style=filled, fillcolor=white, color=\"#4c78a8\", label=\"IDLE\"];\n",
+            );
+            out.push_str(
+                "    legend_state_running [shape=box, style=filled, fillcolor=white, color=\"#2ca02c\", penwidth=3, label=\"RUNNING\"];\n",
+            );
+            out.push_str(
+                "    legend_state_closed [shape=box, style=filled, fillcolor=white, color=\"#777777\", label=\"CLOSED\"];\n",
+            );
+            out.push_str(
+                "    legend_state_error [shape=box, style=filled, fillcolor=white, color=\"#d62728\", penwidth=3, label=\"ERROR\"];\n",
+            );
+            out.push_str("  }\n");
+        }
+        if diagnostics {
             out.push_str(
                 "  subgraph cluster_diagnostics_legend {\n    label=\"diagnostics\"; style=dashed; color=\"#888888\";\n",
             );

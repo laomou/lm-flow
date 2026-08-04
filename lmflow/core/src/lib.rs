@@ -100,8 +100,8 @@ pub mod status;
 pub mod timestamp;
 
 pub use graph::{
-    Graph, Input, Poller, PollerBackpressureStatsSnapshot, PollerOptions, PollerOverflow, State,
-    WatermarkBackpressureStatsSnapshot,
+    DotView, Graph, Input, Poller, PollerBackpressureStatsSnapshot, PollerOptions, PollerOverflow,
+    State, WatermarkBackpressureStatsSnapshot,
 };
 pub use kernel_api::{register_kernel, Kernel, KernelContract, KernelCtx};
 pub use packet::{BufferData, Builtin, InteropType, Packet};

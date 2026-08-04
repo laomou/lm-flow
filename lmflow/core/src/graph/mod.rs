@@ -145,6 +145,17 @@ pub enum State {
     Terminated = 4,
 }
 
+/// Graphviz DOT 输出的详细程度。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DotView {
+    /// 仅拓扑、执行器与静态容量。
+    Topology,
+    /// 节点状态与核心吞吐/延迟统计,隐藏逐端口诊断和 Poller 细节。
+    Compact,
+    /// 完整运行诊断,包括端口队列、背压、Poller 与诊断图例。
+    Diagnostics,
+}
+
 // ---------------------------------------------------------------- 边
 
 pub struct Edge {
@@ -1370,7 +1381,17 @@ impl Graph {
 
     /// 导出 Graphviz DOT(拓扑 + 子图命名空间 cluster + 执行器/绑核图例)。见 `GraphInner::to_dot`。
     pub fn to_dot(&self) -> String {
-        self.inner.to_dot(false)
+        self.to_dot_with_view(DotView::Topology)
+    }
+
+    /// 导出指定详细程度的 Graphviz DOT。
+    pub fn to_dot_with_view(&self, view: DotView) -> String {
+        self.inner.to_dot(view)
+    }
+
+    /// 带节点状态与核心统计的紧凑视图,适合大型图持续刷新。
+    pub fn to_dot_compact(&self) -> String {
+        self.to_dot_with_view(DotView::Compact)
     }
 
     /// 同 [`to_dot`](Self::to_dot),但在每个节点标签上标出运行统计
@@ -1380,7 +1401,7 @@ impl Graph {
     /// 可在图运行期间随时调用(统计是原子读的快照),不必等跑完。
     /// 注意:热力图占用了「按执行器上色」那一维,执行器仍以标签里的 `@name` 标出。
     pub fn to_dot_with_stats(&self) -> String {
-        self.inner.to_dot(true)
+        self.to_dot_with_view(DotView::Diagnostics)
     }
 
     pub fn node_stats(&self, i: usize) -> Option<NodeStatsSnapshot> {

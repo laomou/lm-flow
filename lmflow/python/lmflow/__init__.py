@@ -71,6 +71,7 @@ __all__ = [
     "LogLevel",
     "CloseReason",
     "GraphState",
+    "DotView",
     "Timeout",
     "registered_kernels",
     "register_builtin_kernels",
@@ -128,6 +129,14 @@ class GraphState:
     RUNNING = 2
     DRAINING = 3
     TERMINATED = 4
+
+
+class DotView:
+    """Graphviz detail levels accepted by :meth:`Graph.to_dot`."""
+
+    TOPOLOGY = "topology"
+    COMPACT = "compact"
+    DIAGNOSTICS = "diagnostics"
 
 
 # ---------------------------------------------------------------- 算子
@@ -362,7 +371,7 @@ class Graph:
         """Human-readable snapshot of topology and state (node table shows running/elapsed — handy for locating a stall)."""
         return self._g.dump()
 
-    def to_dot(self, with_stats: bool = False) -> str:
+    def to_dot(self, view: str = DotView.TOPOLOGY) -> str:
         """Graphviz DOT of the topology (pipe to ``dot -Tsvg``).
 
         Subgraph namespaces are restored as nested clusters; each node is
@@ -370,14 +379,23 @@ class Graph:
         executor's thread count, pinned CPU cores (affinity), and realtime
         priority.
 
-        With ``with_stats=True`` each node label also carries its runtime
-        counters (packets processed, average latency, packets in/out, peak
-        queue depth, errors) and the fill colour becomes a **latency heat map**
-        (green = fast, red = slow), making the bottleneck node obvious. Safe to
-        call while the graph is running — the stats are read as an atomic
-        snapshot. Executors are then shown only as ``@name`` in the label.
+        ``view="compact"`` adds node state plus core throughput/latency counters
+        without per-port and Poller diagnostics. ``view="diagnostics"`` adds the
+        full queue/backpressure detail. Node state uses the border colour while
+        the fill remains the latency heat map.
         """
-        return self._g.to_dot(with_stats)
+        views = {
+            DotView.TOPOLOGY: 0,
+            DotView.COMPACT: 1,
+            DotView.DIAGNOSTICS: 2,
+        }
+        try:
+            native_view = views[view]
+        except KeyError:
+            raise ValueError(
+                "view must be 'topology', 'compact', or 'diagnostics'"
+            ) from None
+        return self._g.to_dot_view(native_view)
 
     def last_error(self) -> str:
         """Graph-level error text — the only place to get a worker-thread kernel's failure reason."""

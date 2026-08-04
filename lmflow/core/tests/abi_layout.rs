@@ -55,8 +55,8 @@ fn input_queue_stats_uses_struct_size_for_forward_compat() {
 
 #[test]
 fn abi_version_matches_header() {
-    // include/flow.h: #define LMFLOW_ABI_VERSION 1u
-    assert_eq!(lmflow::ffi::lmflow_abi_version(), 1);
+    // include/flow.h: #define LMFLOW_ABI_VERSION 2u
+    assert_eq!(lmflow::ffi::lmflow_abi_version(), 2);
 }
 
 #[test]
@@ -92,6 +92,14 @@ fn poller_overflow_policy_ids_match_header() {
     assert_eq!(LMFLOW_POLLER_DROP_OLDEST, 1);
     assert_eq!(LMFLOW_POLLER_DROP_NEWEST, 2);
     assert_eq!(LMFLOW_POLLER_LATEST, 3);
+}
+
+#[test]
+fn dot_view_ids_match_header() {
+    use lmflow::ffi::{LMFLOW_DOT_COMPACT, LMFLOW_DOT_DIAGNOSTICS, LMFLOW_DOT_TOPOLOGY};
+    assert_eq!(LMFLOW_DOT_TOPOLOGY, 0);
+    assert_eq!(LMFLOW_DOT_COMPACT, 1);
+    assert_eq!(LMFLOW_DOT_DIAGNOSTICS, 2);
 }
 
 #[test]
