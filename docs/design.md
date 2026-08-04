@@ -768,6 +768,10 @@ DOT 视图分三档:`Topology` 只画静态拓扑,`Compact` 加节点状态和�
 `Diagnostics` 再加逐端口队列、背压、Poller 和诊断图例。旧的 `to_dot()` 与
 `to_dot_with_stats()` 分别映射到 `Topology` / `Diagnostics`。统计视图中节点边框表示
 `CREATED` / `IDLE` / `RUNNING` / `CLOSED` / `ERROR`,填充色继续专用于延迟热力图。
+标题汇总 running/error/blocked/waiting/dropped 热点;Compact 对未运行且无异常的节点
+省略零值吞吐与队列字段。节点、算子、命名空间、执行器和端口的可见标签按固定字符数
+截断,完整名称放进 SVG tooltip。节点按 executor 分组并以状态优先级稳定排序,同时调小
+nodesep/ranksep;不启用 `concentrate`,避免 Graphviz 把语义不同的多端口边合并。
 
 线程池任务的全局在飞计数必须在**认领仍持节点调度锁时**递增,不能等到提交执行器时才加。
 否则两步之间存在「节点已有 ready 调用、全局计数仍为 0」的假空闲窗口,并发关流时

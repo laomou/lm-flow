@@ -369,6 +369,7 @@ input_ports: [in, gate]
     assert!(blocked_dot.contains("BLOCKED"));
     assert!(blocked_dot.contains("WAITING for aligned input"));
     assert!(blocked_dot.contains("color=\"#d6a700\""));
+    assert!(blocked_dot.contains("blocked 1 · waiting 1"));
     let blocked_durations = blocked_dot
         .match_indices("bp 1× / ")
         .map(|(index, marker)| {

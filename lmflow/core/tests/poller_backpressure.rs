@@ -492,6 +492,7 @@ output_ports: [drop_diagnostic_out]
     let dot = graph.to_dot_with_stats();
     assert!(dot.contains("DropNewest · queue 1/1"));
     assert!(dot.contains("dropped 1"));
+    assert!(dot.contains("hotspots running 0 · error 0 · blocked 0 · waiting 0 · dropped 1"));
     assert!(dot.contains("color=\"#d98c00\""));
     let logs = DIAGNOSTIC_LOGS
         .lock()

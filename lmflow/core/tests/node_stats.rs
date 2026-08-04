@@ -166,7 +166,8 @@ fn dot_view_modes_separate_compact_and_diagnostics() {
     let diagnostics = graph.to_dot_with_stats();
 
     assert_eq!(compact, explicit);
-    assert!(compact.contains("CREATED · 0 pkts"));
+    assert!(compact.contains("@main\\nCREATED"));
+    assert!(!compact.contains("CREATED · 0 pkts"));
     assert!(compact.contains("cluster_node_state_legend"));
     assert!(!compact.contains("ports:"));
     assert!(!compact.contains("cluster_diagnostics_legend"));
@@ -189,12 +190,13 @@ input_ports: [in]
     .unwrap();
     idle.start().unwrap();
     let idle_dot = idle.to_dot_compact();
-    assert!(idle_dot.contains("IDLE · 0 pkts"));
+    assert!(idle_dot.contains("@main\\nIDLE"));
+    assert!(idle_dot.contains("hotspots running 0 · error 0"));
     assert!(idle_dot.contains("color=\"#4c78a8\""));
     idle.close_all_inputs();
     idle.wait_done_timeout(Duration::from_secs(2)).unwrap();
     let closed_dot = idle.to_dot_compact();
-    assert!(closed_dot.contains("CLOSED · 0 pkts"));
+    assert!(closed_dot.contains("@main\\nCLOSED"));
 
     *RUNNING_GATE.0.lock().unwrap() = false;
     let running = Graph::from_yaml(
@@ -216,8 +218,9 @@ input_ports: [in]
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
     loop {
         let dot = running.to_dot_compact();
-        if dot.contains("RUNNING · 0 pkts") {
+        if dot.contains("@pool\\nRUNNING") {
             assert!(dot.contains("color=\"#2ca02c\", penwidth=3"));
+            assert!(dot.contains("hotspots running 1 · error 0"));
             break;
         }
         assert!(
@@ -251,8 +254,45 @@ input_ports: [in]
         .unwrap_err();
     assert!(error.to_string().contains("intentional DOT state error"));
     let error_dot = failed.to_dot_compact();
-    assert!(error_dot.contains("ERROR · 0 pkts"));
+    assert!(error_dot.contains("@main\\nERROR"));
+    assert!(error_dot.contains("hotspots running 0 · error 1"));
     assert!(error_dot.contains("color=\"#d62728\", penwidth=3"));
+}
+
+#[test]
+fn dot_truncates_long_labels_but_keeps_full_tooltips_and_layout_hints() {
+    let graph = Graph::from_yaml(
+        r#"
+executors:
+  - { name: extremely_long_executor_name_for_layout_grouping, num_threads: 1 }
+nodes:
+  - name: extremely_long_namespace_name_for_visualization/extremely_long_node_name_for_visualization
+    kernel: PassThrough
+    input_ports: [extremely_long_input_port_name_for_visualization]
+    output_ports: [extremely_long_output_port_name_for_visualization]
+    executor: extremely_long_executor_name_for_layout_grouping
+input_ports: [extremely_long_input_port_name_for_visualization]
+output_ports: [extremely_long_output_port_name_for_visualization]
+"#,
+    )
+    .unwrap();
+
+    let dot = graph.to_dot_with_stats();
+    assert!(dot.contains("extremely_long_node_"));
+    assert!(dot.contains('…'));
+    assert!(!dot.contains("label=\"extremely_long_node_name_for_visualization"));
+    assert!(dot.contains(
+        "tooltip=\"extremely_long_namespace_name_for_visualization/extremely_long_node_name_for_visualization"
+    ));
+    assert!(dot.contains("extremely_long_input_port_na…"));
+    assert!(dot.contains("graph input extremely_long_input_port_name_for_visualization"));
+    assert!(
+        dot.contains("tooltip=\"graph output extremely_long_output_port_name_for_visualization\"")
+    );
+    assert!(dot.contains("group=\"exec1\""));
+    assert!(dot.contains("newrank=true"));
+    assert!(dot.contains("nodesep=0.35, ranksep=0.65"));
+    assert!(dot.contains("ordering=out"));
 }
 
 /// 子图 cluster 与统计模式共存(热力图不该吃掉 cluster)。

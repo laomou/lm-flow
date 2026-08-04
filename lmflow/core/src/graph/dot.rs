@@ -8,6 +8,11 @@
 use super::{DotView, GraphInner, InputPolicy, NodeStats};
 use std::sync::atomic::Ordering;
 
+const NODE_LABEL_CHARS: usize = 24;
+const KERNEL_LABEL_CHARS: usize = 28;
+const PORT_LABEL_CHARS: usize = 28;
+const CLUSTER_LABEL_CHARS: usize = 24;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum NodeRunState {
     Created,
@@ -35,6 +40,48 @@ impl NodeRunState {
             Self::Running => "#2ca02c",
             Self::Error => "#d62728",
         }
+    }
+
+    fn sort_order(self) -> usize {
+        match self {
+            Self::Error => 0,
+            Self::Running => 1,
+            Self::Idle => 2,
+            Self::Created => 3,
+            Self::Closed => 4,
+        }
+    }
+}
+
+#[derive(Default)]
+struct DotHotspots {
+    running: usize,
+    errors: usize,
+    blocked: usize,
+    waiting: usize,
+    dropped: u64,
+}
+
+impl DotHotspots {
+    fn label(&self) -> String {
+        format!(
+            "hotspots running {} · error {} · blocked {} · waiting {} · dropped {}",
+            self.running, self.errors, self.blocked, self.waiting, self.dropped
+        )
+    }
+}
+
+fn escape_dot(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+fn truncate_label(value: &str, max_chars: usize) -> String {
+    let mut chars = value.chars();
+    let prefix = chars.by_ref().take(max_chars).collect::<String>();
+    if chars.next().is_some() {
+        format!("{prefix}…")
+    } else {
+        prefix
     }
 }
 
@@ -79,6 +126,64 @@ fn heat_color(v: f64, max: f64) -> String {
 }
 
 impl GraphInner {
+    fn dot_node_state(&self, node_id: usize) -> NodeRunState {
+        let node = &self.nodes[node_id];
+        let (opened, closed) = {
+            let sched = node.sched.lock().expect("scheduler lock poisoned");
+            (sched.opened, sched.closed)
+        };
+        if node.stats.errors.load(Ordering::Relaxed) > 0 {
+            NodeRunState::Error
+        } else if node.stats.in_flight.load(Ordering::Relaxed) > 0 {
+            NodeRunState::Running
+        } else if closed {
+            NodeRunState::Closed
+        } else if opened {
+            NodeRunState::Idle
+        } else {
+            NodeRunState::Created
+        }
+    }
+
+    fn dot_hotspots(&self, now_us: i64) -> DotHotspots {
+        let mut hotspots = DotHotspots::default();
+        for (node_id, node) in self.nodes.iter().enumerate() {
+            match self.dot_node_state(node_id) {
+                NodeRunState::Running => hotspots.running += 1,
+                NodeRunState::Error => hotspots.errors += 1,
+                _ => {}
+            }
+            hotspots.blocked += node
+                .input_queue_stats
+                .iter()
+                .filter(|stats| stats.blocked_since_us.load(Ordering::Relaxed) != 0)
+                .count();
+            hotspots.waiting += self.dot_waiting_ports(node_id).len();
+        }
+        for edge in &self.edges {
+            if edge.is_graph_input && edge.watermark_backpressure.snapshot(now_us).blocked {
+                hotspots.blocked += 1;
+            }
+            hotspots.dropped = hotspots
+                .dropped
+                .saturating_add(edge.dropped.load(Ordering::Relaxed));
+            for poller in edge
+                .pollers
+                .lock()
+                .expect("poller list lock poisoned")
+                .iter()
+            {
+                if poller.block_backpressure.snapshot(now_us).blocked {
+                    hotspots.blocked += 1;
+                }
+                hotspots.dropped = hotspots
+                    .dropped
+                    .saturating_add(poller.dropped.load(Ordering::Relaxed));
+            }
+        }
+        hotspots
+    }
+
     /// 导出 Graphviz DOT(`dot -Tsvg` 可渲染的拓扑图)。只读快照。
     ///
     /// - 节点按名字里的 `/`(子图展开留下的命名空间)还原成嵌套 cluster;
@@ -95,10 +200,6 @@ impl GraphInner {
         const COLORS: &[&str] = &[
             "#cde4ff", "#d7f0d0", "#ffe4c7", "#f0d0e8", "#d0eeee", "#efe6b0", "#e0d4f0", "#ffd6d6",
         ];
-        // DOT 字符串转义:反斜杠与引号。
-        fn esc(s: &str) -> String {
-            s.replace('\\', "\\\\").replace('"', "\\\"")
-        }
         // 命名空间前缀树:内部结点 = cluster,叶子 = 图节点(存下标)。
         #[derive(Default)]
         struct Ns {
@@ -116,18 +217,28 @@ impl GraphInner {
                         .insert(rest, node),
                 }
             }
-            fn emit(&self, lines: &[String], out: &mut String, cid: &mut usize) {
-                for &i in &self.leaves {
+            fn emit(
+                &self,
+                lines: &[String],
+                layout_keys: &[(usize, usize)],
+                out: &mut String,
+                cid: &mut usize,
+            ) {
+                let mut leaves = self.leaves.clone();
+                leaves.sort_by_key(|&node| layout_keys[node]);
+                for i in leaves {
                     out.push_str(&lines[i]);
                 }
                 for (name, child) in &self.children {
                     let id = *cid;
                     *cid += 1;
+                    let label = truncate_label(name, CLUSTER_LABEL_CHARS);
                     out.push_str(&format!(
-                        "  subgraph cluster_{id} {{ label=\"{}\"; style=dashed; color=\"#888888\";\n",
-                        esc(name)
+                        "  subgraph cluster_{id} {{ label=\"{}\"; tooltip=\"{}\"; style=dashed; color=\"#888888\";\n",
+                        escape_dot(&label),
+                        escape_dot(name),
                     ));
-                    child.emit(lines, out, cid);
+                    child.emit(lines, layout_keys, out, cid);
                     out.push_str("  }\n");
                 }
             }
@@ -136,9 +247,15 @@ impl GraphInner {
         let mut out = String::new();
         out.push_str("digraph lmflow {\n");
         out.push_str("  rankdir=LR;\n");
-        out.push_str("  node [shape=box, style=\"rounded,filled\", fillcolor=white];\n");
+        out.push_str("  newrank=true;\n");
+        out.push_str("  graph [nodesep=0.35, ranksep=0.65];\n");
+        out.push_str(
+            "  node [shape=box, style=\"rounded,filled\", fillcolor=white, ordering=out];\n",
+        );
         out.push_str("  edge [fontsize=10];\n");
         if with_stats {
+            let hotspots =
+                self.dot_hotspots(snapshot_us.expect("statistics snapshot timestamp exists"));
             let limit = self.shared.config.max_queued_packets;
             let limit = if limit == 0 {
                 "unbounded".to_string()
@@ -156,17 +273,19 @@ impl GraphInner {
                 format!("snapshot +{}", duration_us(elapsed))
             };
             out.push_str(&format!(
-                "  graph [labelloc=t, label=\"state {:?} · {} · queued {}/{} packets\"];\n",
+                "  graph [labelloc=t, label=\"state {:?} · {} · queued {}/{} packets\\n{}\"];\n",
                 self.state(),
                 snapshot,
                 self.shared.total_queued(),
                 limit,
+                hotspots.label(),
             ));
         }
 
         // 预渲染每个节点(短名 + kernel + 执行器,按执行器上色),并建命名空间树。
         // `with_stats` 时额外标出运行统计,并把填充色换成按平均延迟的热力图。
         let mut lines = vec![String::new(); self.nodes.len()];
+        let mut layout_keys = vec![(0usize, 0usize); self.nodes.len()];
         let mut tree = Ns::default();
         // 热力图基准:全图最大平均延迟(0 则退化为不上色)。
         let max_avg_us = if with_stats {
@@ -179,21 +298,11 @@ impl GraphInner {
         };
         for (i, n) in self.nodes.iter().enumerate() {
             let short = n.name.rsplit('/').next().unwrap_or(n.name.as_str());
-            let (opened, closed) = {
-                let sched = n.sched.lock().expect("scheduler lock poisoned");
-                (sched.opened, sched.closed)
-            };
-            let node_state = if n.stats.errors.load(Ordering::Relaxed) > 0 {
-                NodeRunState::Error
-            } else if n.stats.in_flight.load(Ordering::Relaxed) > 0 {
-                NodeRunState::Running
-            } else if closed {
-                NodeRunState::Closed
-            } else if opened {
-                NodeRunState::Idle
-            } else {
-                NodeRunState::Created
-            };
+            let short_label = truncate_label(short, NODE_LABEL_CHARS);
+            let kernel_label = truncate_label(&n.kernel_name, KERNEL_LABEL_CHARS);
+            let node_state = self.dot_node_state(i);
+            let executor_group = n.executor.map_or(0, |executor| executor + 1);
+            layout_keys[i] = (executor_group, node_state.sort_order());
             let (exec, mut fill) = match n.executor {
                 None => ("@main".to_string(), "white".to_string()),
                 Some(ei) => (
@@ -208,7 +317,10 @@ impl GraphInner {
                 .map(|(port, capacity)| {
                     let value =
                         capacity.map_or_else(|| "unbounded".to_string(), |value| value.to_string());
-                    format!("{}={value}", n.in_ports.name(port).unwrap_or("?"))
+                    format!(
+                        "{}={value}",
+                        truncate_label(n.in_ports.name(port).unwrap_or("?"), PORT_LABEL_CHARS)
+                    )
                 })
                 .collect::<Vec<_>>();
             let mut extra = if capacities.is_empty() || with_stats {
@@ -220,6 +332,9 @@ impl GraphInner {
                 let st = &n.stats;
                 let processed = st.processed.load(Ordering::Relaxed);
                 let avg = avg_process_us(st);
+                let packets_in = st.packets_in.load(Ordering::Relaxed);
+                let packets_out = st.packets_out.load(Ordering::Relaxed);
+                let peak_queue_depth = st.peak_queue_depth.load(Ordering::Relaxed);
                 let mut queued_bytes = 0u64;
                 let mut peak_bytes = 0u64;
                 let mut block_events = 0u64;
@@ -244,16 +359,26 @@ impl GraphInner {
                         );
                     }
                 }
-                extra.push_str(&format!(
-                    "\\n{} · {} pkts · {} avg\\nin {} / out {} · peakQ {} / {}B",
-                    node_state.label(),
-                    processed,
-                    duration_us_f64(avg),
-                    st.packets_in.load(Ordering::Relaxed),
-                    st.packets_out.load(Ordering::Relaxed),
-                    st.peak_queue_depth.load(Ordering::Relaxed),
-                    peak_bytes,
-                ));
+                let errs = st.errors.load(Ordering::Relaxed);
+                let active_or_abnormal =
+                    matches!(node_state, NodeRunState::Running | NodeRunState::Error)
+                        || queued_bytes > 0
+                        || block_events > 0
+                        || blocked_ports > 0
+                        || errs > 0;
+                extra.push_str(&format!("\\n{}", node_state.label()));
+                if diagnostics || processed > 0 || active_or_abnormal {
+                    extra.push_str(&format!(
+                        " · {} pkts · {} avg\\nin {} / out {}",
+                        processed,
+                        duration_us_f64(avg),
+                        packets_in,
+                        packets_out,
+                    ));
+                }
+                if diagnostics || peak_queue_depth > 0 || peak_bytes > 0 {
+                    extra.push_str(&format!(" · peakQ {} / {}B", peak_queue_depth, peak_bytes,));
+                }
                 if queued_bytes > 0 || block_events > 0 || blocked_ports > 0 {
                     extra.push_str(&format!(
                         "\\nqueue {}B · bp {}× / {}",
@@ -265,7 +390,6 @@ impl GraphInner {
                         extra.push_str(&format!(" · {blocked_ports} blocked"));
                     }
                 }
-                let errs = st.errors.load(Ordering::Relaxed);
                 if errs > 0 {
                     extra.push_str(&format!(" · {errs} err"));
                 }
@@ -294,7 +418,7 @@ impl GraphInner {
                         };
                         extra.push_str(&format!(
                             "\\n  {} {}/{} r{}{}",
-                            esc(&queue.port_name),
+                            escape_dot(&truncate_label(&queue.port_name, PORT_LABEL_CHARS)),
                             queue.queued_packets,
                             capacity,
                             queue.reserved_packets,
@@ -318,15 +442,16 @@ impl GraphInner {
                 1
             };
             lines[i] = format!(
-                "  n{i} [label=\"{}\\n({})\\n{}{}\", fillcolor=\"{}\", color=\"{}\", penwidth={}, tooltip=\"{}\"];\n",
-                esc(short),
-                esc(&n.kernel_name),
-                esc(&exec),
+                "  n{i} [label=\"{}\\n({})\\n{}{}\", fillcolor=\"{}\", color=\"{}\", penwidth={}, group=\"exec{}\", tooltip=\"{}\"];\n",
+                escape_dot(&short_label),
+                escape_dot(&kernel_label),
+                escape_dot(&exec),
                 extra,
                 fill,
                 state_color,
                 state_penwidth,
-                esc(&format!(
+                executor_group,
+                escape_dot(&format!(
                     "{} ({}) on {}: state {}, processed {}, avg {}, in {}, out {}, errors {}",
                     n.name,
                     n.kernel_name,
@@ -343,11 +468,11 @@ impl GraphInner {
             tree.insert(&path, i);
         }
         let mut cid = 0usize;
-        tree.emit(&lines, &mut out, &mut cid);
+        tree.emit(&lines, &layout_keys, &mut out, &mut cid);
 
         // 图输入 / 输出口:独立形状。
         for &e in &self.graph_inputs {
-            let mut label = esc(&self.edges[e].name);
+            let mut label = escape_dot(&truncate_label(&self.edges[e].name, PORT_LABEL_CHARS));
             let mut fill = "#e8e8e8";
             let mut color = "#777777";
             let mut penwidth = 1;
@@ -391,26 +516,28 @@ impl GraphInner {
             );
             out.push_str(&format!(
                 "  pin{e} [shape=cds, style=filled, fillcolor=\"{fill}\", color=\"{color}\", penwidth={penwidth}, label=\"{label}\", tooltip=\"{}\"];\n",
-                esc(&tooltip),
+                escape_dot(&tooltip),
             ));
         }
         for &e in &self.graph_outputs {
             out.push_str(&format!(
-                "  pout{e} [shape=cds, style=filled, fillcolor=\"#e8e8e8\", label=\"{}\"];\n",
-                esc(&self.edges[e].name)
+                "  pout{e} [shape=cds, style=filled, fillcolor=\"#e8e8e8\", label=\"{}\", tooltip=\"graph output {}\"];\n",
+                escape_dot(&truncate_label(&self.edges[e].name, PORT_LABEL_CHARS)),
+                escape_dot(&self.edges[e].name),
             ));
         }
 
         // 边:生产者 → 消费者;图输入口 → 消费者;生产者 → 图输出口。
         // 统计模式下,每个消费者输入口独立显示容量、积压、reservation 与背压状态。
         for (ei, e) in self.edges.iter().enumerate() {
-            let label = esc(&e.name);
+            let label = escape_dot(&truncate_label(&e.name, PORT_LABEL_CHARS));
             if e.is_graph_input {
                 for &(c, port) in &e.consumers {
                     let attrs = self.dot_edge_stats_attrs(
                         c,
                         port,
                         &label,
+                        &e.name,
                         diagnostics
                             .then(|| snapshot_us.expect("statistics snapshot timestamp exists")),
                     );
@@ -422,6 +549,7 @@ impl GraphInner {
                         c,
                         port,
                         &label,
+                        &e.name,
                         diagnostics
                             .then(|| snapshot_us.expect("statistics snapshot timestamp exists")),
                     );
@@ -473,7 +601,7 @@ impl GraphInner {
                     };
                     out.push_str(&format!(
                         "  poller{ei}_{poller_index} [shape=cylinder, style=filled, fillcolor=\"{fill}\", color=\"{color}\", penwidth={penwidth}, label=\"{poller_label}\", tooltip=\"poller {}: {:?}, queue {}/{}, dropped {}, block events {}, blocked total {}, active waiters {}\"];\n",
-                        label,
+                        escape_dot(&e.name),
                         poller.overflow,
                         queued,
                         capacity,
@@ -525,12 +653,13 @@ impl GraphInner {
                     String::new()
                 };
                 out.push_str(&format!(
-                    "    legend_e{i} [shape=box, style=filled, fillcolor=\"{}\", label=\"{}\\n{}t · {}{}\"];\n",
+                    "    legend_e{i} [shape=box, style=filled, fillcolor=\"{}\", label=\"{}\\n{}t · {}{}\", tooltip=\"executor {}\"];\n",
                     COLORS[i % COLORS.len()],
-                    esc(ex.name()),
+                    escape_dot(&truncate_label(ex.name(), NODE_LABEL_CHARS)),
                     ex.num_threads(),
                     cores,
-                    prio
+                    prio,
+                    escape_dot(ex.name()),
                 ));
             }
             out.push_str(
@@ -587,10 +716,14 @@ impl GraphInner {
         node: usize,
         port: usize,
         edge_label: &str,
+        edge_name: &str,
         snapshot_us: Option<i64>,
     ) -> String {
         let Some(snapshot_us) = snapshot_us else {
-            return format!("label=\"{edge_label}\"");
+            return format!(
+                "label=\"{edge_label}\", tooltip=\"edge {}\"",
+                escape_dot(edge_name)
+            );
         };
         let stats = self
             .input_queue_stats_at(node, port, snapshot_us)
@@ -608,7 +741,8 @@ impl GraphInner {
             duration_us(stats.total_blocked_us),
         );
         let tooltip = format!(
-            "{}.{}: queue {}/{}, reserved {}, block events {}, blocked total {}, current blocked {}, producer {}",
+            "edge {} to {}.{}: queue {}/{}, reserved {}, block events {}, blocked total {}, current blocked {}, producer {}",
+            edge_name,
             stats.node_name,
             stats.port_name,
             stats.queued_packets,
