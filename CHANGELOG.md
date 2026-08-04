@@ -89,6 +89,13 @@ to each GitHub Release.
   fails instead of running tests against a missing package. The thin binding module also disables
   pybind11's automatic full LTO, avoiding serialized GCC LTRANS jobs while leaving the Rust engine
   optimized by its release profile.
+
+### Fixed
+
+- **Internal backpressure false-stall detection.** An idle snapshot with retained producer staging
+  now triggers a full readiness rescan and flush retry before reporting a deadlock. This prevents
+  bounded diamond pipelines from being rejected during a transient scheduling window while
+  preserving errors for genuinely impossible input alignment.
 - **C ABI version 2.** The boolean `lmflow_graph_to_dot` entry point is removed; callers must use
   `lmflow_graph_to_dot_view` with an explicit topology, compact, or diagnostics view.
 - **Consistent and render-tested Graphviz snapshots.** One statistics-enabled DOT export now uses
