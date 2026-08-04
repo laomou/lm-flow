@@ -12,6 +12,11 @@ to each GitHub Release.
 
 ### Added
 
+- **Bounded Poller queues and complete output accounting.** Poller-retained packets now count
+  toward global packet/byte watermarks. New bounded Pollers support `block`, `drop_oldest`,
+  `drop_newest`, and capacity-1 `latest`; lossy policies expose drop counts and warnings.
+  Releasing a Poller unregisters it, clears its accounted queue, and wakes blocked producers.
+
 - **Two-level port type checking.** When a producer output and consumer input both declare
   concrete, different types, graph construction now fails immediately with the edge, nodes,
   ports and type names in the diagnostic. An `any` endpoint remains dynamic and is checked

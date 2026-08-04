@@ -308,12 +308,60 @@ pub unsafe extern "C" fn lmflow_graph_add_poller_ex(
     })
 }
 
+#[no_mangle]
+pub unsafe extern "C" fn lmflow_graph_add_poller_bounded(
+    g: *mut LMFlowGraph,
+    port: *const c_char,
+    capacity: usize,
+    overflow: i32,
+) -> *mut LMFlowPoller {
+    guard_val(std::ptr::null_mut(), || {
+        let Some(slot) = slot_mut(g) else {
+            last_error::set("graph handle is null");
+            return std::ptr::null_mut();
+        };
+        let Some(gr) = slot.graph.as_ref() else {
+            last_error::set("graph not yet initialized");
+            return std::ptr::null_mut();
+        };
+        let Some(name) = cstr(port) else {
+            last_error::set("port name is null");
+            return std::ptr::null_mut();
+        };
+        let overflow = match overflow {
+            0 => crate::graph::PollerOverflow::Block,
+            1 => crate::graph::PollerOverflow::DropOldest,
+            2 => crate::graph::PollerOverflow::DropNewest,
+            3 => crate::graph::PollerOverflow::Latest,
+            _ => {
+                last_error::set(
+                    "unknown poller overflow policy (valid: BLOCK / DROP_OLDEST / DROP_NEWEST / LATEST)",
+                );
+                return std::ptr::null_mut();
+            }
+        };
+        match gr.add_poller_with_options(name, crate::graph::PollerOptions::new(capacity, overflow))
+        {
+            Ok(poller) => Box::into_raw(Box::new(poller)) as *mut LMFlowPoller,
+            Err(error) => {
+                last_error::set(&error.to_string());
+                std::ptr::null_mut()
+            }
+        }
+    })
+}
+
 unsafe fn poller_ref<'a>(p: *mut LMFlowPoller) -> Option<&'a Poller> {
     if p.is_null() {
         None
     } else {
         Some(&*(p as *const Poller))
     }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lmflow_poller_dropped_count(p: *mut LMFlowPoller) -> u64 {
+    guard_val(0, || poller_ref(p).map_or(0, Poller::dropped_count))
 }
 
 #[no_mangle]

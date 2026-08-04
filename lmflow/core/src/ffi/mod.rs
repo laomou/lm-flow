@@ -30,6 +30,10 @@ use crate::status::{code, Error};
 pub const ABI_VERSION: u32 = 1;
 
 pub const INVALID_ID: usize = usize::MAX;
+pub const LMFLOW_POLLER_BLOCK: i32 = 0;
+pub const LMFLOW_POLLER_DROP_OLDEST: i32 = 1;
+pub const LMFLOW_POLLER_DROP_NEWEST: i32 = 2;
+pub const LMFLOW_POLLER_LATEST: i32 = 3;
 
 // ---------------------------------------------------------------- 工具
 

@@ -59,7 +59,7 @@ lm-flow/
 | `Edge/Port` | Edges and ports connect producers to consumers by name; an edge carries a queue of timestamped packets |
 | `Packet` | A packet = an immutable shared payload + a timestamp |
 | `Contract` | Port type contract, declared by the kernel in `GetContract` |
-| `Poller/Observer` | Two ways to take graph output: pull (blocking/timeout/non-blocking) and push (callback) |
+| `Poller/Observer` | Pull or push graph output; bounded Pollers support block/drop/latest policies |
 
 Concrete port contracts are checked across edges while the graph is built, so a known
 `I64 → F64` connection fails before execution. An `any` endpoint keeps runtime packet checks,

@@ -592,17 +592,28 @@ LMFlowPoller* lmflow_graph_add_poller(LMFlowGraph*, const char* port);
  * 产生的**空包**(payload==NULL,仅带时间戳)—— 下游据此知道「该时刻之前不会再有数据」。
  * 默认 false。完整的边界传播属 A 阶段,本版本仅保留接口。 */
 LMFlowPoller* lmflow_graph_add_poller_ex(LMFlowGraph*, const char* port, bool observe_timestamp_bounds);
+/* 有界 Poller。capacity 必须 >= 1。BLOCK 无损但要求宿主持续并发排水；
+ * DROP_OLDEST / DROP_NEWEST / LATEST 有损且永不阻塞生产线程。 */
+#define LMFLOW_POLLER_BLOCK 0
+#define LMFLOW_POLLER_DROP_OLDEST 1
+#define LMFLOW_POLLER_DROP_NEWEST 2
+#define LMFLOW_POLLER_LATEST 3
+LMFlowPoller* lmflow_graph_add_poller_bounded(
+    LMFlowGraph*, const char* port, size_t capacity, int overflow_policy);
 /* 阻塞取下一包;图结束且队空返回 false。取得的包须 lmflow_packet_drop。 */
 bool lmflow_poller_next(LMFlowPoller*, LMFlowPacket* out);
 /* 非阻塞:无数据返回 false(用 lmflow_last_error 区分「暂无」与「已结束」)*/
 bool lmflow_poller_try_next(LMFlowPoller*, LMFlowPacket* out);
 /* 带超时:LMFLOW_OK / LMFLOW_ERR_TIMEOUT / LMFLOW_ERR_CLOSED */
 LMFlowStatus lmflow_poller_next_timeout(LMFlowPoller*, LMFlowPacket* out, int64_t timeout_ms);
+uint64_t lmflow_poller_dropped_count(LMFlowPoller*);
 /* 归还 poller 句柄。与 lmflow_input_free 同理:调用方拥有,持一份对引擎的引用,
- * 图 free 后仍安全;不释放会泄漏引擎。可传 NULL。 */
+ * 图 free 后仍安全。释放会注销该订阅、丢弃并扣减其剩余队列,并唤醒可能阻塞在
+ * bounded BLOCK poller 上的生产者。不释放会泄漏引擎。可传 NULL。 */
 void lmflow_poller_free(LMFlowPoller*);
 /* 同一端口上可以同时挂多个 poller 与多个 observer,各自**独立收到一份**
- * (引擎按订阅者数递增引用计数,不复制 payload)。注册后不支持移除。
+ * (引擎按订阅者数递增引用计数,不复制 payload)。poller_free 可移除 poller;
+ * observer 注册后不支持移除。
  *
  * 推模式:回调在工作线程执行,pkt 为**借用**(回调返回后失效,需要留存请自行深拷贝)。
  * 回调内不得调用 lmflow_graph_* 生命周期函数,否则死锁。 */
@@ -640,7 +651,7 @@ void lmflow_graph_resume(LMFlowGraph*);
  * 用本函数(返回值生命周期至下次对同一 graph 调用本函数)。 */
 const char* lmflow_graph_last_error(LMFlowGraph*);
 
-/* ---------- 全局水位:内部边无界的兜底 ----------
+/* ---------- 全局水位:内部边与 Poller 队列的统计 ----------
  * 设计上内部边不对生产者背压(否则「扇出后汇合」的 DAG 会死锁,见设计文档 §7.5),
  * 代价是内部边可以无限增长:图输入口 100 帧 × 扇出 6 条边 × 每帧 6MB ≈ 3.6GB,
  * 而且若某条分支偏慢,单条边就能堆到内存耗尽 —— 没有任何机制会拦它。
@@ -652,9 +663,8 @@ const char* lmflow_graph_last_error(LMFlowGraph*);
  * LMFLOW_ERR_WOULD_BLOCK。只在图输入口刹车是安全的 —— 它在图内没有上游,
  * 不可能参与循环等待,所以这个兜底不会把 diamond 死锁带回来。
  *
- * ⚠ 按字节统计只对**引擎分配的内建 payload** 有效(引擎知道大小);
- *   自定义 payload 引擎只有指针与 drop_fn、无从得知尺寸,计为 0 ——
- *   那种场景请用 max_queued_packets。 */
+ * Poller 队列也计入这两个统计。已注册 type descriptor 的自定义 payload 按其
+ * 固定对象 size 计量(浅尺寸,不含对象内部另行分配的堆内存);未注册布局仍计 0。 */
 size_t lmflow_graph_total_queued(LMFlowGraph*);         /* 全图在途包数 */
 uint64_t lmflow_graph_total_queued_bytes(LMFlowGraph*); /* 仅可计量部分之和 */
 

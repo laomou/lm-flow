@@ -251,9 +251,12 @@ void         lmflow_graph_resume(LMFlowGraph*);
 /* pull */
 LMFlowPoller* lmflow_graph_add_poller(LMFlowGraph*, const char* port);
 LMFlowPoller* lmflow_graph_add_poller_ex(LMFlowGraph*, const char* port, bool observe_timestamp_bounds);
+LMFlowPoller* lmflow_graph_add_poller_bounded(
+    LMFlowGraph*, const char* port, size_t capacity, int overflow_policy);
 bool          lmflow_poller_next(LMFlowPoller*, LMFlowPacket* out);       /* blocking */
 bool          lmflow_poller_try_next(LMFlowPoller*, LMFlowPacket* out);   /* non-blocking */
 LMFlowStatus  lmflow_poller_next_timeout(LMFlowPoller*, LMFlowPacket* out, int64_t timeout_ms);
+uint64_t      lmflow_poller_dropped_count(LMFlowPoller*);
 void          lmflow_poller_free(LMFlowPoller*);
 
 /* push */
@@ -267,6 +270,19 @@ A packet from a poller is **transferred** to you — you must `lmflow_packet_dro
 to an observer callback is **borrowed** — you must not. The observer runs on whichever thread
 dispatched the packet, possibly a pool thread, so it must be thread-safe; and it must not call back
 into `lmflow_graph_*`.
+
+Poller queues contribute to the graph's packet/byte watermark counters. The legacy
+`lmflow_graph_add_poller` remains unbounded for compatibility. A bounded Poller supports:
+
+| Policy | Behavior at capacity |
+|---|---|
+| `LMFLOW_POLLER_BLOCK` | lossless; waits until another thread drains the Poller |
+| `LMFLOW_POLLER_DROP_OLDEST` | drops the oldest queued packet |
+| `LMFLOW_POLLER_DROP_NEWEST` | rejects the incoming packet |
+| `LMFLOW_POLLER_LATEST` | capacity must be 1; retains only the newest packet |
+
+Lossy policies increment `lmflow_poller_dropped_count`. Freeing a Poller unregisters its
+subscription and releases any packets still queued in it.
 
 If no node declares an `executor`, everything runs on the host thread, and tasks are pumped during
 blocking calls such as `lmflow_poller_next` and `lmflow_graph_wait_done`. That is why the example
