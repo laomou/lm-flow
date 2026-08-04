@@ -834,6 +834,13 @@ Both compact and diagnostics views label each node as `CREATED`, `IDLE`, `RUNNIN
 the fill remains the latency heat map. Compact mode omits the per-port table, detailed edge
 backpressure labels, Poller cylinders, and diagnostics legend.
 
+The graph title also summarizes current hotspots: running nodes, error nodes, blocked producers,
+likely waiting inputs, and dropped packets. Compact mode suppresses zero-valued packet/queue detail
+for inactive nodes so large graphs remain scannable. Long visible labels are truncated with an
+ellipsis, while SVG tooltips keep the complete node, kernel, namespace, executor, edge, and port
+names. Nodes carry executor groups and stable state ordering; Graphviz rank/node spacing is tuned
+without `concentrate`, so separate multi-port edges are never merged.
+
 ```c
 int64_t      lmflow_graph_counter_value(LMFlowGraph*, const char* name);
 size_t       lmflow_graph_counter_count(LMFlowGraph*);

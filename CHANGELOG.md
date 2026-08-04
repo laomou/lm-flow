@@ -66,6 +66,11 @@ to each GitHub Release.
 
 ### Changed
 
+- **Large-graph Graphviz readability.** Statistics-enabled titles summarize running, error,
+  blocked, waiting, and dropped hotspots. Compact view omits zero-valued throughput and queue
+  details from inactive nodes. Long node, kernel, cluster, executor, and port labels are truncated
+  while SVG tooltips retain full names. Stable executor/state ordering, executor groups, and tuned
+  rank spacing reduce crossings without merging distinct multi-port edges.
 - **C ABI version 2.** The boolean `lmflow_graph_to_dot` entry point is removed; callers must use
   `lmflow_graph_to_dot_view` with an explicit topology, compact, or diagnostics view.
 - **Consistent and render-tested Graphviz snapshots.** One statistics-enabled DOT export now uses

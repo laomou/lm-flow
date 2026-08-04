@@ -593,7 +593,8 @@ fn introspection_through_c_abi() {
             .to_str()
             .unwrap()
             .to_string();
-        assert!(dot_compact.contains("CREATED · 0 pkts"));
+        assert!(dot_compact.contains("@main\\nCREATED"));
+        assert!(!dot_compact.contains("CREATED · 0 pkts"));
         assert!(!dot_compact.contains("ports:"));
         assert!(CStr::from_ptr(lmflow_graph_to_dot_view(g, 99))
             .to_bytes()
