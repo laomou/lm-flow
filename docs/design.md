@@ -81,7 +81,7 @@
 | 37 | **节点级 `on_error: abort\|skip`**,默认 `abort` | 长跑实时管线里一帧坏数据不该杀掉整条流水线,而原先任何一次算子失败都终止全图。`skip` 只丢那一个包并**推进下游边界**(不推进就把一帧错误升级成整图卡死);复用「无产出也要推进边界」那条既有路径,不新写机制。有损行为绝不静默:计入 `errors` + WARN(指数退避)。**只有两个值**——不设单独的 `log`,因为 `skip` 本身一定计数并打日志。定位:能在算子内处理的就在算子内处理(返回成功不产出),`skip` 专治**管不到**的失败(契约校验、panic / C++ 异常、第三方算子)。**只管逐包失败**:`Open` / `Close` 的一次性生命周期失败不受此策略影响(打不开就该让 `start()` 失败,而非空转着每帧报错) |
 | 38 | **声明式源定速 `rate: N`(Hz)** | 源本要么内核自己写 sleep、要么灌爆下游。`rate` 让定速变成一行 YAML。实现走**路 A**(源的池线程里 sleep 到点)而非路 B(不占线程的定时唤醒):source 本就必须挂线程池、有专属线程,路 B「不占线程」的收益对它有限,却要新造一整套延迟调度设施并碰调度核心。节流在 `call_kernel` 调算子前、**不持任何引擎锁**(R1 未破),按实际放行时刻记基准防漂移 |
 | 39 | **`reset` 保留算子实例的复位重跑** | 每会话重建图 + 重跑 `open`(重载模型)是实打实的开销。reset 复用已 open 的算子跑下一轮。安全靠「静止相」:要求 `Terminated + is_idle`(与 Drop/start 同依据),故 `&self` + 内部可变即可无并发复位 —— **不用 `Arc::get_mut`**(Poller 也持 `Arc<GraphInner>`,宿主留着 poller 时拿不到独占)。不碰线程池(worker 随图存活、park 着复用)。`epoch` 不 reset(只是诊断基准)。最易漏:`Edge::last_sent`(单调性)、`GraphShared` 的 error(无现成清除路径)、`input_bounds` 回 `pre_stream` 而非 `done` |
-| 40 | **F16 用自写的软件转换**,不用 `_Float16`、不用 F16C / NEON 内建 | F16 是移动端推理的标准张量 dtype,而张量前处理组此前遇 F16 直接报错 —— 在最相关的场景里用不了。选软件转换的理由:`_Float16` 不是所有目标编译器都有(**MSVC 没有可移植的 half 类型**,而 Windows 是待补平台),内建指令要按架构分派 + 运行期探测;而前处理不在最内层推理热路径上,这点成本换来「任意编译器 / 架构上逐位一致」是值得的 —— 且正因不依赖编译器,舍入行为才**能被测试钉死**。舍入取 IEEE 默认(就近、平局取偶);`double → half` **直接从 double 位模式做、不经 float 中转**,否则会双重舍入(极少数入参偏 1 ulp)。见 §5.3 |
+| 40 | **F16 用自写的软件转换**,不用 `_Float16`、不用 F16C / NEON 内建 | F16 是移动端推理的标准张量 dtype,而张量前处理组此前遇 F16 直接报错 —— 在最相关的场景里用不了。选软件转换的理由:`_Float16` 不是所有目标编译器都有(**MSVC 没有可移植的 half 类型**),内建指令要按架构分派 + 运行期探测;而前处理不在最内层推理热路径上,这点成本换来「任意编译器 / 架构上逐位一致」是值得的 —— 且正因不依赖编译器,舍入行为才**能被测试钉死**。舍入取 IEEE 默认(就近、平局取偶);`double → half` **直接从 double 位模式做、不经 float 中转**,否则会双重舍入(极少数入参偏 1 ulp)。见 §5.3 |
 | 41 | **`batch` 多输入口 = `capacity` 个「对齐元组」**,而非「各口各自数够 `capacity` 个」 | 后者实现最省事,但会把 0 号口的第 k 个与 1 号口的第 k 个配成一对,而它们未必是同一帧 —— 图像批与掩码批就此错位,**且不报任何错**。静默的错误配对是本项目明确拒绝的失败模式,故一批 = 把 `sync` 的对齐连续跑 `capacity` 轮,**各口取数允许不同**(`input_count(i)` 本就按口计数,算子侧零改动)。不足一批只在**所有正向口都关闭**后才刷(否则是过早切批)。实现上就绪期快照时间戳前缀 + 算好每口取数,认领期照计划弹出 —— **每口仍只拿一次队列锁**,ADR #36 未破。见 §7.10 |
 | 42 | **类型契约做两级校验:静态可证的建图期拒绝,ANY 边保留运行期检查;算子输出也必须兑现契约** | producer output 与 consumer input 都声明具体类型且不同,无需等首包即可判错,故建图失败;任一侧为 ANY 时真实类型仍由包决定,继续逐包检查。输出契约不能只拿来推导下游:否则直接连 graph output 的错误包无人检查,故 process / close 的 staging 在 dispatch 前统一验证。Rust 自定义跨语言类型用 unsafe trait `InteropType` 把 ABI 承诺集中到实现处;任意 id 的 `new_interop` 降为 unsafe 且禁止伪装成内建类型 |
 | 43 | **自定义类型身份从裸 `type_id` 收紧为 `(稳定名,size,align)` 描述符** | 仅比较 64 位哈希无法发现碰撞,也无法发现两侧用同一稳定名却声明了不同布局。`lmflow_register_type_descriptor` 对完全相同的重复注册幂等,但同 id 异名、同名异 id、同名同 id 异布局都立即失败。C++ `Packet::Make<T>` / `Contract::InputSet<T>` / `OutputSet<T>` 自动注册,Rust `InteropType` 自动注册。已注册固定布局的 Foreign payload 会按 `size` 纳入字节水位;这是对象本体的浅尺寸,不包含 `std::vector` 等对象内部另行分配的堆内存 |
@@ -369,7 +369,7 @@ LMFLOW_REGISTER_KERNEL(PassThroughKernel)    // 或 LMFLOW_REGISTER_KERNEL_AS(T,
 张量前处理组支持 `LMFLOW_DTYPE_F16`,转换由 `cpp/kernels/buffer_util.hpp` 里**自己实现的**
 `half_to_float` / `f64_to_half` 承担。**刻意不用 `_Float16`,也不用 F16C / NEON 内建**:
 
-- `_Float16` 不是所有目标编译器都有(MSVC 就没有可移植的 half 类型,而 Windows 是待补平台);
+- `_Float16` 不是所有目标编译器都有(MSVC 就没有可移植的 half 类型);
 - 内建指令要按架构分派 + 运行期探测;
 - 张量前处理不在最内层推理热路径上,这点转换成本换来「任意编译器 / 架构上行为**逐位一致**」
   是值得的 —— 而且正因为不依赖编译器,舍入行为才能被测试钉死。
@@ -1503,7 +1503,7 @@ Debug 三个配置做 `ninja -n` 干跑,断言 profile 与 `--config` 一致,并
 | ABI 布局不一致 | 内存错乱 | `#[repr(C)]` + 双向 `static_assert`;`LMFLOW_ABI_VERSION` 运行期校验 |
 | CoW 静默失效 | 引擎多留一份引用 → 恒复制、不报错只变慢 | 写成显式不变量(§3.4)+ 加断言/测试 |
 | GIL 拖累吞吐 | Python 算子无法真并行 | 文档明示;重活写 C++;考虑 executor 隔离 |
-| 跨平台未验证 | Windows(MSVC)—— **仅剩这一个**;macOS 原生 test 与 iOS/Android/linux-aarch64 交叉编译已在 CI | 已列入 CI 矩阵;Windows 待补 |
+| 跨平台回归 | 平台工具链、库名、系统依赖与 CRT 容易随构建脚本改动而静默失效 | Windows/MSVC、macOS、iOS、Android、linux-aarch64 均在 CI;Windows 额外覆盖 SDK 安装消费与 Python wheel |
 | B 的简化偏离完整语义 | 丢了时间戳对齐 | 明确划入 A 阶段;**B/A 两阶段均已落地**,对齐语义有专门测试(§13) |
 
 ---
@@ -1539,7 +1539,7 @@ Debug 三个配置做 `ninja -n` 干跑,断言 profile 与 `--config` 一致,并
 | CoW 不变量是否被意外破坏 —— 需专门的「不应发生拷贝」测试 | **确实被破坏了**,已修并留下三级管线的零拷贝测试(见 §13.2) |
 | 调度状态机的 `rescan` 逻辑 | 线程池已落地,**并发正确性由 TSan 硬门禁常绿保证**(0 竞态);`max_in_flight > 1` 的认领/按序重排路径同在门禁内 |
 | 全局水位的实际效果 | 已有功能测试证明能拦住无限增长;**内存曲线压测已补上**(`tests/soak.rs`,见 §13.4)—— 实测 RSS 增长与总吞吐**无关**:250 MiB 与 2.5 GiB 两种规模下增长同为 ~4.3 MiB(≈ 水位本身) |
-| 跨平台 | macOS(原生 test)、iOS / Android / linux-aarch64(交叉编译 + 桥接链接)均在 CI 内;**Windows(MSVC)仍未验证** |
+| 跨平台 | Windows/MSVC 与 macOS 原生 test,加上 iOS / Android / linux-aarch64 交叉编译,均在 CI 内 |
 
 ### 15.3 当前实现的已知边界
 
@@ -1572,26 +1572,15 @@ Debug 三个配置做 `ninja -n` 干跑,断言 profile 与 `--config` 一致,并
 
 **验证覆盖上的边界**
 
-- **Windows(MSVC)未验证**:CI 覆盖 linux-x86_64/aarch64、macOS、iOS、Android;无 Windows。
-  已做过一轮**只读侦查**,结论是缺口比字面看着窄,记录在此免得下次重查:
-  - **Rust 引擎与四个头文件已经是可移植的**(用构建验证过,不是读代码):
-    `cargo check --all-targets --target x86_64-pc-windows-msvc` 干净,`clippy -D warnings` 干净,
-    windows-gnu 可完整链接。`executor.rs` 的绑核/实时优先级**已有真正的 no-op 兜底分支**
-    (`cfg(not(any(linux, android, macos, ios)))`),且**零 libc crate 依赖**(在 cfg 内直接
-    声明符号)。四个头无 `__attribute__`/`typeof`/VLA/匿名联合/`#pragma`,全用定宽整型
-    → LLP64 非问题。18 个 C++ 算子亦无 POSIX 头、无 GCC 扩展。
-  - **符号导出不需要 `.def`/`dllexport`**:131 个 C ABI 符号**全部**是 Rust 侧 `#[no_mangle]`
-    定义的(零个来自 C++),`objdump -p lmflow.dll` 实测导出 130 个(差的那个是
-    feature-gated 的 `lmflow_register_builtin_kernels`,符合预期)。这一点设计时已考虑过 ——
-    若该 C ABI 符号由 C++ 定义,rustc 不会把它放进 DLL 导出表,那才是硬阻塞。
-  - **真实工作量是 CMake + CI**,约 16 处构建相关改动:库名/后缀、链接库列表里的 `m`
-    (`${CMAKE_DL_LIBS}` 在 Windows 为空、`Threads::Threads` 在 MSVC 是 no-op,这两个**无需**
-    条件化),以及需要补上 Windows 系统导入库(`kernel32/ntdll/userenv/ws2_32/dbghelp`)。
-    另需处理 MSVC 的 CRT 一致性(rustc 恒发 `/defaultlib:msvcrt`,而 CMake 在 Debug 下默认 `/MDd`)。
-  - **TSan 在 windows-msvc 上不可用**(仅 Linux/macOS)。而并发是本设计的核心风险、TSan 是硬门禁,
-    故 Windows 若接入,在安全矩阵里**必然是二等**(ASan 可部分替代,并发无等价门禁)。
-    这应作为**明示的接受限制**,不是遗漏。
-  - 暂缓的真正原因不是难度,而是**本机无 MSVC、完全无法本地验证**,只能盲写 + 跟 CI 迭代。
+- **Windows/MSVC 已进入原生 CI**,不再只是交叉 `cargo check`:同一 job 运行纯 Rust 与
+  `builtin-kernels` 全套测试,用 `cl.exe` 独立编译 C11/C++17 公共头、18 个算子、ABI
+  断言和纯头测试;再用 Visual Studio 生成器分别构建/测试 Debug 与 Release、安装 SDK,
+  通过临时最小外部工程验证 `find_package(lmflow)`、静态链接与 ABI 版本,最后构建并运行
+  Python 扩展。为此 CMake 按 MSVC 产物名选择 `lmflow.lib`,传播 rustc 实测给出的
+  `kernel32/ntdll/userenv/ws2_32/dbghelp`,并用 CMP0091 把所有配置的 CRT 固定为 `/MD`,
+  避免 Rust 的 `/defaultlib:msvcrt` 与 CMake Debug 默认 `/MDd` 混用。
+- **TSan 在 windows-msvc 上不可用**(仅 Linux/macOS)。并发安全仍由 Linux TSan 硬门禁
+  负责;Windows job 验证平台编译、链接、运行和绑定,但不宣称提供等价的竞态检测。
 - **Miri 跑不动**:FFI 里大量 `extern "C"` 与外部 C++ 符号,Miri 无法执行,故只作 advisory
   (`continue-on-error`),不是门禁。ASan 同样是 advisory(build-std + C++ 侧易误报)。
 - **`pool4` 类多线程基准在本机噪声达 ±13~25%**,不能用于归因单次改动(见
