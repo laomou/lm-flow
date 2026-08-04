@@ -502,6 +502,17 @@ struct InputQueueReservation {
     packets: usize,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct InputQueueBlockContext {
+    producer: NodeId,
+    consumer: NodeId,
+    port: usize,
+    capacity: usize,
+    queued: usize,
+    reserved: usize,
+    incoming: usize,
+}
+
 #[derive(Debug, Default)]
 struct InputQueueStats {
     peak_packets: AtomicUsize,
@@ -2349,11 +2360,10 @@ impl GraphInner {
                 {
                     continue;
                 }
-                let packet_capacity = node.input_queue_capacity[port];
-                if packet_capacity.is_none() {
+                let Some(capacity) = node.input_queue_capacity[port] else {
                     continue;
-                }
-                if let Some(capacity) = packet_capacity.filter(|&capacity| count > capacity) {
+                };
+                if count > capacity {
                     self.release_internal_reservations(&reservations);
                     return Err(Error::Kernel(format!(
                         "node `{}` emits a batch of {count} packets to edge `{}`, exceeding consumer \
@@ -2373,15 +2383,21 @@ impl GraphInner {
                 let queue = node.input_queues[port].lock().expect("queue lock poisoned");
                 let queued = queue.len();
                 let reserved = node.input_queue_reserved[port].load(Ordering::SeqCst);
-                let packets_full =
-                    packet_capacity.is_some_and(|capacity| queued + reserved + count > capacity);
+                let packets_full = queued + reserved + count > capacity;
                 if packets_full {
                     drop(queue);
-                    self.mark_input_queue_blocked(consumer, port);
+                    self.mark_input_queue_blocked(InputQueueBlockContext {
+                        producer,
+                        consumer,
+                        port,
+                        capacity,
+                        queued,
+                        reserved,
+                        incoming: count,
+                    });
                     self.release_internal_reservations(&reservations);
                     return Ok(None);
                 }
-                self.finish_input_queue_block(consumer, port);
                 node.input_queue_reserved[port].fetch_add(count, Ordering::SeqCst);
                 reservations.push(InputQueueReservation {
                     node: consumer,
@@ -2389,6 +2405,7 @@ impl GraphInner {
                     packets: count,
                 });
                 drop(queue);
+                self.finish_input_queue_block(consumer, port, true);
             }
         }
         Ok(Some(reservations))
@@ -2405,19 +2422,38 @@ impl GraphInner {
         self.epoch.elapsed().as_micros().min(i64::MAX as u128) as i64
     }
 
-    fn mark_input_queue_blocked(&self, node: NodeId, port: usize) {
-        let stats = &self.nodes[node].input_queue_stats[port];
+    fn mark_input_queue_blocked(&self, context: InputQueueBlockContext) {
+        let InputQueueBlockContext {
+            producer,
+            consumer,
+            port,
+            capacity,
+            queued,
+            reserved,
+            incoming,
+        } = context;
+        let stats = &self.nodes[consumer].input_queue_stats[port];
         let since = self.epoch_us().saturating_add(1);
         if stats
             .blocked_since_us
             .compare_exchange(0, since, Ordering::SeqCst, Ordering::Relaxed)
             .is_ok()
         {
-            stats.block_events.fetch_add(1, Ordering::Relaxed);
+            let event = stats.block_events.fetch_add(1, Ordering::Relaxed) + 1;
+            if event.is_power_of_two() {
+                runtime::log_warn(&format!(
+                    "internal backpressure #{event}: producer `{}` paused by consumer `{}` input \
+                     `{}` (capacity={capacity} packets, queued={queued}, reserved={reserved}, \
+                     incoming={incoming}); the worker was released and will resume after dequeue",
+                    self.nodes[producer].name,
+                    self.nodes[consumer].name,
+                    self.nodes[consumer].in_ports.name(port).unwrap_or("?"),
+                ));
+            }
         }
     }
 
-    fn finish_input_queue_block(&self, node: NodeId, port: usize) {
+    fn finish_input_queue_block(&self, node: NodeId, port: usize, log_recovery: bool) {
         let stats = &self.nodes[node].input_queue_stats[port];
         let since = stats.blocked_since_us.swap(0, Ordering::SeqCst);
         if since != 0 {
@@ -2426,15 +2462,64 @@ impl GraphInner {
                 .saturating_sub(since.saturating_sub(1))
                 .max(0) as u64;
             stats.blocked_total_us.fetch_add(elapsed, Ordering::Relaxed);
+            let event = stats.block_events.load(Ordering::Relaxed);
+            if log_recovery && event.is_power_of_two() {
+                let producer = self.edges[self.nodes[node].inputs[port]]
+                    .producer
+                    .map(|producer| self.nodes[producer].name.as_str())
+                    .unwrap_or("<graph input>");
+                runtime::log_info(&format!(
+                    "internal backpressure #{event} cleared: producer `{producer}` resumed after \
+                     consumer `{}` input `{}` drained (blocked {elapsed}us)",
+                    self.nodes[node].name,
+                    self.nodes[node].in_ports.name(port).unwrap_or("?"),
+                ));
+            }
         }
     }
 
     fn finish_all_backpressure_blocks(&self) {
         for node in 0..self.nodes.len() {
             for port in 0..self.nodes[node].input_queues.len() {
-                self.finish_input_queue_block(node, port);
+                self.finish_input_queue_block(node, port, false);
             }
         }
+    }
+
+    fn backpressure_stall_details(&self, producers: &[NodeId]) -> Vec<String> {
+        let producer_set: BTreeSet<NodeId> = producers.iter().copied().collect();
+        let mut details = Vec::new();
+        for (consumer, node) in self.nodes.iter().enumerate() {
+            for port in 0..node.input_queues.len() {
+                let edge = node.inputs[port];
+                let Some(producer) = self.edges[edge].producer else {
+                    continue;
+                };
+                if !producer_set.contains(&producer) {
+                    continue;
+                }
+                let Some(queue) = self.input_queue_stats(consumer, port) else {
+                    continue;
+                };
+                if !queue.blocked {
+                    continue;
+                }
+                let capacity = queue
+                    .packet_capacity
+                    .map_or_else(|| "unbounded".to_string(), |value| value.to_string());
+                details.push(format!(
+                    "{} -> {}.{}(capacity={}, queued={}, reserved={}, blocked={}us)",
+                    self.nodes[producer].name,
+                    queue.node_name,
+                    queue.port_name,
+                    capacity,
+                    queue.queued_packets,
+                    queue.reserved_packets,
+                    queue.blocked_for_us,
+                ));
+            }
+        }
+        details
     }
 
     /// `flush_staging` 的单个输出口分支(拆出来只为让上面的循环短一点,逻辑未变)。
@@ -2710,18 +2795,19 @@ impl GraphInner {
             let before = self.activity_gen();
             if self.workers_idle() {
                 self.resume_blocked_flushes();
-                let blocked: Vec<&str> = self
+                let blocked: Vec<NodeId> = self
                     .blocked_flush_nodes
                     .lock()
                     .expect("blocked flush lock poisoned")
                     .iter()
-                    .map(|&node| self.nodes[node].name.as_str())
+                    .copied()
                     .collect();
                 if !blocked.is_empty() {
+                    let details = self.backpressure_stall_details(&blocked);
                     return Err(Error::Kernel(format!(
-                        "wait_done: internal backpressure cannot make progress; blocked producers: [{}]. \
+                        "wait_done: internal backpressure cannot make progress; blocked queues: [{}]. \
                          increase the input queue packet capacity or inspect downstream alignment",
-                        blocked.join(", ")
+                        details.join("; ")
                     )));
                 }
                 // 空闲且未全关:再推一轮关流
@@ -2797,16 +2883,17 @@ impl GraphInner {
                 break;
             }
             if self.workers_idle() {
-                let blocked: Vec<&str> = self
+                let blocked: Vec<NodeId> = self
                     .blocked_flush_nodes
                     .lock()
                     .expect("blocked flush lock poisoned")
                     .iter()
-                    .map(|&node| self.nodes[node].name.as_str())
+                    .copied()
                     .collect();
+                let details = self.backpressure_stall_details(&blocked);
                 return Err(Error::Kernel(format!(
-                    "wait_until_idle: internal backpressure cannot make progress; blocked producers: [{}]",
-                    blocked.join(", ")
+                    "wait_until_idle: internal backpressure cannot make progress; blocked queues: [{}]",
+                    details.join("; ")
                 )));
             }
             match self.remaining(deadline) {

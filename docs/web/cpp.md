@@ -796,11 +796,16 @@ for (size_t p = 0; p < lmflow_graph_node_num_input_ports(graph, i); ++p) {
 }
 ```
 
-`queued_packets/bytes` are already in the consumer queue; `reserved_packets/bytes` are atomically
+`queued_packets/bytes` are already in the consumer queue; `reserved_packets` are atomically
 reserved by an upstream flush whose staging has not yet been dispatched. `peak_queued_*` are queue
 high-water marks. `block_events` counts transitions into backpressure, while `total_blocked_us`
-includes both completed waits and the currently active wait. Packet/byte capacities are `0` when
-unbounded.
+includes both completed waits and the currently active wait. `packet_capacity` is `0` when
+unbounded; byte values are diagnostic only.
+
+The engine also reports internal backpressure through the configured log callback. Events 1, 2,
+4, 8, ... emit a warning with producer, consumer port, effective capacity, queued, reserved, and
+incoming packet counts. When that warned event clears, an info message reports the blocked
+duration. A terminal stall error includes the same queue-level context.
 
 ```c
 int64_t      lmflow_graph_counter_value(LMFlowGraph*, const char* name);
