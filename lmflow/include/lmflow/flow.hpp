@@ -27,8 +27,13 @@ namespace lmflow {
  * 平台 ABI 内是稳定字符串。本项目里 C++ 算子编在 core、Python 绑定在另一个 .so,
  * 天然就是跨产物场景,所以从一开始就用稳定方案 —— 事后再改需要全量重编。
  *
- * 修饰名跨编译器仍可能不同(Itanium ABI 的 GCC/Clang 一致,MSVC 不同)。
- * 需要跨工具链稳定时,用 LMFLOW_DECLARE_TYPE_NAME(T, "your.stable.name") 显式指定。 */
+ * 但**跨编译器就不保证了**,而且分歧比「修饰方案不同」更彻底:Itanium ABI(GCC/Clang)
+ * 下 typeid(int).name() 是 "i",而 **MSVC 的 type_info::name() 返回的是未修饰的可读名** ——
+ * "int"、"struct Foo"(修饰形式在另一个 raw_name() 上)。所以两边压根不是同一种命名方案,
+ * FNV("i") 与 FNV("int") 毫不相干。
+ * 需要跨工具链稳定时,**必须**用 LMFLOW_DECLARE_TYPE_NAME(T, "your.stable.name") 显式指定。
+ * cpp/tests/flow_hpp_test.cc 把 TypeId<int>() 钉在了 Itanium 的值上,故换编译器时这条会
+ * 明确失败 —— 那是有意的信号,不是测试写坏了。 */
 constexpr uint64_t Fnv1a(const char* s) {
   uint64_t h = 14695981039346656037ULL;
   while (*s) {
