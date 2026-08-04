@@ -807,6 +807,12 @@ The engine also reports internal backpressure through the configured log callbac
 incoming packet counts. When that warned event clears, an info message reports the blocked
 duration. A terminal stall error includes the same queue-level context.
 
+Rust hosts can additionally call `Input::backpressure_stats()` for global-watermark waits and
+`Poller::backpressure_stats()` for bounded-Poller waits and drops. Both snapshots expose active
+waiters, block events, current/cumulative blocked time, and the relevant capacity/queue context.
+`graph.dump()` includes matching `watermark` and `poller` diagnostic lines. The same information is
+reported through exponentially rate-limited WARN messages and matching recovery INFO messages.
+
 ```c
 int64_t      lmflow_graph_counter_value(LMFlowGraph*, const char* name);
 size_t       lmflow_graph_counter_count(LMFlowGraph*);

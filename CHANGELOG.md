@@ -12,6 +12,10 @@ to each GitHub Release.
 
 ### Added
 
+- **Global-watermark and Poller backpressure diagnostics.** Rust input and Poller handles expose
+  active waiters, event counts, and blocked durations. Exponentially rate-limited WARN/INFO logs
+  and graph dumps include port, policy, capacity, occupancy, timeout, and drop context; reset clears
+  the new runtime statistics.
 - **Actionable internal backpressure diagnostics.** Exponentially rate-limited WARN messages now
   identify the producer, consumer port, effective capacity, queue occupancy, reservations, and
   incoming batch. Matching INFO messages report recovery duration, while terminal stall errors

@@ -147,6 +147,35 @@ impl GraphInner {
                 e.is_closed(),
                 e.dropped_count()
             ));
+            if e.is_graph_input {
+                let watermark = e.watermark_backpressure.snapshot(self.epoch_us());
+                s.push_str(&format!(
+                    "  watermark limit={} queued={} blocked={} waiters={} events={} total={}us\n",
+                    self.shared.config.max_queued_packets,
+                    self.shared.total_queued(),
+                    watermark.blocked,
+                    watermark.active_waiters,
+                    watermark.block_events,
+                    watermark.total_blocked_us,
+                ));
+            }
+            for poller in e.pollers.lock().expect("poller list lock poisoned").iter() {
+                let block = poller.block_backpressure.snapshot(self.epoch_us());
+                let queued = poller.queue.lock().expect("poller lock poisoned").len();
+                s.push_str(&format!(
+                    "  poller policy={:?} capacity={} queued={} dropped={} blocked={} waiters={} events={} total={}us\n",
+                    poller.overflow,
+                    poller
+                        .capacity
+                        .map_or_else(|| "unbounded".to_string(), |value| value.to_string()),
+                    queued,
+                    poller.dropped.load(Ordering::Relaxed),
+                    block.blocked,
+                    block.active_waiters,
+                    block.block_events,
+                    block.total_blocked_us,
+                ));
+            }
         }
         s
     }
