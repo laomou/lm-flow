@@ -194,6 +194,38 @@ pub unsafe extern "C" fn lmflow_register_type_name(type_id: u64, name: *const c_
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn lmflow_register_type_descriptor(
+    type_id: u64,
+    name: *const c_char,
+    size: usize,
+    align: usize,
+) -> i32 {
+    guard(|| {
+        let Some(name) = cstr(name) else {
+            return fail(Error::InvalidArg("type name is empty or not UTF-8".into()));
+        };
+        match packet::register_type_descriptor(type_id, name, size, align) {
+            Ok(()) => code::OK,
+            Err(error) => fail(error),
+        }
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn lmflow_type_size(type_id: u64) -> usize {
+    guard_val(0, || {
+        packet::type_descriptor(type_id).map_or(0, |descriptor| descriptor.size)
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn lmflow_type_align(type_id: u64) -> usize {
+    guard_val(0, || {
+        packet::type_descriptor(type_id).map_or(0, |descriptor| descriptor.align)
+    })
+}
+
+#[no_mangle]
 pub extern "C" fn lmflow_type_name(type_id: u64) -> *const c_char {
     guard_val(c"".as_ptr(), || {
         static A: std::sync::LazyLock<runtime::CStrArena> =

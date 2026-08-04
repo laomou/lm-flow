@@ -126,9 +126,13 @@ const char* lmflow_packet_debug_string(const LMFlowPacket* pkt);
  *  MSVC 不同),需要跨工具链互通时用 LMFLOW_DECLARE_TYPE_NAME 显式指定稳定名。
  *
  *  为让错误信息可读(「期望 Buffer 得到 I64」而不是两个数字),可为 type_id 注册名字。
- *  内建类型的名字由引擎预置。重复注册同一 id 以最后一次为准。 */
+ *  二期类型系统可进一步注册稳定名 + size + align；同一 id/name 的冲突声明会失败。 */
 LMFlowStatus lmflow_register_type_name(uint64_t type_id, const char* name);
+LMFlowStatus lmflow_register_type_descriptor(
+    uint64_t type_id, const char* name, size_t size, size_t align);
 const char* lmflow_type_name(uint64_t type_id); /* 未注册则返回 "type#<id>" 形式 */
+size_t lmflow_type_size(uint64_t type_id);      /* 未注册布局则返回 0 */
+size_t lmflow_type_align(uint64_t type_id);     /* 未注册布局则返回 0 */
 
 /* ---------- 数据类型模型 ----------
  * 引擎对 payload **完全不作解释**:它只搬引用(引用计数 +1/-1)、只在需要时按

@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <exception>
+#include <stdexcept>
 #include <type_traits>
 #include <typeinfo>
 #include <utility>
@@ -54,6 +55,18 @@ inline uint64_t TypeId() {
   return id;
 }
 
+template <typename T>
+inline const char* TypeName() {
+  return typeid(T).name();
+}
+
+template <typename T>
+inline LMFlowStatus RegisterType() {
+  static const LMFlowStatus status =
+      lmflow_register_type_descriptor(TypeId<T>(), TypeName<T>(), sizeof(T), alignof(T));
+  return status;
+}
+
 /* ---------- Status ---------- */
 class Status {
  public:
@@ -78,6 +91,9 @@ class Packet {
 
   template <typename T>
   static Packet Make(T value) {
+    if (RegisterType<T>() != LMFLOW_OK) {
+      throw std::logic_error(lmflow_last_error());
+    }
     Packet p;
     p.raw_.payload = new T(std::move(value));
     p.raw_.type_id = TypeId<T>();
@@ -230,10 +246,16 @@ class Contract {
   void OutputSetAny(size_t i) { lmflow_contract_output_set_any(c_, i); }
   template <typename T>
   void InputSet(size_t i) {
+    if (RegisterType<T>() != LMFLOW_OK) {
+      throw std::logic_error(lmflow_last_error());
+    }
     lmflow_contract_input_set_type(c_, i, TypeId<T>());
   }
   template <typename T>
   void OutputSet(size_t i) {
+    if (RegisterType<T>() != LMFLOW_OK) {
+      throw std::logic_error(lmflow_last_error());
+    }
     lmflow_contract_output_set_type(c_, i, TypeId<T>());
   }
 
@@ -538,6 +560,10 @@ struct KernelAdapter {
   inline uint64_t TypeId<T>() {                                                      \
     static const uint64_t id = NormalizeTypeId(Fnv1a(name_str));                     \
     return id;                                                                       \
+  }                                                                                  \
+  template <>                                                                        \
+  inline const char* TypeName<T>() {                                                 \
+    return name_str;                                                                 \
   }                                                                                  \
   }
 

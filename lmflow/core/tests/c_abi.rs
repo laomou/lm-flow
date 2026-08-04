@@ -58,6 +58,47 @@ fn abi_version_and_handshake() {
     );
 }
 
+#[test]
+fn custom_type_descriptor_registration_is_strict_and_queryable() {
+    let name = cs("lmflow.test.CAbiDescriptor");
+    let conflicting_name = cs("lmflow.test.CAbiDescriptorConflict");
+    let type_id = 0xA1B2_C3D4_E5F6_1701;
+
+    unsafe {
+        assert_eq!(
+            lmflow_register_type_descriptor(type_id, name.as_ptr(), 24, 8),
+            0,
+            "{}",
+            last_error()
+        );
+        assert_eq!(
+            lmflow_register_type_descriptor(type_id, name.as_ptr(), 24, 8),
+            0,
+            "identical registration must be idempotent"
+        );
+        assert_eq!(lmflow_type_size(type_id), 24);
+        assert_eq!(lmflow_type_align(type_id), 8);
+        assert_eq!(
+            CStr::from_ptr(lmflow_type_name(type_id)).to_str().unwrap(),
+            "lmflow.test.CAbiDescriptor"
+        );
+
+        assert_ne!(
+            lmflow_register_type_descriptor(type_id, name.as_ptr(), 32, 8),
+            0,
+            "same id/name with a different layout must fail"
+        );
+        assert!(last_error().contains("already registered"));
+
+        assert_ne!(
+            lmflow_register_type_descriptor(type_id, conflicting_name.as_ptr(), 24, 8),
+            0,
+            "same id with a different name must fail"
+        );
+        assert!(last_error().contains("already registered"));
+    }
+}
+
 /// 与 examples/cpp/hello_world/hello_world_host.cc 等价的完整流程。
 #[test]
 fn full_pipeline_through_c_abi() {

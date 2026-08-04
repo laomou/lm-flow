@@ -9,7 +9,9 @@
 #include <cassert>
 #include <cstdio>
 #include <cstring>
+#include <map>
 #include <stdexcept>
+#include <string>
 
 #include "lmflow/flow.hpp"
 
@@ -70,10 +72,33 @@ struct RetCheckMsgKernel : lmflow::Kernel {
 namespace {
 char g_last_error[512];
 LMFlowContext* const kFakeCtx = reinterpret_cast<LMFlowContext*>(1);
+struct RegisteredType {
+  std::string name;
+  size_t size;
+  size_t align;
+};
+std::map<uint64_t, RegisteredType> g_registered_types;
 }  // namespace
 
 extern "C" void lmflow_ctx_set_error(const LMFlowContext*, const char* msg) {
   std::snprintf(g_last_error, sizeof(g_last_error), "%s", msg ? msg : "");
+}
+
+extern "C" const char* lmflow_last_error() { return g_last_error; }
+
+extern "C" LMFlowStatus lmflow_register_type_descriptor(
+    uint64_t type_id, const char* name, size_t size, size_t align) {
+  const RegisteredType next{name ? name : "", size, align};
+  const auto it = g_registered_types.find(type_id);
+  if (it == g_registered_types.end()) {
+    g_registered_types.emplace(type_id, next);
+    return LMFLOW_OK;
+  }
+  if (it->second.name == next.name && it->second.size == size && it->second.align == align) {
+    return LMFLOW_OK;
+  }
+  std::snprintf(g_last_error, sizeof(g_last_error), "conflicting custom type descriptor");
+  return LMFLOW_ERR_INVALID_ARG;
 }
 
 LMFLOW_DECLARE_TYPE_NAME(StableType, "lmflow.test.Stable")
@@ -103,7 +128,12 @@ void test_type_id() {
   assert(lmflow::TypeId<PlainType>() >= 16);
   assert(lmflow::TypeId<StableType>() >= 16);
 
-  // 6) **真正的跨语言互操作断言**(前面几条都做不到这件事)。
+  // 6) 二期类型描述符把名字与布局一起注册。同一声明幂等,同名但布局不同会失败。
+  assert(lmflow::RegisterType<StableType>() == LMFLOW_OK);
+  assert(lmflow::RegisterType<StableType>() == LMFLOW_OK);
+  assert(lmflow::RegisterType<AlsoStable>() == LMFLOW_ERR_INVALID_ARG);
+
+  // 7) **真正的跨语言互操作断言**(前面几条都做不到这件事)。
   //
   // `core/src/packet.rs` 的 `fnv1a_matches_cpp_sugar_layer` 断言的是「Rust 对字符串
   // "i" 的哈希 == 某常量」—— 那只钉住了**哈希函数**,在任何编译器上都同样通过。
