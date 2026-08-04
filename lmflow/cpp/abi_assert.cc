@@ -52,6 +52,10 @@ static_assert(LMFLOW_MAX_DIMS == 8, "changing LMFLOW_MAX_DIMS alters LMFlowBuffe
 
 static_assert(offsetof(LMFlowInputQueueStats, struct_size) == 0,
               "LMFlowInputQueueStats::struct_size must remain first");
+static_assert(offsetof(LMFlowWatermarkBackpressureStats, struct_size) == 0,
+              "LMFlowWatermarkBackpressureStats::struct_size must remain first");
+static_assert(offsetof(LMFlowPollerBackpressureStats, struct_size) == 0,
+              "LMFlowPollerBackpressureStats::struct_size must remain first");
 
 #endif /* 64-bit */
 

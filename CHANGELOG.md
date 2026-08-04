@@ -12,6 +12,9 @@ to each GitHub Release.
 
 ### Added
 
+- **C/C++ and Python backpressure snapshots.** Input handles expose global-watermark wait
+  statistics, while Poller handles expose capacity, policy, queue, drop, and Block-wait
+  statistics through struct-size-guarded C ABI records, C++ helpers, and Python dictionaries.
 - **Global-watermark and Poller backpressure diagnostics.** Rust input and Poller handles expose
   active waiters, event counts, and blocked durations. Exponentially rate-limited WARN/INFO logs
   and graph dumps include port, policy, capacity, occupancy, timeout, and drop context; reset clears
@@ -110,6 +113,9 @@ to each GitHub Release.
 
 ### Fixed
 
+- **Rare pool-drain false stall.** A claimed `max_in_flight` invocation is now counted before it
+  leaves the node scheduler lock, closing a tiny window where `wait_done` could observe the pool as
+  idle and incorrectly report unclosed nodes.
 - **`cmake/engine.cmake` picked the wrong cargo profile under multi-config generators.**
   `CMAKE_BUILD_TYPE` is only meaningful for single-config generators; with Ninja
   Multi-Config or Visual Studio the configuration is chosen at build time via `--config`.

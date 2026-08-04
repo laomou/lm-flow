@@ -813,6 +813,24 @@ waiters, block events, current/cumulative blocked time, and the relevant capacit
 `graph.dump()` includes matching `watermark` and `poller` diagnostic lines. The same information is
 reported through exponentially rate-limited WARN messages and matching recovery INFO messages.
 
+C and C++ hosts can query the same handle-local snapshots:
+
+```c
+LMFlowWatermarkBackpressureStats input_stats = {
+    .struct_size = sizeof(input_stats),
+};
+lmflow_input_backpressure_stats(input, &input_stats);
+
+LMFlowPollerBackpressureStats poller_stats = {
+    .struct_size = sizeof(poller_stats),
+};
+lmflow_poller_backpressure_stats(poller, &poller_stats);
+```
+
+The C++ header also provides overloaded `lmflow::GetBackpressureStats(handle, &stats)` helpers that
+initialize `struct_size`. Python exposes `input.backpressure_stats()` and
+`poller.backpressure_stats()`, returning dictionaries with the corresponding fields.
+
 ```c
 int64_t      lmflow_graph_counter_value(LMFlowGraph*, const char* name);
 size_t       lmflow_graph_counter_count(LMFlowGraph*);

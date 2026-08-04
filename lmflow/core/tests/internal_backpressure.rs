@@ -562,6 +562,38 @@ output_ports: [out]
 }
 
 #[test]
+fn wait_done_does_not_mistake_claimed_pool_work_for_idle() {
+    register_test_kernels();
+    for round in 0..40 {
+        let graph = Graph::from_yaml(
+            r#"
+executors:
+  - { name: pool, num_threads: 4 }
+nodes:
+  - { name: producer, kernel: PassThrough, input_ports: [in], output_ports: [mid], executor: pool, max_in_flight: 4 }
+  - { name: consumer, kernel: PassThrough, input_ports: [mid], output_ports: [out], executor: pool, max_in_flight: 4 }
+input_ports: [in]
+output_ports: [out]
+"#,
+        )
+        .unwrap();
+        let output = graph.add_poller("out").unwrap();
+        graph.start().unwrap();
+        let input = graph.input("in").unwrap();
+        for timestamp in 0..16 {
+            input
+                .send(Packet::from_i64(timestamp).at(Timestamp(timestamp)))
+                .unwrap();
+        }
+        graph.close_all_inputs();
+        graph
+            .wait_done_timeout(Duration::from_secs(5))
+            .unwrap_or_else(|error| panic!("round {round}: {error}\n{}", graph.dump()));
+        assert_eq!(std::iter::from_fn(|| output.next()).count(), 16);
+    }
+}
+
+#[test]
 fn byte_capacity_fields_are_rejected() {
     register_test_kernels();
     let error = Graph::from_yaml(

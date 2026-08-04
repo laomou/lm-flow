@@ -11,7 +11,10 @@
 
 use std::mem::{align_of, offset_of, size_of};
 
-use lmflow::ffi::{LMFlowBuffer, LMFlowInputQueueStats, LMFlowNodeStats, LMFlowPacket};
+use lmflow::ffi::{
+    LMFlowBuffer, LMFlowInputQueueStats, LMFlowNodeStats, LMFlowPacket,
+    LMFlowPollerBackpressureStats, LMFlowWatermarkBackpressureStats,
+};
 
 #[test]
 fn lmflow_packet_layout() {
@@ -51,6 +54,12 @@ fn flow_node_stats_uses_struct_size_for_forward_compat() {
 fn input_queue_stats_uses_struct_size_for_forward_compat() {
     assert_eq!(offset_of!(LMFlowInputQueueStats, struct_size), 0);
     assert_eq!(size_of::<u32>(), 4);
+}
+
+#[test]
+fn handle_backpressure_stats_use_struct_size_for_forward_compat() {
+    assert_eq!(offset_of!(LMFlowWatermarkBackpressureStats, struct_size), 0);
+    assert_eq!(offset_of!(LMFlowPollerBackpressureStats, struct_size), 0);
 }
 
 #[test]
