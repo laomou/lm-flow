@@ -1477,7 +1477,7 @@ Debug 三个配置做 `ninja -n` 干跑,断言 profile 与 `--config` 一致,并
 | 时间戳单调性校验放在哪层 | 图输入口强制校验;内部边仅 `debug_assertions` 下校验(ADR #23) |
 | 内部边软水位的默认值与告警形式 | 软水位默认取顶层 `max_queue_size`(默认 100);每条边**首次**超限打 WARN,之后按 1/2/4/8… 指数退避,避免日志洪水;深度与丢弃数经 `queue_depth` / `dropped_count` 可查 |
 | `type_id` 是否改稳定方案 | **现在就改**为 FNV-1a(修饰名)+ `LMFLOW_DECLARE_TYPE_NAME` 逃生口(ADR #22) |
-| 生产可观测性 | 已落地:`LMFlowNodeStats`(running / running_for_us / 耗时统计 / **收发包数 / 队列深度峰值**)、DOT 热力图、`watchdog_ms`、算子自报计数器 |
+| 生产可观测性 | 已落地:`LMFlowNodeStats`、逐输入口 `LMFlowInputQueueStats`(当前/峰值包数与字节、reservation、阻塞次数/时长/生产者)、DOT 热力图与背压聚合、`watchdog_ms`、算子自报计数器 |
 | 是否启用 `LMFLOW_TYPE_HOST_OBJECT` | **不启用**(ADR #26) |
 | stream header | **不做**,用 side packet 覆盖(ADR #24) |
 | subgraph 组合 | **已支持**:建图期展开 + `include:` 引外部库(ADR #27,§7.11) |
@@ -1490,6 +1490,7 @@ Debug 三个配置做 `ninja -n` 干跑,断言 profile 与 `--config` 一致,并
 |---|---|---|
 | `LMFlowBuffer` | 固定 `reserved` 字段 | 在**热路径**上、形状稳定(对齐 numpy buffer protocol),固定布局便于零开销传递 |
 | `LMFlowNodeStats` | 入参 `struct_size` | **诊断用**、字段天然会持续增加;调用方填 `sizeof`。引擎写出完整结构体,故 `struct_size` 偏小时**明确失败**(溢出护栏)—— 字段增加后老宿主重编即可,拿到的是干净报错而非内存损坏 |
+| `LMFlowInputQueueStats` | 入参 `struct_size` | 同属诊断快照,独立于节点统计扩展,避免每增加端口级指标就膨胀 `LMFlowNodeStats` |
 
 ### 15.2 实现阶段的验证结果
 

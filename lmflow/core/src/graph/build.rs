@@ -24,7 +24,8 @@ use crate::status::{Error, Result};
 use crate::timestamp::Timestamp;
 
 use super::{
-    Activity, Edge, EdgeId, GraphInner, InputPolicy, Node, NodeSched, NodeStats, OnError, State,
+    Activity, Edge, EdgeId, GraphInner, InputPolicy, InputQueueStats, Node, NodeSched, NodeStats,
+    OnError, State,
 };
 
 // ---------------------------------------------------------------- 构建与校验
@@ -318,6 +319,7 @@ impl GraphInner {
                 input_queue_reserved: (0..ins.len()).map(|_| AtomicUsize::new(0)).collect(),
                 input_queue_reserved_bytes: (0..ins.len()).map(|_| AtomicU64::new(0)).collect(),
                 input_queue_bytes: (0..ins.len()).map(|_| AtomicU64::new(0)).collect(),
+                input_queue_stats: (0..ins.len()).map(|_| InputQueueStats::default()).collect(),
                 input_closed: (0..ins.len()).map(|_| AtomicBool::new(false)).collect(),
                 on_error: OnError::from_config(&n.on_error),
                 min_period: if n.rate > 0.0 {
