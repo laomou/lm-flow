@@ -39,7 +39,9 @@ constexpr uint64_t Fnv1a(const char* s) {
 }
 
 /// 内建类型占用 0..15,自定义类型标识必须避开这一段。
-inline uint64_t NormalizeTypeId(uint64_t h) { return h < 16 ? h + 16 : h; }
+/// `constexpr`(而非仅 `inline`):这样 `cpp/abi_assert.cc` 能用 `static_assert`
+/// 在**编译期**把「与 Rust 侧 `fnv1a_type_id` 同算法」这条钉死。
+constexpr uint64_t NormalizeTypeId(uint64_t h) { return h < 16 ? h + 16 : h; }
 
 template <typename T>
 inline uint64_t TypeId() {

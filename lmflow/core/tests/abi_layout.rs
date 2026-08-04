@@ -89,6 +89,43 @@ fn builtin_type_ids_match_header() {
     assert_eq!(type_id::HOST_OBJECT, 7);
 }
 
+/// `type_id` 的哈希算法:C++ 与 Rust **各有一份独立手写实现**,必须同结果。
+///
+/// ADR #22:`type_id` = FNV-1a(修饰名),0..15 让给内建类型。C++ 在 `flow.hpp` 的
+/// `Fnv1a` + `NormalizeTypeId`,Rust 在 `packet::fnv1a_type_id`。任何一侧动了 offset
+/// basis、乘子、或那个 `< 16` 的规避分支,跨语言类型校验就会**静默失配** —— 同一个类型
+/// 在两边算出不同 id,契约检查形同虚设,而且不会有任何报错。
+///
+/// 故把同一个字面量在两侧钉死:这里运行期断言,`cpp/abi_assert.cc` 编译期 `static_assert`,
+/// 取的是同一个数。期望值由第三方实现(Python)独立算出,不是从任一侧抄来的。
+#[test]
+fn type_id_hash_matches_cpp_side() {
+    use lmflow::packet::fnv1a_type_id;
+
+    // 与 cpp/abi_assert.cc 的 static_assert 同一个常量。
+    assert_eq!(
+        fnv1a_type_id("lmflow.test.Stable"),
+        0xBFB5_31B2_8317_9309,
+        "Rust 侧 FNV-1a 与 C++ 侧不再一致 —— 跨语言 type_id 会静默失配"
+    );
+
+    // 修饰名示例:Itanium ABI 下 `int` 的 typeid().name() 是 "i"、`double` 是 "d"。
+    // 这两条钉的是「同一个字符串两侧必得同一个数」,故值同样由 Python 独立算出。
+    assert_eq!(fnv1a_type_id("i"), 0xAF63_E44C_8601_FA24);
+    assert_eq!(fnv1a_type_id("d"), 0xAF63_D94C_8601_E773);
+
+    // 内建区(0..15)必须被规避:自定义标识永不落进去。
+    // 直接构造小哈希不可行(64 位 FNV 撞进 0..15 的概率约 1e-18),故改为
+    // 大量取样都 >= 16 —— 配合 C++ 侧对 NormalizeTypeId(0/15/16/17) 的编译期断言,
+    // 两处合起来覆盖了这条规则的边界与实效。
+    for i in 0..2000 {
+        assert!(
+            fnv1a_type_id(&format!("lmflow.sample.{i}")) >= 16,
+            "自定义 type_id 不得落入内建区 0..15"
+        );
+    }
+}
+
 #[test]
 fn dtype_ids_and_sizes_match_header() {
     use lmflow::packet::{dtype, dtype_size};

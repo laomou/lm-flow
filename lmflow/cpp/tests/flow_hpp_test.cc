@@ -13,6 +13,21 @@
 
 #include "lmflow/flow.hpp"
 
+/* ---------- type_id 与 LMFLOW_DECLARE_TYPE_NAME(ADR #22)----------
+ * 默认 type_id 取自**修饰名**,那是跨编译器可能不同的东西(GCC/Clang 走 Itanium ABI
+ * 一致,MSVC 不同)。`LMFLOW_DECLARE_TYPE_NAME` 是官方逃生口,但此前**没有任何测试
+ * 钉住它** —— 于是「宏悄悄变成 no-op」或「哈希算法被改」都不会有人发现,而后果是
+ * 跨工具链混用算子时类型校验静默失配。下面几条就是补这个。 */
+struct PlainType {
+  int x;
+};
+struct StableType {
+  int x;
+};
+struct AlsoStable {  // 与 StableType 不同的类型,但声明同一个稳定名
+  double y;
+};
+
 namespace {
 
 // 构造函数抛异常(如打开设备失败):create 必须接住并返回 nullptr。
@@ -61,6 +76,35 @@ extern "C" void lmflow_ctx_set_error(const LMFlowContext*, const char* msg) {
   std::snprintf(g_last_error, sizeof(g_last_error), "%s", msg ? msg : "");
 }
 
+LMFLOW_DECLARE_TYPE_NAME(StableType, "lmflow.test.Stable")
+LMFLOW_DECLARE_TYPE_NAME(AlsoStable, "lmflow.test.Stable")
+
+namespace {
+void test_type_id() {
+  // 1) 声明了稳定名 → id 由**该字符串**决定,与修饰名无关。
+  //    常量与 cpp/abi_assert.cc 的 static_assert、tests/abi_layout.rs 的断言同一个数。
+  assert(lmflow::TypeId<StableType>() == 0xBFB531B283179309ULL);
+
+  // 2) **证明宏真的生效了**:若它悄悄变成 no-op,这里就会等于修饰名算出的值。
+  //    这条是本组测试的关键 —— 只断言 (1) 的话,一个 no-op 宏也可能巧合通过。
+  assert(lmflow::TypeId<StableType>() !=
+         lmflow::NormalizeTypeId(lmflow::Fnv1a(typeid(StableType).name())));
+
+  // 3) 未声明稳定名的类型:id 就是修饰名的哈希 —— 这正是**跨编译器不稳定**的那一半,
+  //    在此显式写明(而不是断言某个具体数值,那会把测试绑死在一种 ABI 上)。
+  assert(lmflow::TypeId<PlainType>() ==
+         lmflow::NormalizeTypeId(lmflow::Fnv1a(typeid(PlainType).name())));
+
+  // 4) 稳定名即身份:两个**不同的 C++ 类型**声明同一个名字 → 同一个 id。
+  //    这是逃生口的定义性质(跨工具链靠名字对齐,而非靠类型),也是它的风险面。
+  assert(lmflow::TypeId<StableType>() == lmflow::TypeId<AlsoStable>());
+
+  // 5) 自定义标识不得落进内建区 0..15。
+  assert(lmflow::TypeId<PlainType>() >= 16);
+  assert(lmflow::TypeId<StableType>() >= 16);
+}
+}  // namespace
+
 int main() {
   // 1) 构造抛异常:create 返回 nullptr,绝不让异常穿越 extern "C"。
   {
@@ -94,6 +138,8 @@ int main() {
     assert(vt->process(self, nullptr) == LMFLOW_OK);
     vt->destroy(self);
   }
+
+  test_type_id();
 
   std::printf("all flow.hpp unit tests passed\n");
   return 0;

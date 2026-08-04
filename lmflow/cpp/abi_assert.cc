@@ -62,6 +62,29 @@ static_assert(LMFLOW_TS_MAX < LMFLOW_TS_POST_STREAM, "timestamp sentinel orderin
 static_assert(LMFLOW_TS_POST_STREAM < LMFLOW_TS_ONE_OVER_POST_STREAM, "timestamp sentinel ordering is wrong");
 static_assert(LMFLOW_TS_ONE_OVER_POST_STREAM < LMFLOW_TS_DONE, "timestamp sentinel ordering is wrong");
 
+/* ---- type_id 的哈希算法:C++ 与 Rust 各有一份独立实现,必须同结果 ----
+ *
+ * ADR #22:`type_id` = FNV-1a(修饰名),并把 0..15 让给内建类型。C++ 侧在
+ * `flow.hpp` 的 `Fnv1a` + `NormalizeTypeId`,Rust 侧在 `packet.rs` 的
+ * `fnv1a_type_id` —— **两份各自手写的实现**。任何一侧动了常量、乘子或
+ * 那个 `< 16` 的规避分支,跨语言的类型校验就会静默失配(同一个类型在两边
+ * 算出不同 id,契约检查形同虚设)。
+ *
+ * 故把同一个字面量在**两侧**钉死:这里编译期 `static_assert`,Rust 侧
+ * `tests/abi_layout.rs` 运行期 `assert_eq!`,取的是同一个数。
+ * 期望值由第三方实现(Python)独立算出,不是从任一侧抄来的。 */
+static_assert(lmflow::Fnv1a("") == 14695981039346656037ULL,
+              "FNV-1a 64 位 offset basis 变了 —— 与 Rust 侧 fnv1a_type_id 不再一致");
+static_assert(lmflow::NormalizeTypeId(lmflow::Fnv1a("lmflow.test.Stable")) ==
+                  0xBFB531B283179309ULL,
+              "type_id 哈希结果变了 —— 必须与 tests/abi_layout.rs 的同名常量同步");
+
+/* 内建区规避:0..15 留给内建类型,自定义标识不得落进去。 */
+static_assert(lmflow::NormalizeTypeId(0) == 16, "NormalizeTypeId must lift 0 out of the builtin range");
+static_assert(lmflow::NormalizeTypeId(15) == 31, "NormalizeTypeId must lift 15 out of the builtin range");
+static_assert(lmflow::NormalizeTypeId(16) == 16, "NormalizeTypeId must leave 16 alone");
+static_assert(lmflow::NormalizeTypeId(17) == 17, "NormalizeTypeId must leave 17 alone");
+
 /* ---- 保持糖层宏路径处于编译状态(不参与运行,仅编译期覆盖)---- */
 namespace {
 class AbiProbeKernel : public lmflow::Kernel {
