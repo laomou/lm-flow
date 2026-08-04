@@ -556,23 +556,21 @@ void lmflow_graph_free(LMFlowGraph*); /* 内部先 cancel + wait,再释放 */
 /* ---------- 图输入 ----------
  * 句柄式为热路径推荐用法(免去每包按名字查表);句柄生命周期随 graph,无需释放。
  * ---- 背压策略(重要)----
- * **只有图输入口是限流点;图内部的边不对生产者施加背压。**
+ * 图输入口可由全局包数水位限流;内部边可由节点 input_queues.packets 限流。
  *   - max_queue_size(默认 100)**只是软水位**,对图输入口与内部边一视同仁:
  *     仅告警(指数退避)+ 可用 lmflow_graph_queue_depth 观测,**不阻塞任何人**。
- *   - 唯一的硬机制是**全局水位** max_queued_packets / max_queued_bytes,它把压力
+ *   - 全局硬机制是**包数水位** max_queued_packets,它把压力
  *     转化为**图输入口**背压:满时 lmflow_input_send 等排水,lmflow_input_try_send
- *     立即返回 LMFLOW_ERR_WOULD_BLOCK。⚠ 两者**默认都是 0 = 不限** —— 不显式配置时
- *     内存没有任何上界,只有 depth 100 时的一条 WARN。
- *   - 内部边(节点→节点):不阻塞生产者。要给某个节点的输入口设硬上界,用
- *     input_policy: fixed_size(有界 + 满则丢最旧,**按节点输入口**而非按边)。
+ *     立即返回 LMFLOW_ERR_WOULD_BLOCK。默认 0 = 不限。
+ *   - 内部边可用 input_queues.packets 做无损协作式背压,或用 input_policy:
+ *     fixed_size 做有损固定队列。
  *
  * 为什么内部边不设硬上界:否则「扇出后再汇合」的合法 DAG 会死锁 ——
  *      A ─┬─► B(慢) ─┐
  *         └─► C(快) ─┴─► D
  *   C 迅速填满 D 的输入队列而阻塞,D 却要等 B 那一路才能消费,B 又等 A 推进,
  *   A 已阻塞在 C 上 —— 循环等待,且不需要环形拓扑就会发生。
- *   生产者永不阻塞在内部边上,循环等待即无从形成;
- *   内存总量则由图输入口的限流 + DAG 有界的扇出倍数间接约束。 */
+ *   因此内部无损背压不会阻塞 worker:生产者保留 staging 后让出线程,下游出队后恢复。 */
 LMFlowInput* lmflow_graph_input(LMFlowGraph*, const char* port);
 LMFlowStatus lmflow_input_send(LMFlowInput*, LMFlowPacket pkt);
 LMFlowStatus lmflow_input_try_send(LMFlowInput*, LMFlowPacket pkt);
@@ -660,26 +658,22 @@ const char* lmflow_graph_last_error(LMFlowGraph*);
  * 默认内部边不限容量。需要逐节点无损限制时,在 YAML 节点上设置:
  *     input_queues:
  *       packets: 8
- *       bytes: 67108864
  *       ports:
- *         video: { packets: 2, bytes: 16777216 }
- *         metadata: { packets: 32, bytes: 1048576 }
- *         control: { packets: 0, bytes: 0 }
- * 默认值作用于每个正向输入口;端口覆盖中省略的维度继承默认值,显式 0 = 不限。
+ *         video: { packets: 2 }
+ *         metadata: { packets: 32 }
+ *         control: { packets: 0 }
+ * 默认值作用于每个正向输入口;端口覆盖替换默认值,显式 0 = 不限。
  * 满时生产者保留已完成输出并让出 worker,下游出队后恢复,因此不会用「阻塞 worker」
  * 的方式把 diamond 图锁死。不可与有损 input_policy: fixed_size 同时使用。
- * 字节硬限使用 payload 浅尺寸,并计入仍在 staging 的预留。
- * 不可计量的非空 payload 在字节硬限端口上会报错,不会按 0 字节绕过限制。
  *
  * 因此给整张图一个总预算(YAML 顶层):
  *     max_queued_packets: 500          # 全图在途包数上限(0 = 不限)
- *     max_queued_bytes:   1073741824   # 或按字节(0 = 不限)
  * 超限时**把压力转化成图输入口的背压**:lmflow_input_send 阻塞、try_send 返回
  * LMFLOW_ERR_WOULD_BLOCK。只在图输入口刹车是安全的 —— 它在图内没有上游,
  * 不可能参与循环等待,所以这个兜底不会把 diamond 死锁带回来。
  *
- * Poller 队列也计入这两个统计。已注册 type descriptor 的自定义 payload 按其
- * 固定对象 size 计量(浅尺寸,不含对象内部另行分配的堆内存);未注册布局仍计 0。 */
+ * Poller 队列也计入包数与字节统计。字节数是 payload 浅尺寸诊断值,不参与容量限制;
+ * 已注册 type descriptor 的自定义 payload 按固定对象 size 计量,未注册布局仍计 0。 */
 size_t lmflow_graph_total_queued(LMFlowGraph*);         /* 全图在途包数 */
 uint64_t lmflow_graph_total_queued_bytes(LMFlowGraph*); /* 仅可计量部分之和 */
 
@@ -749,8 +743,9 @@ typedef struct {
 
 bool lmflow_graph_node_stats(LMFlowGraph*, size_t node_idx, LMFlowNodeStats* out);
 
-/* 节点单个输入口的无损背压统计。capacity 为 0 表示对应维度不限。
- * queued_* 是已经入队的量;reserved_* 是上游已预留、仍保留在 staging 的量。
+/* 节点单个输入口的无损背压统计。packet_capacity 为 0 表示不限。
+ * queued_* 是已经入队的量;reserved_packets 是上游已预留、仍保留在 staging 的量。
+ * queued_bytes / peak_queued_bytes 仅作 payload 浅尺寸诊断,不参与容量限制。
  * blocked_for_us 是当前连续阻塞时长;total_blocked_us 包含当前这段。 */
 typedef struct {
   uint32_t struct_size; /* 入参:sizeof(LMFlowInputQueueStats) */
@@ -759,11 +754,9 @@ typedef struct {
   const char* port_name;
   const char* producer_name; /* 图输入直接生产时为空串 */
   size_t packet_capacity;
-  uint64_t byte_capacity;
   size_t queued_packets;
   uint64_t queued_bytes;
   size_t reserved_packets;
-  uint64_t reserved_bytes;
   size_t peak_queued_packets;
   uint64_t peak_queued_bytes;
   bool blocked;

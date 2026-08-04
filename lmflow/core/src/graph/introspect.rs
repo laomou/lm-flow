@@ -57,7 +57,6 @@ impl GraphInner {
         let queued_packets = node.queue_len(port);
         let queued_bytes = node.input_queue_bytes[port].load(Ordering::SeqCst);
         let reserved_packets = node.input_queue_reserved[port].load(Ordering::SeqCst);
-        let reserved_bytes = node.input_queue_reserved_bytes[port].load(Ordering::SeqCst);
         let since = stats.blocked_since_us.load(Ordering::SeqCst);
         let blocked_for_us = if since == 0 {
             0
@@ -74,11 +73,9 @@ impl GraphInner {
             port_name,
             producer_name,
             packet_capacity: node.input_queue_capacity[port],
-            byte_capacity: node.input_queue_byte_capacity[port],
             queued_packets,
             queued_bytes,
             reserved_packets,
-            reserved_bytes,
             peak_queued_packets: stats.peak_packets.load(Ordering::Relaxed),
             peak_queued_bytes: stats.peak_bytes.load(Ordering::Relaxed),
             blocked: since != 0,
@@ -125,24 +122,22 @@ impl GraphInner {
             ));
             for port in 0..self.nodes[i].input_queues.len() {
                 let queue = self.input_queue_stats(i, port).expect("input port exists");
-                if queue.packet_capacity.is_some()
-                    || queue.byte_capacity.is_some()
-                    || queue.block_events != 0
-                {
-                    s.push_str(&format!(
-                        "  input `{}` queued={}/{}B reserved={}/{}B peak={}/{}B blocked={} events={} total={}us\n",
-                        queue.port_name,
-                        queue.queued_packets,
-                        queue.queued_bytes,
-                        queue.reserved_packets,
-                        queue.reserved_bytes,
-                        queue.peak_queued_packets,
-                        queue.peak_queued_bytes,
-                        queue.blocked,
-                        queue.block_events,
-                        queue.total_blocked_us,
-                    ));
-                }
+                let capacity = queue
+                    .packet_capacity
+                    .map_or_else(|| "unbounded".to_string(), |value| value.to_string());
+                s.push_str(&format!(
+                    "  input `{}` capacity={} packets queued={}/{}B reserved={} peak={}/{}B blocked={} events={} total={}us\n",
+                    queue.port_name,
+                    capacity,
+                    queue.queued_packets,
+                    queue.queued_bytes,
+                    queue.reserved_packets,
+                    queue.peak_queued_packets,
+                    queue.peak_queued_bytes,
+                    queue.blocked,
+                    queue.block_events,
+                    queue.total_blocked_us,
+                ));
             }
         }
         for e in &self.edges {

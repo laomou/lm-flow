@@ -271,7 +271,7 @@ to an observer callback is **borrowed** — you must not. The observer runs on w
 dispatched the packet, possibly a pool thread, so it must be thread-safe; and it must not call back
 into `lmflow_graph_*`.
 
-Poller queues contribute to the graph's packet/byte watermark counters. The legacy
+Poller queues contribute to the graph's packet watermark and packet/byte diagnostic counters. The legacy
 `lmflow_graph_add_poller` remains unbounded for compatibility. A bounded Poller supports:
 
 | Policy | Behavior at capacity |
@@ -688,7 +688,6 @@ input_ports: []
 output_ports: ["boxes"]
 max_queue_size: 100
 max_queued_packets: 500
-max_queued_bytes: 268435456
 watchdog_ms: 5000
 stats_timing: true
 ```
@@ -697,28 +696,25 @@ Node fields: `name`, `kernel` (or `type` for a subgraph instance), `input_ports`
 `executor`, `max_in_flight`, `options`, `input_policy`, `input_queues`, `back_edges`, `on_error`,
 `rate`.
 
-`input_queues.packets` and `input_queues.bytes` are the node defaults. `ports` overrides individual
-dimensions by input-port name; an omitted dimension inherits the default, while an explicit `0`
-disables that limit:
+`input_queues.packets` is the node default. `ports` overrides it by input-port name; an omitted port
+inherits the default, while an explicit `0` disables the limit:
 
 ```yaml
 input_queues:
   packets: 8
-  bytes: 67108864
   ports:
-    video: { packets: 2, bytes: 16777216 }
-    metadata: { packets: 32, bytes: 1048576 }
-    control: { packets: 0, bytes: 0 }
+    video: { packets: 2 }
+    metadata: { packets: 32 }
+    control: { packets: 0 }
 ```
 
 A full queue pauses the producer with its completed output retained, but releases the executor
-thread; dequeue resumes the pending flush. Byte capacity counts the shallow payload size of queued
-packets plus pending staging reservations. Builtin payloads and registered fixed-layout foreign
-types are measurable; an unmeasurable non-empty payload is rejected when its destination has a byte
-limit. Do not combine `input_queues` limits with lossy `input_policy: fixed_size`.
+thread; dequeue resumes the pending flush. Do not combine `input_queues` limits with lossy
+`input_policy: fixed_size`. Queue byte counters remain available for diagnostics, but bytes do not
+participate in capacity enforcement.
 
 Graph fields: `executors`, `nodes`, `subgraphs`, `include`, `input_ports`, `output_ports`,
-`max_queue_size`, `max_queued_packets`, `max_queued_bytes`, `watchdog_ms`, `stats_timing`.
+`max_queue_size`, `max_queued_packets`, `watchdog_ms`, `stats_timing`.
 
 ### Input policies
 

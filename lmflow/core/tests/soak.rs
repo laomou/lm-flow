@@ -8,9 +8,9 @@
 //!
 //!   **RSS 的增长被水位约束,而不是被总吞吐量约束。**
 //!
-//! 全程推 `PACKETS × 128 KiB` 的数据(默认 250 MiB)穿过一个 4 MiB 的字节水位。
+//! 全程推 `PACKETS × 128 KiB` 的数据(默认 250 MiB)穿过一个 32 包的全局水位。
 //! 若有泄漏,RSS 会跟着**总吞吐**涨(几百 MiB);若水位真的有效,RSS 只会在
-//! 「基线 + 水位 + 常数开销」附近平掉。两者相差两个数量级,信号不可能看错。
+//! 「基线 + 约 4 MiB payload + 常数开销」附近平掉。两者相差两个数量级,信号不可能看错。
 //!
 //! 默认 `#[ignore]` —— 长跑不该拖慢常规 `cargo test`。跑法:
 //!
@@ -34,8 +34,8 @@ use lmflow::{register_kernel, BufferData, Builtin, Graph, Kernel, KernelCtx, Pac
 
 /// 每包 payload 大小。要足够大,才能让「泄漏」与「常数开销」在 RSS 上区分得开。
 const PACKET_BYTES: usize = 128 * 1024;
-/// 全局字节水位。128 KiB × 32 = 4 MiB,故队列最多积 ~32 个包。
-const MAX_QUEUED_BYTES: u64 = 4 * 1024 * 1024;
+/// 全局包数水位。每包 128 KiB,32 包约对应 4 MiB payload。
+const MAX_QUEUED_PACKETS: usize = 32;
 /// 默认包数(CI 友好:约 250 MiB 吞吐、数秒)。可用环境变量放大。
 const DEFAULT_PACKETS: usize = 2000;
 /// diamond 用**按个数**的水位(字节水位对 Native/Foreign payload 计 0,只对内建有效)。
@@ -138,7 +138,7 @@ nodes:
   - {{ name: "c", kernel: "SoakSlowConsumer", executor: "cpu", input_ports: ["in"], output_ports: [] }}
 input_ports: ["in"]
 max_queue_size: 100000
-max_queued_bytes: {MAX_QUEUED_BYTES}
+max_queued_packets: {MAX_QUEUED_PACKETS}
 "#
     );
 
@@ -155,6 +155,7 @@ max_queued_bytes: {MAX_QUEUED_BYTES}
     let baseline = rss_kb();
 
     let mut curve: Vec<u64> = Vec::new();
+    let mut peak_queued: usize = 0;
     let mut peak_queued_bytes: u64 = 0;
     let sample_every = (n / 20).max(1);
 
@@ -163,6 +164,7 @@ max_queued_bytes: {MAX_QUEUED_BYTES}
             .send(big_packet(i))
             .unwrap_or_else(|e| panic!("send #{i} failed: {e}"));
 
+        peak_queued = peak_queued.max(shared.total_queued());
         peak_queued_bytes = peak_queued_bytes.max(shared.total_queued_bytes());
         if i % sample_every == 0 {
             if let Some(kb) = rss_kb() {
@@ -178,17 +180,17 @@ max_queued_bytes: {MAX_QUEUED_BYTES}
 
     let pushed_mib = (n as u64 * PACKET_BYTES as u64) / (1024 * 1024);
     println!("soak: {n} packets × {PACKET_BYTES} B = {pushed_mib} MiB pushed");
+    println!("soak: peak total_queued = {peak_queued} packets (watermark {MAX_QUEUED_PACKETS})");
     println!(
-        "soak: peak total_queued_bytes = {} KiB (watermark {} KiB)",
+        "soak: observed peak total_queued_bytes = {} KiB",
         peak_queued_bytes / 1024,
-        MAX_QUEUED_BYTES / 1024
     );
 
     // ---- 断言 1:水位真的被撞到了 ----
     // 没有这条,一个「太快跑完、从不积压」的测试也会绿 —— 那就什么都没证明。
     assert!(
-        peak_queued_bytes >= MAX_QUEUED_BYTES / 2,
-        "水位从未被真正压到(峰值 {peak_queued_bytes} B < 半个水位)—— \
+        peak_queued >= MAX_QUEUED_PACKETS / 2,
+        "水位从未被真正压到(峰值 {peak_queued} 包 < 半个水位)—— \
          本次运行没有形成积压,故内存断言不具说服力;请增大 LMFLOW_SOAK_PACKETS \
          或调慢消费者"
     );
@@ -196,13 +198,11 @@ max_queued_bytes: {MAX_QUEUED_BYTES}
     // ---- 断言 2:软水位的超出量有界 ----
     // 水位是 Relaxed 快照读的**软阈值**,允许滞后;但滞后应是「几个包」的量级,
     // 不该是无界的。给 8 个包的宽容度。
-    let slack = 8 * PACKET_BYTES as u64;
+    let slack = 8;
     assert!(
-        peak_queued_bytes <= MAX_QUEUED_BYTES + slack,
-        "积压字节峰值 {} KiB 超出水位 {} KiB 太多(宽容 {} KiB)—— 背压没有真正生效",
-        peak_queued_bytes / 1024,
-        MAX_QUEUED_BYTES / 1024,
-        slack / 1024
+        peak_queued <= MAX_QUEUED_PACKETS + slack,
+        "积压包数峰值 {peak_queued} 超出水位 {MAX_QUEUED_PACKETS} 太多\
+         (宽容 {slack} 包)—— 背压没有真正生效"
     );
 
     // ---- 断言 3:所有包都被处理,无丢失 ----
@@ -223,7 +223,7 @@ max_queued_bytes: {MAX_QUEUED_BYTES}
     // 允许「水位 + 32 MiB」的常数开销(分配器碎片、线程栈、测试自身)。
     // 关键在于这个界与 `n` **无关**:真有泄漏时增长会跟着 pushed_mib 走
     // (默认规模 250 MiB),与这里的上界差两个数量级,不会误判。
-    let allowed_kb = MAX_QUEUED_BYTES / 1024 + 32 * 1024;
+    let allowed_kb = (MAX_QUEUED_PACKETS * PACKET_BYTES / 1024) as u64 + 32 * 1024;
     assert!(
         growth_kb <= allowed_kb,
         "RSS 增长 {growth_kb} KiB 超过允许的 {allowed_kb} KiB。\
@@ -279,12 +279,10 @@ nodes:
     output_ports: []
     input_queues:
       packets: 2
-      bytes: {internal_bytes}
 input_ports: ["in"]
 max_queue_size: 100000
 max_queued_packets: {DIAMOND_MAX_QUEUED_PACKETS}
-"#,
-        internal_bytes = 2 * PACKET_BYTES,
+"#
     );
 
     let graph = Graph::from_yaml(&cfg).unwrap();

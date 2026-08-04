@@ -16,17 +16,16 @@ to each GitHub Release.
   packet/byte occupancy, pending reservations, active producer blocking, block event counts, and
   cumulative blocked time. DOT and graph dumps include aggregate backpressure diagnostics, with
   reset, cancellation, `max_in_flight`, and long-running diamond coverage.
-- **Per-port packet and byte capacities for internal inputs.** The unified `input_queues` object
-  provides node defaults plus per-port packet/byte overrides. Byte limits include pending staging
-  reservations, reject oversized batches, and reject unmeasurable payloads rather than silently
-  treating them as zero bytes.
+- **Per-port packet capacities for internal inputs.** The unified `input_queues` object provides
+  node defaults plus per-port packet overrides. Queue byte occupancy remains observable for
+  diagnostics, but capacity enforcement is intentionally packet-only.
 - **Cooperative lossless backpressure for internal edges.** A node can set `input_queues.packets`
   to bound each forward input queue without blocking executor threads.
   Producers retain completed staging and yield; dequeue resumes the pending flush. Source nodes,
   diamond fanout/join graphs, close output, cancellation, and impossible alignment stalls are
   covered by dedicated tests. The option is mutually exclusive with lossy `fixed_size`.
 - **Bounded Poller queues and complete output accounting.** Poller-retained packets now count
-  toward global packet/byte watermarks. New bounded Pollers support `block`, `drop_oldest`,
+  toward the global packet watermark and packet/byte diagnostic counters. New bounded Pollers support `block`, `drop_oldest`,
   `drop_newest`, and capacity-1 `latest`; lossy policies expose drop counts and warnings.
   Releasing a Poller unregisters it, clears its accounted queue, and wakes blocked producers.
 

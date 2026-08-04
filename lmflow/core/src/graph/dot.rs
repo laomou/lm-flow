@@ -114,7 +114,21 @@ impl GraphInner {
                     COLORS[ei % COLORS.len()].to_string(),
                 ),
             };
-            let mut extra = String::new();
+            let capacities = n
+                .input_queue_capacity
+                .iter()
+                .enumerate()
+                .map(|(port, capacity)| {
+                    let value =
+                        capacity.map_or_else(|| "unbounded".to_string(), |value| value.to_string());
+                    format!("{}={value}", n.in_ports.name(port).unwrap_or("?"))
+                })
+                .collect::<Vec<_>>();
+            let mut extra = if capacities.is_empty() {
+                String::new()
+            } else {
+                format!("\\ncap {}", capacities.join(", "))
+            };
             if with_stats {
                 let st = &n.stats;
                 let processed = st.processed.load(Ordering::Relaxed);
@@ -143,7 +157,7 @@ impl GraphInner {
                         );
                     }
                 }
-                extra = format!(
+                extra.push_str(&format!(
                     "\\n{} pkts · {:.0}µs avg\\nin {} / out {} · peakQ {} / {}B",
                     processed,
                     avg,
@@ -151,7 +165,7 @@ impl GraphInner {
                     st.packets_out.load(Ordering::Relaxed),
                     st.peak_queue_depth.load(Ordering::Relaxed),
                     peak_bytes,
-                );
+                ));
                 if queued_bytes > 0 || block_events > 0 || blocked_ports > 0 {
                     extra.push_str(&format!(
                         "\\nqueue {}B · bp {}× / {}µs",

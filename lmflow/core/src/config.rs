@@ -63,9 +63,6 @@ pub struct InputQueueLimitConfig {
     /// `None` = 继承节点默认值；`Some(0)` = 该端口不限包数。
     #[serde(default)]
     pub packets: Option<usize>,
-    /// `None` = 继承节点默认值；`Some(0)` = 该端口不限字节数。
-    #[serde(default)]
-    pub bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -74,10 +71,7 @@ pub struct InputQueuesConfig {
     /// 所有正向输入口的默认包数容量。0 = 不限。
     #[serde(default)]
     pub packets: usize,
-    /// 所有正向输入口的默认 payload 浅字节容量。0 = 不限。
-    #[serde(default)]
-    pub bytes: u64,
-    /// 按输入口名覆盖；单个维度省略时继承上面的默认值，显式 0 表示不限。
+    /// 按输入口名覆盖；省略时继承上面的默认值，显式 0 表示不限。
     #[serde(default)]
     pub ports: std::collections::BTreeMap<String, InputQueueLimitConfig>,
 }
@@ -104,11 +98,11 @@ pub struct NodeConfig {
     pub options: serde_yaml::Value,
     #[serde(default)]
     pub input_policy: InputPolicyConfig,
-    /// 正向输入口的无损包数/字节容量。
+    /// 正向输入口的无损包数容量。
     ///
     /// 内部生产者遇满不会阻塞 worker，而是保留本次 staging、释放执行线程，
-    /// 等下游弹包后协作式恢复刷新。`packets` / `bytes` 为节点默认值，
-    /// `ports` 按端口覆盖；与有损 `fixed_size` 互斥。
+    /// 等下游弹包后协作式恢复刷新。`packets` 为节点默认值，`ports` 按端口覆盖；
+    /// 与有损 `fixed_size` 互斥。
     #[serde(default)]
     pub input_queues: InputQueuesConfig,
     /// 子图名(ADR #27):非空 = 本节点是该子图的实例,建图期展开内联;与 `kernel` 二选一。
@@ -166,9 +160,6 @@ pub struct GraphConfig {
     /// 全局水位:全图在途包数上限(0 = 不限)
     #[serde(default)]
     pub max_queued_packets: usize,
-    /// 全局水位:全图在途字节上限(0 = 不限;内建 payload 与已注册布局的自定义类型可计)
-    #[serde(default)]
-    pub max_queued_bytes: u64,
     /// 单次算子回调超过该时长即打 WARN(0 = 关闭)
     #[serde(default)]
     pub watchdog_ms: u64,
@@ -202,7 +193,6 @@ impl Default for GraphConfig {
             output_ports: Vec::new(),
             max_queue_size: default_max_queue_size(),
             max_queued_packets: 0,
-            max_queued_bytes: 0,
             watchdog_ms: 0,
             stats_timing: default_true(),
         }
@@ -369,8 +359,7 @@ impl GraphConfig {
                 }
             }
             for (port, limits) in &n.input_queues.ports {
-                if (limits.packets.is_some_and(|capacity| capacity != 0)
-                    || limits.bytes.is_some_and(|capacity| capacity != 0))
+                if limits.packets.is_some_and(|capacity| capacity != 0)
                     && n.back_edges.contains(port)
                 {
                     return Err(Error::InvalidArg(format!(
@@ -380,11 +369,10 @@ impl GraphConfig {
                 }
             }
             let has_lossless_capacity = n.input_queues.packets != 0
-                || n.input_queues.bytes != 0
-                || n.input_queues.ports.values().any(|limits| {
-                    limits.packets.is_some_and(|capacity| capacity != 0)
-                        || limits.bytes.is_some_and(|capacity| capacity != 0)
-                });
+                || n.input_queues
+                    .ports
+                    .values()
+                    .any(|limits| limits.packets.is_some_and(|capacity| capacity != 0));
             if has_lossless_capacity && n.input_policy.r#type == "fixed_size" {
                 return Err(Error::InvalidArg(format!(
                     "node `{who}`: lossless input queue capacities cannot be combined with \
