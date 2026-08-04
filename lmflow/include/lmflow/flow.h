@@ -309,7 +309,10 @@ typedef struct {
 void lmflow_register_builtin_kernels(void);
 
 /* 注册算子。同名重复注册返回 LMFLOW_ERR_INVALID_ARG。
- * vt 须指向静态存储(引擎只保存指针)。 */
+ * 生命周期:引擎在本调用内**按值拷贝** *vt 的内容,返回后不再引用该指针 ——
+ *   故 vt 可以是**栈上临时量**,无需静态存储。
+ *   **factory 例外**:它被长期保存(每次实例化算子时回传给 create/get_contract),
+ *   故须指向静态存储或至少活到图销毁的对象。不用 factory 时传 NULL。 */
 LMFlowStatus lmflow_register_kernel(const char* name, const LMFlowKernelVTable* vt, void* factory);
 
 /* ---------- Contract:在 get_contract 里声明端口类型约束 ----------
