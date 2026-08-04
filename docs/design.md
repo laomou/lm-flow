@@ -750,6 +750,14 @@ emit 的批量若自身大于有效包数容量会明确报错,避免永远无�
 `Poller::backpressure_stats()` 同时提供策略、容量、积压、丢包与 Block 等待统计。
 `graph.dump()` 会输出 `watermark` 与 `poller` 行。Poller 有损策略的 WARN 统一包含输出口、
 策略、容量、当前积压和累计丢包数。reset 会把这些运行期统计全部清零。
+C ABI 对应 `lmflow_input_backpressure_stats` / `lmflow_poller_backpressure_stats`,两者都用
+`struct_size` 防止版本不一致时越界写;Python 的 Input / Poller 句柄提供同名
+`backpressure_stats()` 字典接口。
+
+线程池任务的全局在飞计数必须在**认领仍持节点调度锁时**递增,不能等到提交执行器时才加。
+否则两步之间存在「节点已有 ready 调用、全局计数仍为 0」的假空闲窗口,并发关流时
+`wait_done` 可能误报 nodes not closed。回归测试
+`wait_done_does_not_mistake_claimed_pool_work_for_idle` 高频覆盖该窗口。
 
 ### 7.6 关流与终止
 

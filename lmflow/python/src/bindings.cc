@@ -528,6 +528,24 @@ class Input {
     return true;
   }
   void close() { lmflow_input_close(h_); }
+  py::dict backpressure_stats() const {
+    LMFlowWatermarkBackpressureStats st{};
+    st.struct_size = sizeof(st);
+    if (!lmflow_input_backpressure_stats(h_, &st)) {
+      throw std::runtime_error(std::string("input.backpressure_stats failed: ") +
+                               lmflow_last_error());
+    }
+    py::dict d;
+    d["port_name"] = st.port_name;
+    d["packet_limit"] = st.packet_limit;
+    d["total_queued_packets"] = st.total_queued_packets;
+    d["blocked"] = st.blocked;
+    d["active_waiters"] = st.active_waiters;
+    d["blocked_for_us"] = st.blocked_for_us;
+    d["block_events"] = st.block_events;
+    d["total_blocked_us"] = st.total_blocked_us;
+    return d;
+  }
 
  private:
   LMFlowInput* h_;
@@ -575,6 +593,27 @@ class Poller {
     }
     if (!ok) return py::none();
     return py::cast(new Packet(out, true), py::return_value_policy::take_ownership);
+  }
+
+  py::dict backpressure_stats() const {
+    LMFlowPollerBackpressureStats st{};
+    st.struct_size = sizeof(st);
+    if (!lmflow_poller_backpressure_stats(h_, &st)) {
+      throw std::runtime_error(std::string("poller.backpressure_stats failed: ") +
+                               lmflow_last_error());
+    }
+    py::dict d;
+    d["port_name"] = st.port_name;
+    d["capacity"] = st.capacity == 0 ? py::none() : py::cast(st.capacity);
+    d["overflow_policy"] = st.overflow_policy;
+    d["queued_packets"] = st.queued_packets;
+    d["dropped_packets"] = st.dropped_packets;
+    d["blocked"] = st.blocked;
+    d["active_waiters"] = st.active_waiters;
+    d["blocked_for_us"] = st.blocked_for_us;
+    d["block_events"] = st.block_events;
+    d["total_blocked_us"] = st.total_blocked_us;
+    return d;
   }
 
  private:
@@ -956,6 +995,8 @@ PYBIND11_MODULE(_lmflow, m) {
            "releases the GIL while waiting.")
       .def("try_send", &Input::try_send, py::arg("value"), py::arg("ts") = std::nullopt,
            "Non-blocking send; raises at the watermark instead of blocking.")
+      .def("backpressure_stats", &Input::backpressure_stats,
+           "Return global-watermark backpressure statistics for this input.")
       .def("close", &Input::close, "Close this input port.");
 
   py::class_<Poller>(m, "Poller",
@@ -963,7 +1004,9 @@ PYBIND11_MODULE(_lmflow, m) {
       .def("next", &Poller::next, py::arg("timeout") = std::nullopt,
            "Get the next output packet; None when the graph ends, raises Timeout on timeout. "
            "Releases the GIL while waiting.")
-      .def("try_next", &Poller::try_next, "Non-blocking get; returns None if empty.");
+      .def("try_next", &Poller::try_next, "Non-blocking get; returns None if empty.")
+      .def("backpressure_stats", &Poller::backpressure_stats,
+           "Return bounded-queue backpressure and drop statistics.");
 
   py::class_<Graph>(m, "Graph")
       .def(py::init<>())

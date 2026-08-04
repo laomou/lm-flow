@@ -707,6 +707,30 @@ output_ports: [out]
             g.close_all_inputs()
             g.wait_done(timeout=5.0)
 
+    def test_handle_backpressure_stats(self):
+        with graph(
+            """
+nodes:
+  - { name: p, kernel: PassThroughKernel, input_ports: [in], output_ports: [out] }
+input_ports: [in]
+output_ports: [out]
+max_queued_packets: 4
+"""
+        ) as g:
+            out = g.add_poller("out")
+            inp = g.input("in")
+            input_stats = inp.backpressure_stats()
+            self.assertEqual(input_stats["port_name"], "in")
+            self.assertEqual(input_stats["packet_limit"], 4)
+            self.assertFalse(input_stats["blocked"])
+
+            poller_stats = out.backpressure_stats()
+            self.assertEqual(poller_stats["port_name"], "out")
+            self.assertIsNone(poller_stats["capacity"])
+            self.assertEqual(poller_stats["overflow_policy"], 0)
+            self.assertEqual(poller_stats["queued_packets"], 0)
+            self.assertEqual(poller_stats["dropped_packets"], 0)
+
 
 class TestTimestampSync(unittest.TestCase):
     def test_multi_input_pairs_by_timestamp(self):

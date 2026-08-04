@@ -211,6 +211,62 @@ pub unsafe extern "C" fn lmflow_input_close(i: *mut LMFlowInput) {
     });
 }
 
+#[repr(C)]
+pub struct LMFlowWatermarkBackpressureStats {
+    pub struct_size: u32,
+    pub reserved0: u32,
+    pub port_name: *const c_char,
+    pub packet_limit: usize,
+    pub total_queued_packets: usize,
+    pub blocked: bool,
+    pub reserved1: [u8; 7],
+    pub active_waiters: usize,
+    pub blocked_for_us: u64,
+    pub block_events: u64,
+    pub total_blocked_us: u64,
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lmflow_input_backpressure_stats(
+    i: *mut LMFlowInput,
+    out: *mut LMFlowWatermarkBackpressureStats,
+) -> bool {
+    guard_val(false, || {
+        if out.is_null() {
+            return false;
+        }
+        let declared = (*out).struct_size as usize;
+        if declared < std::mem::size_of::<LMFlowWatermarkBackpressureStats>() {
+            last_error::set(
+                "LMFlowWatermarkBackpressureStats.struct_size too small -- set it to sizeof(LMFlowWatermarkBackpressureStats)",
+            );
+            return false;
+        }
+        let Some(input) = input_ref(i) else {
+            last_error::set("input handle is null");
+            return false;
+        };
+        let stats = input.graph.watermark_backpressure_stats(input.edge);
+        std::ptr::write(
+            out,
+            LMFlowWatermarkBackpressureStats {
+                struct_size: std::mem::size_of::<LMFlowWatermarkBackpressureStats>() as u32,
+                reserved0: 0,
+                port_name: graph_arena().intern(&stats.port_name),
+                packet_limit: stats.packet_limit,
+                total_queued_packets: stats.total_queued_packets,
+                blocked: stats.blocked,
+                reserved1: [0; 7],
+                active_waiters: stats.active_waiters,
+                blocked_for_us: stats.blocked_for_us,
+                block_events: stats.block_events,
+                total_blocked_us: stats.total_blocked_us,
+            },
+        );
+        true
+    })
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn lmflow_input_free(i: *mut LMFlowInput) {
     guard_val((), || {
@@ -362,6 +418,74 @@ unsafe fn poller_ref<'a>(p: *mut LMFlowPoller) -> Option<&'a Poller> {
 #[no_mangle]
 pub unsafe extern "C" fn lmflow_poller_dropped_count(p: *mut LMFlowPoller) -> u64 {
     guard_val(0, || poller_ref(p).map_or(0, Poller::dropped_count))
+}
+
+#[repr(C)]
+pub struct LMFlowPollerBackpressureStats {
+    pub struct_size: u32,
+    pub reserved0: u32,
+    pub port_name: *const c_char,
+    pub capacity: usize,
+    pub overflow_policy: i32,
+    pub reserved1: u32,
+    pub queued_packets: usize,
+    pub dropped_packets: u64,
+    pub blocked: bool,
+    pub reserved2: [u8; 7],
+    pub active_waiters: usize,
+    pub blocked_for_us: u64,
+    pub block_events: u64,
+    pub total_blocked_us: u64,
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lmflow_poller_backpressure_stats(
+    p: *mut LMFlowPoller,
+    out: *mut LMFlowPollerBackpressureStats,
+) -> bool {
+    guard_val(false, || {
+        if out.is_null() {
+            return false;
+        }
+        let declared = (*out).struct_size as usize;
+        if declared < std::mem::size_of::<LMFlowPollerBackpressureStats>() {
+            last_error::set(
+                "LMFlowPollerBackpressureStats.struct_size too small -- set it to sizeof(LMFlowPollerBackpressureStats)",
+            );
+            return false;
+        }
+        let Some(poller) = poller_ref(p) else {
+            last_error::set("poller handle is null");
+            return false;
+        };
+        let stats = poller.backpressure_stats();
+        let overflow_policy = match stats.overflow {
+            crate::graph::PollerOverflow::Block => LMFLOW_POLLER_BLOCK,
+            crate::graph::PollerOverflow::DropOldest => LMFLOW_POLLER_DROP_OLDEST,
+            crate::graph::PollerOverflow::DropNewest => LMFLOW_POLLER_DROP_NEWEST,
+            crate::graph::PollerOverflow::Latest => LMFLOW_POLLER_LATEST,
+        };
+        std::ptr::write(
+            out,
+            LMFlowPollerBackpressureStats {
+                struct_size: std::mem::size_of::<LMFlowPollerBackpressureStats>() as u32,
+                reserved0: 0,
+                port_name: graph_arena().intern(&stats.port_name),
+                capacity: stats.capacity.unwrap_or(0),
+                overflow_policy,
+                reserved1: 0,
+                queued_packets: stats.queued_packets,
+                dropped_packets: stats.dropped_packets,
+                blocked: stats.blocked,
+                reserved2: [0; 7],
+                active_waiters: stats.active_waiters,
+                blocked_for_us: stats.blocked_for_us,
+                block_events: stats.block_events,
+                total_blocked_us: stats.total_blocked_us,
+            },
+        );
+        true
+    })
 }
 
 #[no_mangle]
