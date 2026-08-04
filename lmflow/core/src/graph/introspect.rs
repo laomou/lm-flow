@@ -51,6 +51,15 @@ impl GraphInner {
         node_id: usize,
         port: usize,
     ) -> Option<InputQueueStatsSnapshot> {
+        self.input_queue_stats_at(node_id, port, self.epoch_us())
+    }
+
+    pub(super) fn input_queue_stats_at(
+        &self,
+        node_id: usize,
+        port: usize,
+        now_us: i64,
+    ) -> Option<InputQueueStatsSnapshot> {
         let node = self.nodes.get(node_id)?;
         let port_name = node.in_ports.name(port)?.to_string();
         let stats = node.input_queue_stats.get(port)?;
@@ -61,8 +70,7 @@ impl GraphInner {
         let blocked_for_us = if since == 0 {
             0
         } else {
-            let now = self.epoch.elapsed().as_micros().min(i64::MAX as u128) as i64;
-            now.saturating_sub(since.saturating_sub(1)).max(0) as u64
+            now_us.saturating_sub(since.saturating_sub(1)).max(0) as u64
         };
         let edge = node.inputs[port];
         let producer_name = self.edges[edge]

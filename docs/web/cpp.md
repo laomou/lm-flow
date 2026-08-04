@@ -824,7 +824,8 @@ an already-full sibling from draining is highlighted yellow as `WAITING`; immedi
 are not inferred this way. Healthy edges retain only their port name. Durations automatically use
 microseconds, milliseconds, or seconds; the title shows elapsed time since the current `start`.
 A diagnostics legend explains red/yellow/amber states and dashed Poller subscriptions. SVG output
-also carries hover tooltips with the full node, input-edge, and Poller snapshot.
+also carries hover tooltips with the full node, input-edge, and Poller snapshot. Every duration in
+one statistics-enabled export is calculated from the same snapshot timestamp.
 
 ```c
 int64_t      lmflow_graph_counter_value(LMFlowGraph*, const char* name);

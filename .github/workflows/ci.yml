@@ -57,12 +57,16 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with: { components: rustfmt, clippy }
+      - name: 安装 Graphviz(DOT/SVG 回归)
+        run: sudo apt-get update && sudo apt-get install -y graphviz
       - run: cargo fmt --all -- --check
       # 默认构建 = **纯 Rust 引擎**(不编任何 C++)。这就是 `cargo add lmflow` 拿到的东西,
       # 所以它是第一等公民、先跑。跑得到的测试:单元测试 + abi_layout + rust_kernel(纯 Rust 算子)。
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo build --all-targets
-      - run: timeout 300 cargo test
+      - name: Rust 测试(含 Graphviz SVG 渲染)
+        env: { LMFLOW_REQUIRE_GRAPHVIZ: '1' }
+        run: timeout 300 cargo test
       - name: 默认构建必须真的零 C++
         run: |
           A=target/debug/liblmflow.a

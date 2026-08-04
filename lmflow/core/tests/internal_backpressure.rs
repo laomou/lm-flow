@@ -369,6 +369,26 @@ input_ports: [in, gate]
     assert!(blocked_dot.contains("BLOCKED"));
     assert!(blocked_dot.contains("WAITING for aligned input"));
     assert!(blocked_dot.contains("color=\"#d6a700\""));
+    let blocked_durations = blocked_dot
+        .match_indices("bp 1× / ")
+        .map(|(index, marker)| {
+            let value = &blocked_dot[index + marker.len()..];
+            value
+                .split(['\\', '"', ' '])
+                .next()
+                .expect("backpressure duration follows marker")
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        blocked_durations.len() >= 2,
+        "node and edge should both show the active blocked duration"
+    );
+    assert!(
+        blocked_durations
+            .iter()
+            .all(|duration| duration == &blocked_durations[0]),
+        "one DOT export must format every active blocked duration from the same snapshot: {blocked_durations:?}"
+    );
     assert!(graph.dump().contains("capacity=1 packets"));
     assert!(graph.dump().contains("capacity=unbounded packets"));
     assert!(graph.dump().contains("blocked=true"));
