@@ -133,7 +133,8 @@ void test_type_id() {
   assert(lmflow::RegisterType<StableType>() == LMFLOW_OK);
   assert(lmflow::RegisterType<AlsoStable>() == LMFLOW_ERR_INVALID_ARG);
 
-  // 7) **真正的跨语言互操作断言**(前面几条都做不到这件事)。
+  // 7) 默认类型名跟随编译器 ABI。这里分别钉住当前支持的两套命名规则,防止
+  //    `typeid(T).name()` 行为变化后静默改变 type_id。
   //
   // `core/src/packet.rs` 的 `fnv1a_matches_cpp_sugar_layer` 断言的是「Rust 对字符串
   // "i" 的哈希 == 某常量」—— 那只钉住了**哈希函数**,在任何编译器上都同样通过。
@@ -145,12 +146,19 @@ void test_type_id() {
   // (修饰形式在另一个 `raw_name()` 上)。所以不是「两种修饰方案不同」,而是
   // **压根不是同一种命名方案**:FNV("i") vs FNV("int"),结果毫不相干。
   //
-  // 于是:本条在新编译器上失败,**正是想要的信号** —— 它说明该平台自定义类型的
-  // type_id 与其它平台不一致,跨平台/跨工具链传该类型必须改用
-  // `LMFLOW_DECLARE_TYPE_NAME` 显式钉稳定名。让它成为一个**被审阅的显式决定**,
-  // 而不是静默上线。常量与 packet.rs 那两条同源。
+  // 这两套默认 id 都只保证各自 ABI 内一致,不保证彼此相等。跨平台/跨工具链传
+  // 自定义类型仍必须用 `LMFLOW_DECLARE_TYPE_NAME` 显式钉稳定名。
+#ifdef _MSC_VER
+  assert(std::strcmp(typeid(int).name(), "int") == 0);
+  assert(std::strcmp(typeid(double).name(), "double") == 0);
+  assert(lmflow::TypeId<int>() == 3143511548502526014ULL);
+  assert(lmflow::TypeId<double>() == 11567507311810436776ULL);
+#else
+  assert(std::strcmp(typeid(int).name(), "i") == 0);
+  assert(std::strcmp(typeid(double).name(), "d") == 0);
   assert(lmflow::TypeId<int>() == 12638195996648667684ULL);
   assert(lmflow::TypeId<double>() == 12638183902020757363ULL);
+#endif
 }
 }  // namespace
 

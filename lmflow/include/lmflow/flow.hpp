@@ -33,8 +33,8 @@ namespace lmflow {
  * "int"、"struct Foo"(修饰形式在另一个 raw_name() 上)。所以两边压根不是同一种命名方案,
  * FNV("i") 与 FNV("int") 毫不相干。
  * 需要跨工具链稳定时,**必须**用 LMFLOW_DECLARE_TYPE_NAME(T, "your.stable.name") 显式指定。
- * cpp/tests/flow_hpp_test.cc 把 TypeId<int>() 钉在了 Itanium 的值上,故换编译器时这条会
- * 明确失败 —— 那是有意的信号,不是测试写坏了。 */
+ * cpp/tests/flow_hpp_test.cc 分别钉住 Itanium 与 MSVC 的默认名称和值,防止任一 ABI
+ * 内的身份规则静默变化;两套默认值彼此不同是预期行为。 */
 constexpr uint64_t Fnv1a(const char* s) {
   uint64_t h = 14695981039346656037ULL;
   while (*s) {
