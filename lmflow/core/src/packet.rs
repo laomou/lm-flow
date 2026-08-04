@@ -597,6 +597,13 @@ impl Packet {
     pub fn byte_size(&self) -> u64 {
         self.data.as_deref().map_or(0, Payload::byte_size)
     }
+    pub(crate) fn has_measurable_byte_size(&self) -> bool {
+        match self.data.as_deref() {
+            None | Some(Payload::Builtin(_)) => true,
+            Some(Payload::Foreign(foreign)) => foreign.byte_size != 0,
+            Some(Payload::Native(_)) => false,
+        }
+    }
     pub fn payload(&self) -> Option<&Payload> {
         self.data.as_deref()
     }
