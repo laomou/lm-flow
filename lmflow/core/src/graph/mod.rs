@@ -442,6 +442,26 @@ struct InputQueueReservation {
     bytes: u64,
 }
 
+#[derive(Debug, Default)]
+struct InputQueueStats {
+    peak_packets: AtomicUsize,
+    peak_bytes: AtomicU64,
+    block_events: AtomicU64,
+    blocked_total_us: AtomicU64,
+    /// 0 = 当前未阻塞；否则为相对 graph epoch 的微秒数 + 1。
+    blocked_since_us: AtomicI64,
+}
+
+impl InputQueueStats {
+    fn reset(&self) {
+        self.peak_packets.store(0, Ordering::Relaxed);
+        self.peak_bytes.store(0, Ordering::Relaxed);
+        self.block_events.store(0, Ordering::Relaxed);
+        self.blocked_total_us.store(0, Ordering::Relaxed);
+        self.blocked_since_us.store(0, Ordering::Relaxed);
+    }
+}
+
 impl NodeSched {
     fn new(max_in_flight: usize) -> Self {
         Self {
@@ -560,6 +580,8 @@ pub struct Node {
     input_queue_reserved_bytes: Vec<AtomicU64>,
     /// 当前各输入队列内 payload 的浅字节数。
     input_queue_bytes: Vec<AtomicU64>,
+    /// 每个输入口的背压与高水位统计。
+    input_queue_stats: Vec<InputQueueStats>,
     input_closed: Vec<AtomicBool>,
     /// 算子失败时的处理策略(见 [`OnError`])。建图期定下,之后不变。
     on_error: OnError,
@@ -1005,6 +1027,7 @@ impl Graph {
     pub fn cancel(&self) {
         self.inner.shared.cancel();
         self.inner.resume_blocked_flushes();
+        self.inner.finish_all_backpressure_blocks();
         self.inner.notify_activity();
     }
 
@@ -1143,6 +1166,10 @@ impl Graph {
     pub fn node_stats(&self, i: usize) -> Option<NodeStatsSnapshot> {
         self.inner.node_stats(i)
     }
+
+    pub fn input_queue_stats(&self, node: usize, port: usize) -> Option<InputQueueStatsSnapshot> {
+        self.inner.input_queue_stats(node, port)
+    }
 }
 
 impl Drop for Poller {
@@ -1237,6 +1264,26 @@ pub struct NodeStatsSnapshot {
     /// 下游入队时观察到的队列深度峰值(高水位)
     pub peak_queue_depth: usize,
     pub queued: usize,
+}
+
+/// 节点单个输入口的队列与背压统计快照。
+#[derive(Debug, Clone)]
+pub struct InputQueueStatsSnapshot {
+    pub node_name: String,
+    pub port_name: String,
+    pub producer_name: Option<String>,
+    pub packet_capacity: Option<usize>,
+    pub byte_capacity: Option<u64>,
+    pub queued_packets: usize,
+    pub queued_bytes: u64,
+    pub reserved_packets: usize,
+    pub reserved_bytes: u64,
+    pub peak_queued_packets: usize,
+    pub peak_queued_bytes: u64,
+    pub blocked: bool,
+    pub blocked_for_us: u64,
+    pub block_events: u64,
+    pub total_blocked_us: u64,
 }
 
 // ---------------------------------------------------------------- 执行
@@ -1474,6 +1521,13 @@ impl GraphInner {
                 q.push_back(pkt.clone());
             }
             let depth = q.len();
+            let queued_bytes = self.nodes[node].input_queue_bytes[port].load(Ordering::SeqCst);
+            self.nodes[node].input_queue_stats[port]
+                .peak_packets
+                .fetch_max(depth, Ordering::Relaxed);
+            self.nodes[node].input_queue_stats[port]
+                .peak_bytes
+                .fetch_max(queued_bytes, Ordering::Relaxed);
             // 高水位:depth 本就为软限告警算好了,这里顺手 fetch_max —— 定位积压节点。
             self.nodes[node]
                 .stats
@@ -1558,6 +1612,7 @@ impl GraphInner {
         self.in_flight.fetch_sub(1, Ordering::SeqCst);
         if self.shared.is_cancelled() || self.shared.has_error() {
             self.resume_blocked_flushes();
+            self.finish_all_backpressure_blocks();
         }
         self.notify_activity();
     }
@@ -1976,6 +2031,9 @@ impl GraphInner {
     }
 
     fn resume_blocked_flushes(&self) {
+        if self.shared.is_cancelled() || self.shared.has_error() {
+            self.finish_all_backpressure_blocks();
+        }
         let blocked: Vec<NodeId> = self
             .blocked_flush_nodes
             .lock()
@@ -2302,9 +2360,11 @@ impl GraphInner {
                 });
                 if packets_full || bytes_full {
                     drop(queue);
+                    self.mark_input_queue_blocked(consumer, port);
                     self.release_internal_reservations(&reservations);
                     return Ok(None);
                 }
+                self.finish_input_queue_block(consumer, port);
                 node.input_queue_reserved[port].fetch_add(count, Ordering::SeqCst);
                 node.input_queue_reserved_bytes[port].fetch_add(bytes, Ordering::SeqCst);
                 reservations.push(InputQueueReservation {
@@ -2325,6 +2385,42 @@ impl GraphInner {
                 .fetch_sub(reservation.packets, Ordering::SeqCst);
             self.nodes[reservation.node].input_queue_reserved_bytes[reservation.port]
                 .fetch_sub(reservation.bytes, Ordering::SeqCst);
+        }
+    }
+
+    fn epoch_us(&self) -> i64 {
+        self.epoch.elapsed().as_micros().min(i64::MAX as u128) as i64
+    }
+
+    fn mark_input_queue_blocked(&self, node: NodeId, port: usize) {
+        let stats = &self.nodes[node].input_queue_stats[port];
+        let since = self.epoch_us().saturating_add(1);
+        if stats
+            .blocked_since_us
+            .compare_exchange(0, since, Ordering::SeqCst, Ordering::Relaxed)
+            .is_ok()
+        {
+            stats.block_events.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    fn finish_input_queue_block(&self, node: NodeId, port: usize) {
+        let stats = &self.nodes[node].input_queue_stats[port];
+        let since = stats.blocked_since_us.swap(0, Ordering::SeqCst);
+        if since != 0 {
+            let elapsed = self
+                .epoch_us()
+                .saturating_sub(since.saturating_sub(1))
+                .max(0) as u64;
+            stats.blocked_total_us.fetch_add(elapsed, Ordering::Relaxed);
+        }
+    }
+
+    fn finish_all_backpressure_blocks(&self) {
+        for node in 0..self.nodes.len() {
+            for port in 0..self.nodes[node].input_queues.len() {
+                self.finish_input_queue_block(node, port);
+            }
         }
     }
 
@@ -2521,6 +2617,9 @@ impl GraphInner {
             }
             for reserved in &node.input_queue_reserved_bytes {
                 reserved.store(0, Ordering::SeqCst);
+            }
+            for stats in &node.input_queue_stats {
+                stats.reset();
             }
             for c in &node.input_closed {
                 c.store(false, Ordering::SeqCst);
@@ -2848,6 +2947,12 @@ impl GraphInner {
     }
     pub fn node_name_at(&self, i: usize) -> Option<&str> {
         self.nodes.get(i).map(|n| n.name.as_str())
+    }
+    pub fn node_input_ports_len(&self, node: usize) -> usize {
+        self.nodes.get(node).map_or(0, |value| value.in_ports.len())
+    }
+    pub fn node_input_port_name_at(&self, node: usize, port: usize) -> Option<&str> {
+        self.nodes.get(node)?.in_ports.name(port)
     }
     pub fn input_port_name_at(&self, i: usize) -> Option<&str> {
         self.graph_inputs

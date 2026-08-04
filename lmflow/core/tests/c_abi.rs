@@ -524,6 +524,13 @@ fn introspection_through_c_abi() {
                 .unwrap(),
             "n1"
         );
+        assert_eq!(lmflow_graph_node_num_input_ports(g, 0), 1);
+        assert_eq!(
+            CStr::from_ptr(lmflow_graph_node_input_port_name(g, 0, 0))
+                .to_str()
+                .unwrap(),
+            "in"
+        );
         assert_eq!(
             CStr::from_ptr(lmflow_graph_input_port_name(g, 0))
                 .to_str()
@@ -587,6 +594,41 @@ fn introspection_through_c_abi() {
             CStr::from_ptr(st.kernel_name).to_str().unwrap(),
             "PassThroughKernel"
         );
+
+        let mut queue_stats = LMFlowInputQueueStats {
+            struct_size: 4,
+            reserved0: 0,
+            node_name: std::ptr::null(),
+            port_name: std::ptr::null(),
+            producer_name: std::ptr::null(),
+            packet_capacity: 0,
+            byte_capacity: 0,
+            queued_packets: 0,
+            queued_bytes: 0,
+            reserved_packets: 0,
+            reserved_bytes: 0,
+            peak_queued_packets: 0,
+            peak_queued_bytes: 0,
+            blocked: false,
+            reserved1: [0; 7],
+            blocked_for_us: 0,
+            block_events: 0,
+            total_blocked_us: 0,
+        };
+        assert!(!lmflow_graph_input_queue_stats(g, 0, 0, &mut queue_stats));
+        queue_stats.struct_size = std::mem::size_of::<LMFlowInputQueueStats>() as u32;
+        assert!(lmflow_graph_input_queue_stats(g, 0, 0, &mut queue_stats));
+        assert_eq!(
+            CStr::from_ptr(queue_stats.node_name).to_str().unwrap(),
+            "n1"
+        );
+        assert_eq!(
+            CStr::from_ptr(queue_stats.port_name).to_str().unwrap(),
+            "in"
+        );
+        assert_eq!(queue_stats.packet_capacity, 0);
+        assert_eq!(queue_stats.byte_capacity, 0);
+        assert!(!queue_stats.blocked);
 
         lmflow_graph_free(g);
     }

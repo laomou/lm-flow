@@ -11,7 +11,7 @@
 
 use std::mem::{align_of, offset_of, size_of};
 
-use lmflow::ffi::{LMFlowBuffer, LMFlowNodeStats, LMFlowPacket};
+use lmflow::ffi::{LMFlowBuffer, LMFlowInputQueueStats, LMFlowNodeStats, LMFlowPacket};
 
 #[test]
 fn lmflow_packet_layout() {
@@ -44,6 +44,12 @@ fn flow_node_stats_uses_struct_size_for_forward_compat() {
     // 与 LMFlowBuffer 不同,统计结构体用入参 struct_size 做前向兼容(见 docs/design.md §15.1),
     // 所以这里只钉住「struct_size 是第一个字段」这一契约,而不钉总大小。
     assert_eq!(offset_of!(LMFlowNodeStats, struct_size), 0);
+    assert_eq!(size_of::<u32>(), 4);
+}
+
+#[test]
+fn input_queue_stats_uses_struct_size_for_forward_compat() {
+    assert_eq!(offset_of!(LMFlowInputQueueStats, struct_size), 0);
     assert_eq!(size_of::<u32>(), 4);
 }
 

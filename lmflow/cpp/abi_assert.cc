@@ -50,6 +50,9 @@ static_assert(offsetof(LMFlowBuffer, device) == 148, "LMFlowBuffer::device offse
 static_assert(offsetof(LMFlowBuffer, reserved) == 152, "LMFlowBuffer::reserved offset changed");
 static_assert(LMFLOW_MAX_DIMS == 8, "changing LMFLOW_MAX_DIMS alters LMFlowBuffer layout");
 
+static_assert(offsetof(LMFlowInputQueueStats, struct_size) == 0,
+              "LMFlowInputQueueStats::struct_size must remain first");
+
 #endif /* 64-bit */
 
 /* 状态码 / 时间戳哨兵的取值约定 */

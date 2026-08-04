@@ -787,6 +787,25 @@ if (lmflow_graph_node_stats(graph, i, &st) && st.running && st.running_for_us > 
 own `sizeof`, the call fails cleanly rather than writing past the end of your buffer. When statistics
 are added, an old host recompiles and gets a clear error instead of memory corruption.
 
+Lossless internal backpressure is observable per node input port:
+
+```c
+for (size_t p = 0; p < lmflow_graph_node_num_input_ports(graph, i); ++p) {
+  LMFlowInputQueueStats q = { .struct_size = sizeof(q) };
+  if (lmflow_graph_input_queue_stats(graph, i, p, &q) && q.blocked) {
+    fprintf(stderr, "%s.%s blocked for %llu us (producer=%s)\n",
+            q.node_name, q.port_name,
+            (unsigned long long)q.blocked_for_us, q.producer_name);
+  }
+}
+```
+
+`queued_packets/bytes` are already in the consumer queue; `reserved_packets/bytes` are atomically
+reserved by an upstream flush whose staging has not yet been dispatched. `peak_queued_*` are queue
+high-water marks. `block_events` counts transitions into backpressure, while `total_blocked_us`
+includes both completed waits and the currently active wait. Packet/byte capacities are `0` when
+unbounded.
+
 ```c
 int64_t      lmflow_graph_counter_value(LMFlowGraph*, const char* name);
 size_t       lmflow_graph_counter_count(LMFlowGraph*);
@@ -801,8 +820,10 @@ LMFlowGraphState lmflow_graph_state(LMFlowGraph*);
 ```
 
 `lmflow_graph_to_dot(g, true)` emits Graphviz DOT with a per-node latency heat map — pipe it through
-`dot -Tsvg` to see where time goes. Counters set with `Context::CounterAdd` are aggregated per graph
-and are far easier to assert on in a test than log output.
+`dot -Tsvg` to see where time goes. Nodes also show aggregate queued/peak bytes, block event count,
+total blocked time, and the number of currently blocked input ports. Counters set with
+`Context::CounterAdd` are aggregated per graph and are far easier to assert on in a test than log
+output.
 
 `watchdog_ms` logs a warning when a single callback exceeds the given duration. `stats_timing`
 (default on) controls whether each callback is timed; turning it off saves two clock reads per

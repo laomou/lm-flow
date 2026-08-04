@@ -119,14 +119,48 @@ impl GraphInner {
                 let st = &n.stats;
                 let processed = st.processed.load(Ordering::Relaxed);
                 let avg = avg_process_us(st);
+                let mut queued_bytes = 0u64;
+                let mut peak_bytes = 0u64;
+                let mut block_events = 0u64;
+                let mut total_blocked_us = 0u64;
+                let mut blocked_ports = 0usize;
+                for port in 0..n.input_queues.len() {
+                    let queue = &n.input_queue_stats[port];
+                    queued_bytes = queued_bytes
+                        .saturating_add(n.input_queue_bytes[port].load(Ordering::Relaxed));
+                    peak_bytes =
+                        peak_bytes.saturating_add(queue.peak_bytes.load(Ordering::Relaxed));
+                    block_events =
+                        block_events.saturating_add(queue.block_events.load(Ordering::Relaxed));
+                    total_blocked_us = total_blocked_us
+                        .saturating_add(queue.blocked_total_us.load(Ordering::Relaxed));
+                    let since = queue.blocked_since_us.load(Ordering::Relaxed);
+                    if since != 0 {
+                        blocked_ports += 1;
+                        let now = self.epoch.elapsed().as_micros().min(i64::MAX as u128) as i64;
+                        total_blocked_us = total_blocked_us.saturating_add(
+                            now.saturating_sub(since.saturating_sub(1)).max(0) as u64,
+                        );
+                    }
+                }
                 extra = format!(
-                    "\\n{} pkts · {:.0}µs avg\\nin {} / out {} · peakQ {}",
+                    "\\n{} pkts · {:.0}µs avg\\nin {} / out {} · peakQ {} / {}B",
                     processed,
                     avg,
                     st.packets_in.load(Ordering::Relaxed),
                     st.packets_out.load(Ordering::Relaxed),
                     st.peak_queue_depth.load(Ordering::Relaxed),
+                    peak_bytes,
                 );
+                if queued_bytes > 0 || block_events > 0 || blocked_ports > 0 {
+                    extra.push_str(&format!(
+                        "\\nqueue {}B · bp {}× / {}µs",
+                        queued_bytes, block_events, total_blocked_us
+                    ));
+                    if blocked_ports > 0 {
+                        extra.push_str(&format!(" · {blocked_ports} blocked"));
+                    }
+                }
                 let errs = st.errors.load(Ordering::Relaxed);
                 if errs > 0 {
                     extra.push_str(&format!(" · {errs} err"));

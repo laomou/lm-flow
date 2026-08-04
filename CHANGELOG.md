@@ -12,6 +12,10 @@ to each GitHub Release.
 
 ### Added
 
+- **Per-input queue backpressure observability.** Rust and C hosts can inspect current and peak
+  packet/byte occupancy, pending reservations, active producer blocking, block event counts, and
+  cumulative blocked time. DOT and graph dumps include aggregate backpressure diagnostics, with
+  reset, cancellation, `max_in_flight`, and long-running diamond coverage.
 - **Per-port packet and byte capacities for internal inputs.** Nodes can override the default
   `input_queue_capacity` with `input_queue_capacities`, and can bound measurable payload bytes with
   `input_queue_byte_capacity` / `input_queue_byte_capacities`. Byte limits include pending staging

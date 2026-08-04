@@ -304,6 +304,135 @@ output_ports: [out]
 }
 
 #[test]
+fn input_queue_stats_report_active_and_accumulated_backpressure() {
+    register_test_kernels();
+    let graph = Graph::from_yaml(
+        r#"
+executors:
+  - { name: pool, num_threads: 1 }
+nodes:
+  - { name: producer, kernel: PassThrough, input_ports: [in], output_ports: [mid], executor: pool }
+  - { name: waiting_join, kernel: InternalBpPortJoinCount, input_ports: [mid, gate], output_ports: [], executor: pool, input_queue_capacity: 1, input_queue_byte_capacity: 8 }
+input_ports: [in, gate]
+"#,
+    )
+    .unwrap();
+    graph.start().unwrap();
+    let input = graph.input("in").unwrap();
+    input.send(Packet::from_i64(0).at(Timestamp(0))).unwrap();
+    input.send(Packet::from_i64(1).at(Timestamp(1))).unwrap();
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    let blocked = loop {
+        let stats = graph.input_queue_stats(1, 0).unwrap();
+        if stats.blocked {
+            break stats;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "producer never entered cooperative backpressure"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    };
+    assert_eq!(blocked.node_name, "waiting_join");
+    assert_eq!(blocked.port_name, "mid");
+    assert_eq!(blocked.producer_name.as_deref(), Some("producer"));
+    assert_eq!(blocked.packet_capacity, Some(1));
+    assert_eq!(blocked.byte_capacity, Some(8));
+    assert_eq!(blocked.queued_packets, 1);
+    assert_eq!(blocked.queued_bytes, 8);
+    assert_eq!(blocked.block_events, 1);
+    assert!(blocked.blocked_for_us > 0);
+    assert!(graph.to_dot_with_stats().contains("bp 1×"));
+    assert!(graph.dump().contains("blocked=true"));
+
+    graph
+        .input("gate")
+        .unwrap()
+        .send(Packet::from_i64(0).at(Timestamp(0)))
+        .unwrap();
+    graph.close_all_inputs();
+    graph.wait_done_timeout(Duration::from_secs(2)).unwrap();
+
+    let finished = graph.input_queue_stats(1, 0).unwrap();
+    assert!(!finished.blocked);
+    assert_eq!(finished.block_events, 1);
+    assert!(finished.total_blocked_us >= blocked.blocked_for_us);
+    assert_eq!(finished.peak_queued_packets, 1);
+    assert_eq!(finished.peak_queued_bytes, 8);
+}
+
+#[test]
+fn reset_clears_input_queue_backpressure_stats() {
+    register_test_kernels();
+    let graph = Graph::from_yaml(
+        r#"
+executors:
+  - { name: pool, num_threads: 1 }
+nodes:
+  - { name: producer, kernel: PassThrough, input_ports: [in], output_ports: [mid], executor: pool }
+  - { name: join, kernel: InternalBpPortJoinCount, input_ports: [mid, gate], output_ports: [], executor: pool, input_queue_capacity: 1 }
+input_ports: [in, gate]
+"#,
+    )
+    .unwrap();
+    graph.start().unwrap();
+    let input = graph.input("in").unwrap();
+    input.send(Packet::from_i64(0).at(Timestamp(0))).unwrap();
+    input.send(Packet::from_i64(1).at(Timestamp(1))).unwrap();
+    std::thread::sleep(Duration::from_millis(10));
+    graph.cancel();
+    let _ = graph.wait_done_timeout(Duration::from_secs(2));
+    assert!(graph.input_queue_stats(1, 0).unwrap().block_events > 0);
+
+    graph.reset().unwrap();
+    let reset = graph.input_queue_stats(1, 0).unwrap();
+    assert!(!reset.blocked);
+    assert_eq!(reset.block_events, 0);
+    assert_eq!(reset.total_blocked_us, 0);
+    assert_eq!(reset.peak_queued_packets, 0);
+    assert_eq!(reset.peak_queued_bytes, 0);
+}
+
+#[test]
+fn max_in_flight_backpressure_stats_remain_consistent() {
+    register_test_kernels();
+    let graph = Graph::from_yaml(
+        r#"
+executors:
+  - { name: pool, num_threads: 4 }
+nodes:
+  - { name: producer, kernel: PassThrough, input_ports: [in], output_ports: [mid], executor: pool, max_in_flight: 4 }
+  - { name: consumer, kernel: InternalBpSlowPass, input_ports: [mid], output_ports: [out], executor: pool, input_queue_capacity: 2, input_queue_byte_capacity: 16 }
+input_ports: [in]
+output_ports: [out]
+"#,
+    )
+    .unwrap();
+    let output = graph.add_poller("out").unwrap();
+    graph.start().unwrap();
+    let input = graph.input("in").unwrap();
+    for timestamp in 0..100 {
+        input
+            .send(Packet::from_i64(timestamp).at(Timestamp(timestamp)))
+            .unwrap();
+    }
+    graph.close_all_inputs();
+    graph.wait_done_timeout(Duration::from_secs(5)).unwrap();
+    assert_eq!(std::iter::from_fn(|| output.next()).count(), 100);
+
+    let stats = graph.input_queue_stats(1, 0).unwrap();
+    assert!(stats.peak_queued_packets <= 2);
+    assert!(stats.peak_queued_bytes <= 16);
+    assert_eq!(stats.queued_packets, 0);
+    assert_eq!(stats.queued_bytes, 0);
+    assert_eq!(stats.reserved_packets, 0);
+    assert_eq!(stats.reserved_bytes, 0);
+    assert!(!stats.blocked);
+    assert!(stats.block_events > 0);
+}
+
+#[test]
 fn emitted_batch_larger_than_byte_capacity_fails_loudly() {
     register_test_kernels();
     let graph = Graph::from_yaml(

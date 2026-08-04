@@ -245,9 +245,10 @@ max_queued_bytes: {MAX_QUEUED_BYTES}
 /// 喂的,没有任何一处是内部边扇出后再汇合。也就是说 ADR #11「内部边不设硬上界」的论证
 /// 本身此前是**断言而非实测**,而唯一的内存证据(上一条 soak)是单节点线性图。
 ///
-/// 本测试同时回答两个问题:
+/// 本测试同时回答三个问题:
 ///   1. **活性** —— 慢分支拖着,图仍能跑完(内部边无界 ⇒ 不形成循环等待);
 ///   2. **内存** —— RSS 增长仍受**水位**约束,而非受总吞吐约束(与线性图同一结论)。
+///   3. **内部背压统计** —— join 每口的字节峰值不越界,且确实记录到阻塞事件。
 ///
 /// 用 `max_queued_packets`(按**个数**)而非字节水位:`Payload::byte_size()` 对
 /// `Native` / `Foreign` 计 0,故字节水位只对内建 payload 有效,而个数水位对所有形态都成立
@@ -271,11 +272,18 @@ executors:
 nodes:
   - {{ name: "slow", kernel: "SoakSlowRelay", executor: "cpu", input_ports: ["in"], output_ports: ["s"] }}
   - {{ name: "fast", kernel: "SoakFastRelay", executor: "cpu", input_ports: ["in"], output_ports: ["f"] }}
-  - {{ name: "join", kernel: "SoakJoinSink", executor: "cpu", input_ports: ["s", "f"], output_ports: [] }}
+  - name: "join"
+    kernel: "SoakJoinSink"
+    executor: "cpu"
+    input_ports: ["s", "f"]
+    output_ports: []
+    input_queue_capacity: 2
+    input_queue_byte_capacity: {internal_bytes}
 input_ports: ["in"]
 max_queue_size: 100000
 max_queued_packets: {DIAMOND_MAX_QUEUED_PACKETS}
-"#
+"#,
+        internal_bytes = 2 * PACKET_BYTES,
     );
 
     let graph = Graph::from_yaml(&cfg).unwrap();
@@ -317,6 +325,25 @@ max_queued_packets: {DIAMOND_MAX_QUEUED_PACKETS}
     println!("diamond: {n} packets × {PACKET_BYTES} B = {pushed_mib} MiB pushed");
     println!("diamond: join 触发 {fired} 次(每次消费两路各一包)");
     println!("diamond: peak total_queued = {peak_queued} 槽(水位 64)");
+    let mut total_block_events = 0u64;
+    for port in 0..2 {
+        let stats = graph.input_queue_stats(2, port).unwrap();
+        println!(
+            "diamond: join.{} peak={}/{}B blocks={} total={}us",
+            stats.port_name,
+            stats.peak_queued_packets,
+            stats.peak_queued_bytes,
+            stats.block_events,
+            stats.total_blocked_us,
+        );
+        assert!(stats.peak_queued_packets <= 2);
+        assert!(stats.peak_queued_bytes <= (2 * PACKET_BYTES) as u64);
+        total_block_events = total_block_events.saturating_add(stats.block_events);
+    }
+    assert!(
+        total_block_events > 0,
+        "长跑慢分支 diamond 应让 join 的至少一个输入口触发内部背压"
+    );
 
     // 汇合点必须把每个时间戳都对齐处理掉 —— 无丢失、无错配。
     assert_eq!(

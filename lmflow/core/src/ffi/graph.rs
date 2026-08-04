@@ -646,6 +646,34 @@ pub unsafe extern "C" fn lmflow_graph_node_name(g: *mut LMFlowGraph, idx: usize)
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn lmflow_graph_node_num_input_ports(
+    g: *mut LMFlowGraph,
+    node_idx: usize,
+) -> usize {
+    guard_val(0, || {
+        graph_of(g).map_or(0, |graph| graph.inner().node_input_ports_len(node_idx))
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lmflow_graph_node_input_port_name(
+    g: *mut LMFlowGraph,
+    node_idx: usize,
+    port_idx: usize,
+) -> *const c_char {
+    guard_val(c"".as_ptr(), || {
+        graph_of(g)
+            .and_then(|graph| {
+                graph
+                    .inner()
+                    .node_input_port_name_at(node_idx, port_idx)
+                    .map(|name| graph_arena().intern(name))
+            })
+            .unwrap_or(c"".as_ptr())
+    })
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn lmflow_graph_dump(g: *mut LMFlowGraph) -> *const c_char {
     guard_val(c"".as_ptr(), || {
         thread_local! {
@@ -710,6 +738,28 @@ pub struct LMFlowNodeStats {
     pub queued: usize,
 }
 
+#[repr(C)]
+pub struct LMFlowInputQueueStats {
+    pub struct_size: u32,
+    pub reserved0: u32,
+    pub node_name: *const c_char,
+    pub port_name: *const c_char,
+    pub producer_name: *const c_char,
+    pub packet_capacity: usize,
+    pub byte_capacity: u64,
+    pub queued_packets: usize,
+    pub queued_bytes: u64,
+    pub reserved_packets: usize,
+    pub reserved_bytes: u64,
+    pub peak_queued_packets: usize,
+    pub peak_queued_bytes: u64,
+    pub blocked: bool,
+    pub reserved1: [u8; 7],
+    pub blocked_for_us: u64,
+    pub block_events: u64,
+    pub total_blocked_us: u64,
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn lmflow_graph_node_stats(
     g: *mut LMFlowGraph,
@@ -748,6 +798,60 @@ pub unsafe extern "C" fn lmflow_graph_node_stats(
                 packets_out: s.packets_out,
                 peak_queue_depth: s.peak_queue_depth,
                 queued: s.queued,
+            },
+        );
+        true
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lmflow_graph_input_queue_stats(
+    g: *mut LMFlowGraph,
+    node_idx: usize,
+    port_idx: usize,
+    out: *mut LMFlowInputQueueStats,
+) -> bool {
+    guard_val(false, || {
+        if out.is_null() {
+            return false;
+        }
+        let declared = (*out).struct_size as usize;
+        if declared < std::mem::size_of::<LMFlowInputQueueStats>() {
+            last_error::set(
+                "LMFlowInputQueueStats.struct_size too small -- set it to sizeof(LMFlowInputQueueStats)",
+            );
+            return false;
+        }
+        let Some(graph) = graph_of(g) else {
+            return false;
+        };
+        let Some(stats) = graph.input_queue_stats(node_idx, port_idx) else {
+            return false;
+        };
+        std::ptr::write(
+            out,
+            LMFlowInputQueueStats {
+                struct_size: std::mem::size_of::<LMFlowInputQueueStats>() as u32,
+                reserved0: 0,
+                node_name: graph_arena().intern(&stats.node_name),
+                port_name: graph_arena().intern(&stats.port_name),
+                producer_name: stats
+                    .producer_name
+                    .as_deref()
+                    .map_or(c"".as_ptr(), |name| graph_arena().intern(name)),
+                packet_capacity: stats.packet_capacity.unwrap_or(0),
+                byte_capacity: stats.byte_capacity.unwrap_or(0),
+                queued_packets: stats.queued_packets,
+                queued_bytes: stats.queued_bytes,
+                reserved_packets: stats.reserved_packets,
+                reserved_bytes: stats.reserved_bytes,
+                peak_queued_packets: stats.peak_queued_packets,
+                peak_queued_bytes: stats.peak_queued_bytes,
+                blocked: stats.blocked,
+                reserved1: [0; 7],
+                blocked_for_us: stats.blocked_for_us,
+                block_events: stats.block_events,
+                total_blocked_us: stats.total_blocked_us,
             },
         );
         true

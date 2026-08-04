@@ -694,6 +694,9 @@ size_t lmflow_graph_num_output_ports(LMFlowGraph*);
 const char* lmflow_graph_output_port_name(LMFlowGraph*, size_t idx);
 size_t lmflow_graph_num_nodes(LMFlowGraph*);
 const char* lmflow_graph_node_name(LMFlowGraph*, size_t idx);
+size_t lmflow_graph_node_num_input_ports(LMFlowGraph*, size_t node_idx);
+const char* lmflow_graph_node_input_port_name(
+    LMFlowGraph*, size_t node_idx, size_t port_idx);
 
 /* 已注册算子清单(全局)。「kernel 未注册」报错时可据此列出可用名字。 */
 size_t lmflow_registered_kernel_count(void);
@@ -738,6 +741,33 @@ typedef struct {
 } LMFlowNodeStats;
 
 bool lmflow_graph_node_stats(LMFlowGraph*, size_t node_idx, LMFlowNodeStats* out);
+
+/* 节点单个输入口的无损背压统计。capacity 为 0 表示对应维度不限。
+ * queued_* 是已经入队的量;reserved_* 是上游已预留、仍保留在 staging 的量。
+ * blocked_for_us 是当前连续阻塞时长;total_blocked_us 包含当前这段。 */
+typedef struct {
+  uint32_t struct_size; /* 入参:sizeof(LMFlowInputQueueStats) */
+  uint32_t reserved0;
+  const char* node_name;
+  const char* port_name;
+  const char* producer_name; /* 图输入直接生产时为空串 */
+  size_t packet_capacity;
+  uint64_t byte_capacity;
+  size_t queued_packets;
+  uint64_t queued_bytes;
+  size_t reserved_packets;
+  uint64_t reserved_bytes;
+  size_t peak_queued_packets;
+  uint64_t peak_queued_bytes;
+  bool blocked;
+  uint8_t reserved1[7];
+  uint64_t blocked_for_us;
+  uint64_t block_events;
+  uint64_t total_blocked_us;
+} LMFlowInputQueueStats;
+
+bool lmflow_graph_input_queue_stats(
+    LMFlowGraph*, size_t node_idx, size_t port_idx, LMFlowInputQueueStats* out);
 
 /* 算子自报计数器的读取(见 lmflow_ctx_counter_add);不存在返回 0 */
 int64_t lmflow_graph_counter_value(LMFlowGraph*, const char* name);
