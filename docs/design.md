@@ -659,7 +659,7 @@ B 规则:**每个输入口都有 ≥1 包** → 取各口队首组成一次 `Pro
 | `max_queue_size`(默认 100) | **只是软水位,对所有边一视同仁** | 仅告警(指数退避)+ 可用 `queue_depth` 观测。**不阻塞任何人** |
 | `max_queued_packets` / `max_queued_bytes`(全局水位,**默认 0 = 不限**) | 全图硬预算,但只在图输入口施压 | `send` 等排水,`try_send` 返回 `LMFLOW_ERR_WOULD_BLOCK` |
 | `fixed_size` 输入策略(**按节点输入口**,非按边) | 有界 + **有意有损** | 丢最旧;计数 + 首次 WARN。不阻塞上游 |
-| 有界 Poller(`capacity` + overflow policy) | 图输出订阅队列的局部上界 | `block` 无损等待宿主排水;`drop_oldest` / `drop_newest` / `latest` 有损并计数告警 |
+| 有界 Poller(`capacity` + overflow policy) | 图输出订阅队列的局部上界 | `block` 无损但**要求宿主并发排水**、带等待上界(默认 5s,到点响亮失败);`drop_oldest` / `drop_newest` / `latest` 有损并计数告警 |
 | `input_queues.packets` / `input_queues.ports.*.packets` | 内部输入口无损包数硬上界 | 满时生产者保留 staging、释放 worker;下游出队后协作式恢复 |
 | `input_queues.bytes` / `input_queues.ports.*.bytes` | 内部输入口可计量 payload 浅字节硬上界 | 队列字节 + pending staging reservation 一起判定;不可计量 payload 明确拒绝 |
 
@@ -674,7 +674,24 @@ B 规则:**每个输入口都有 ≥1 包** → 取各口队首组成一次 `Pro
 会计 N 个队列槽(引用计数共享 payload,但每个订阅者都能独立滞留它)。默认
 `add_poller` 保持历史兼容——无容量限制;需要严格约束输出滞留时用 bounded Poller:
 
-- `block`:满时阻塞产出该边的线程,直到宿主取走一包。无损,但宿主必须从另一线程并发排水;
+- `block`:满时阻塞产出该边的线程,直到宿主取走一包。无损,但**宿主必须从另一线程并发排水**,
+  且带**等待上界**(`PollerOptions::block_timeout`,默认 5s;`with_block_timeout(None)` 可解除)。
+  到点仍无进展 → 记录图错误并放弃该包,`wait_done` / `wait_until_idle` 返回该错误。
+
+  > **为什么必须有上界**(实测,不是假想):`block` 是在**派发路径内部**原地等的,而派发可能
+  > 就跑在宿主自己的线程上(主线程执行器,或 `send` 直接派发)。那时宿主既是生产者又是唯一
+  > 消费者 —— 它卡在 poller 的 push 里,永远走不到 `poller.next()`。实测 `capacity=2`、送 5 个包、
+  > 然后 `close_all_inputs(); wait_done()` 这个**仓库里通用的顺序式写法**会**永久挂死**;摘掉上界
+  > 后连 `send` 都回不来(而 `send` 没有超时变体,宿主侧无从自救)。
+  >
+  > **为什么是「上界」而不是「死锁检测」**:多线程宿主下「是否还有人能排水」**不可判定** ——
+  > 可能另有一个线程正要排水。任何「宿主正阻塞即判死锁」的判据都会误杀合法的并发排水写法
+  > (本仓库的 `block_waits_until_the_host_drains_a_slot` 就是那种写法)。所以这里不做推断,
+  > 只给一个可配置上界 + 说清前置条件与替代方案的报错。
+  >
+  > 回归钉在 `tests/poller_backpressure.rs`:`block_does_not_hang_a_sequential_host`(顺序式
+  > 必须返回而非挂死)与 `block_without_timeout_still_waits_for_a_concurrent_drainer`
+  > (证明上界是**可选**的,没把 `block` 改成有损)。摘掉上界,前者立刻挂死。
 - `drop_oldest`:丢最旧,保留最近 `capacity` 包;
 - `drop_newest`:保留已有积压,拒绝新包;
 - `latest`:容量固定为 1,永远只保留最新值。

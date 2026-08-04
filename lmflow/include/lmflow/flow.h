@@ -592,8 +592,13 @@ LMFlowPoller* lmflow_graph_add_poller(LMFlowGraph*, const char* port);
  * 产生的**空包**(payload==NULL,仅带时间戳)—— 下游据此知道「该时刻之前不会再有数据」。
  * 默认 false。完整的边界传播属 A 阶段,本版本仅保留接口。 */
 LMFlowPoller* lmflow_graph_add_poller_ex(LMFlowGraph*, const char* port, bool observe_timestamp_bounds);
-/* 有界 Poller。capacity 必须 >= 1。BLOCK 无损但要求宿主持续并发排水；
- * DROP_OLDEST / DROP_NEWEST / LATEST 有损且永不阻塞生产线程。 */
+/* 有界 Poller。capacity 必须 >= 1。
+ * DROP_OLDEST / DROP_NEWEST / LATEST 有损且**永不阻塞生产线程** —— 单线程宿主请用这三种。
+ * BLOCK 无损,但**要求宿主在另一个线程里持续排水**:它是在派发路径内部原地等的,而派发
+ * 可能就跑在宿主自己的线程上(主线程执行器 / send 直接派发)。那时宿主既是生产者又是唯一
+ * 消费者 —— 卡住就永远走不到 lmflow_poller_next,wait_done 也永不返回。
+ * 故 BLOCK 带**5 秒等待上界**(经 C ABI 创建时不可改):到点仍无进展则记录图错误并放弃该包,
+ * wait_done / wait_until_idle 会返回该错误 —— 宁可响亮失败,不可静默挂死。 */
 #define LMFLOW_POLLER_BLOCK 0
 #define LMFLOW_POLLER_DROP_OLDEST 1
 #define LMFLOW_POLLER_DROP_NEWEST 2
