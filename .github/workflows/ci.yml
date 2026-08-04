@@ -87,6 +87,15 @@ jobs:
           cargo clippy --features builtin-kernels --all-targets -- -D warnings
           cargo build --features builtin-kernels --all-targets
           timeout 600 cargo test --features builtin-kernels
+      # 全局水位的**内存曲线**压测。此前水位只有功能测试(「撞到水位会转成背压」),
+      # 没人验证过真实 RSS 是平的 —— 而「水位读数正常、内存仍单调增长」是可能的:
+      # 实测把算子改成不释放包时,total_queued_bytes 依旧稳稳停在水位上,而 RSS
+      # 跟着总吞吐涨了 233 MiB。这一步就是补上那个盲区。
+      # 断言的是「RSS 增长受水位约束,而非受总吞吐约束」,故与规模无关(实测 250 MiB
+      # 与 2.5 GiB 吞吐下增长同为 ~4.3 MiB);CI 用约 1 GiB 规模,几秒即可。
+      - name: 全局水位内存曲线(soak)
+        env: { LMFLOW_SOAK_PACKETS: '8000' }
+        run: timeout 300 cargo test --test soak -- --ignored --nocapture
 
   # 外部宿主视角:header 声明的符号必须都在库里,且真的能链接+运行。
   # 这条曾抓到两个真问题:lmflow_register_builtin_kernels 漏在 header 之外、
