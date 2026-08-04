@@ -79,6 +79,12 @@ pub struct NodeConfig {
     pub options: serde_yaml::Value,
     #[serde(default)]
     pub input_policy: InputPolicyConfig,
+    /// 每个正向输入口的无损队列容量。0 = 不限(历史行为)。
+    ///
+    /// 内部生产者遇满不会阻塞 worker，而是保留本次 staging、释放执行线程，
+    /// 等下游弹包后协作式恢复刷新。与有损 `fixed_size` 互斥。
+    #[serde(default)]
+    pub input_queue_capacity: usize,
     /// 子图名(ADR #27):非空 = 本节点是该子图的实例,建图期展开内联;与 `kernel` 二选一。
     #[serde(default)]
     pub r#type: String,
@@ -191,6 +197,7 @@ impl Default for NodeConfig {
             max_in_flight: 0,
             options: serde_yaml::Value::default(),
             input_policy: InputPolicyConfig::default(),
+            input_queue_capacity: 0,
             r#type: String::new(),
             back_edges: Vec::new(),
             on_error: String::new(),
@@ -322,6 +329,12 @@ impl GraphConfig {
                     "node `{who}`: unknown input_policy `{other}` (valid: sync / immediate / fixed_size / sync_set / batch)"
                 )))
                 }
+            }
+            if n.input_queue_capacity != 0 && n.input_policy.r#type == "fixed_size" {
+                return Err(Error::InvalidArg(format!(
+                    "node `{who}`: input_queue_capacity (lossless block) cannot be combined with \
+                     input_policy=fixed_size (lossy drop-oldest)"
+                )));
             }
 
             // 错误策略:未知值明确拒掉,不静默当默认(与 input_policy / executor type 同规矩)。

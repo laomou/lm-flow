@@ -660,6 +660,7 @@ B 规则:**每个输入口都有 ≥1 包** → 取各口队首组成一次 `Pro
 | `max_queued_packets` / `max_queued_bytes`(全局水位,**默认 0 = 不限**) | 全图硬预算,但只在图输入口施压 | `send` 等排水,`try_send` 返回 `LMFLOW_ERR_WOULD_BLOCK` |
 | `fixed_size` 输入策略(**按节点输入口**,非按边) | 有界 + **有意有损** | 丢最旧;计数 + 首次 WARN。不阻塞上游 |
 | 有界 Poller(`capacity` + overflow policy) | 图输出订阅队列的局部上界 | `block` 无损等待宿主排水;`drop_oldest` / `drop_newest` / `latest` 有损并计数告警 |
+| `input_queue_capacity`(**按节点正向输入口**) | 内部边无损硬上界 | 满时生产者保留 staging、释放 worker;下游出队后协作式恢复 |
 
 > ⚠ **本表曾经是错的**,而且错在一条安全属性上:它写着「图输入口有界(`max_queue_size`),
 > 满时 `send` 阻塞至有空位」。实际上 `max_queue_size` 在全引擎**只被 `warn_if_over_soft_limit`
@@ -681,7 +682,7 @@ B 规则:**每个输入口都有 ≥1 包** → 取各口队首组成一次 `Pro
 清空均同步扣减全局 packet/byte 计数。已注册 type descriptor 的自定义 Foreign payload
 按固定对象 `size` 计量;这是浅尺寸,不包含 `std::vector` 等对象内部堆分配。
 
-**为什么内部边不设硬上界** —— 否则「扇出后再汇合」的合法 DAG 会死锁:
+**为什么内部边不能直接阻塞 worker** —— 否则「扇出后再汇合」的合法 DAG 会死锁:
 
 ```
         ┌─► B(慢) ─┐
@@ -691,8 +692,16 @@ B 规则:**每个输入口都有 ≥1 包** → 取各口队首组成一次 `Pro
 C 迅速填满 D 的输入队列而阻塞;D 却要等 B 那一路才能消费;B 又在等 A 推进;
 而 A 已阻塞在 C 上 —— **循环等待,且不需要环形拓扑就会发生**。
 
-生产者永不阻塞在内部边上,循环等待即无从形成。内存总量由「图输入口限流 ×
-DAG 有界的扇出倍数」间接约束。
+`input_queue_capacity` 因此不在 `dispatch` 里等待。当前调用完成后若下游容量不足,
+其 context 槽与 staging 保留在节点调度状态里,worker 立即返回线程池;该节点暂停认领
+新输入。任一下游从输入队列弹包后重试 pending flush。限制的是**节点继续产出**,
+不是占住线程等待,diamond 不形成线程循环等待。
+
+容量按节点配置,每个正向输入口使用同一上限;`0` 表示不限(历史行为)。它与
+`fixed_size` 互斥:前者无损暂停,后者有损丢最旧。一次调用向同一输出口 emit 的批量若
+自身大于容量会明确报错,避免永远无法满足的等待。若时间戳对齐导致下游永远不能消费、
+所有 worker 又已空闲,等待接口会报告 `internal backpressure cannot make progress`,
+而不是永久挂起。
 
 **阻塞 `send` 命中全局水位时怎么等** —— 分两种执行模型:
 
