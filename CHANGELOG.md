@@ -82,7 +82,9 @@ to each GitHub Release.
 - **Portable Python binding type identities.** Binding-only wrapper classes now live outside the
   public C++ `lmflow` namespace, eliminating LTO ODR conflicts with `flow.hpp`. MSVC registration
   bindings use unambiguous lambdas, and the Windows wheel step stops immediately if installation
-  fails instead of running tests against a missing package.
+  fails instead of running tests against a missing package. The thin binding module also disables
+  pybind11's automatic full LTO, avoiding serialized GCC LTRANS jobs while leaving the Rust engine
+  optimized by its release profile.
 - **C ABI version 2.** The boolean `lmflow_graph_to_dot` entry point is removed; callers must use
   `lmflow_graph_to_dot_view` with an explicit topology, compact, or diagnostics view.
 - **Consistent and render-tested Graphviz snapshots.** One statistics-enabled DOT export now uses
