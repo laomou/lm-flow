@@ -1740,12 +1740,24 @@ impl GraphInner {
             }
             let got = pkt.type_id();
             if got != want {
+                // `got == NONE` 是一个**有明确出路**的特例:包是 `Packet::new`(Rust 原生
+                // payload)造的,它按设计不参与跨语言类型校验。光说「类型不匹配」会让人去
+                // 翻契约,而真正要改的是造包方式 —— 故这里直接把出路写进错误里。
+                let hint = if got == crate::packet::type_id::NONE {
+                    " (the packet was built with `Packet::new`, whose payload is Rust-native \
+                     and carries no cross-language type; use `Packet::from_i64` / `from_f64` / \
+                     `from_builtin` for built-in payloads, or `Packet::new_interop` with an \
+                     agreed id for a custom type)"
+                } else {
+                    ""
+                };
                 return Err(Error::Kernel(format!(
-                    "[{}] input port `{}` type mismatch: contract declares {}, actual {}",
+                    "[{}] input port `{}` type mismatch: contract declares {}, actual {}{}",
                     node.name,
                     node.in_ports.name(port).unwrap_or("?"),
                     crate::packet::type_name(want),
                     crate::packet::type_name(got),
+                    hint,
                 )));
             }
         }

@@ -2,7 +2,7 @@
 
 > 状态:**成品**。Rust 引擎、C ABI、C++ 糖层(含 OpenCV 互转)、18 个内置算子、
 > Python 绑定(pybind11)、原生 SDK 发布(各平台头文件+库)、三端文档站全部就位;
-> **291 个测试**(Rust 249 + soak 1 + doctest 3 + Python 38)全绿,TSan 硬门禁 0 竞态。Rust / C++ / Python 三种宿主的
+> **292 个测试**(Rust 250 + soak 1 + doctest 3 + Python 38)全绿,TSan 硬门禁 0 竞态。Rust / C++ / Python 三种宿主的
 > hello_world 都输出正确;支持线程池绑核 + 实时优先级(Linux/Android),可交叉编到
 > Android / iOS / 鸿蒙。
 > 定位:一个数据流图计算框架 —— 把计算描述成**有向图**,节点是**算子(Kernel)**,
@@ -1220,7 +1220,7 @@ lm-flow/                          仓库根
 
 ---
 
-## 13. 测试策略(已落地 291 个:Rust 249 + soak 1 + doctest 3 + Python 38;另有 3 个独立 C++ 测试)
+## 13. 测试策略(已落地 292 个:Rust 250 + soak 1 + doctest 3 + Python 38;另有 3 个独立 C++ 测试)
 
 | 测试文件 | 数量 | 覆盖 |
 |---|---|---|
@@ -1435,8 +1435,17 @@ Debug 三个配置做 `ninja -n` 干跑,断言 profile 与 `--config` 一致,并
   但没有更一般的定时设施(如「每 N 毫秒给某个非源节点发一次 tick」)。源仍必须挂线程池
   执行器(config 强制校验);**未**设 `rate` 且自身不阻塞的源会灌爆下游 —— 内部边不背压(§7.5)。
 - **`LMFLOW_TYPE_HOST_OBJECT` 未启用**(ADR #26):跨语言算子只收发内建类型。
-- `Packet::new`(Rust 原生值)的 `type_id` 是 `NONE`,**不参与跨语言类型校验**;
-  要让 C++/Python 算子按类型读取,须用 `Packet::new_interop` + `fnv1a_type_id`,或内建类型。
+- `Packet::new`(Rust 原生值)的 `type_id` 是 `NONE`,**不参与跨语言类型校验** ——
+  它是**有意如此**,不是待补的功能:Rust 的 `std::any::TypeId` 与 C++ 修饰名哈希是两套
+  身份空间,自动映射会造出「看着能跨语言、实际只与自己一致」的 id,那是**静默**失配,
+  比现在的明确报错糟得多。出路两条:内建 payload 用 `Packet::from_i64` / `from_f64` /
+  `from_builtin`(它们带正确 `type_id`,也正是跨语言算子该交换的东西,见 ADR #9);
+  自定义类型用 `Packet::new_interop` + 双方约定的 id(通常是 C++ 侧
+  `LMFLOW_DECLARE_TYPE_NAME` 那个名字的 `fnv1a_type_id`)。
+  仍留在本节是因为**用户确实会撞上**:`Packet::new` 是最自然的名字,却是唯一过不了类型
+  契约的构造函数,且失败在运行期第一个包而非建图期。缓解是把出路写进错误本身 ——
+  `got == NONE` 时错误会点名 `Packet::new` 并列出该改用哪几个构造函数(有配对测试钉住:
+  一条断言提示出现,一条证明它指的路真的可行)。
 
 **验证覆盖上的边界**
 

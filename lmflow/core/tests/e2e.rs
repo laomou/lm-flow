@@ -138,6 +138,42 @@ output_ports: ["out"]
         msg.contains("input port"),
         "the error should indicate which port: {msg}"
     );
+    // `Packet::new` 造的包是这条错误最常见的来源,而它有明确出路。错误必须把出路说出来 ——
+    // 否则读者会去翻契约,而真正该改的是造包方式。
+    assert!(
+        msg.contains("Packet::new") && msg.contains("from_builtin") && msg.contains("new_interop"),
+        "NONE 类型的失配必须给出改用哪个构造函数: {msg}"
+    );
+}
+
+/// 换成带正确 type_id 的内建构造函数,同一张图就应通过 —— 与上一条配对,
+/// 证明上面那条提示指的路是真的可行,而不是一句空话。
+#[test]
+fn builtin_constructor_satisfies_typed_contract() {
+    init();
+    let graph = Graph::from_yaml(
+        r#"
+nodes:
+  - { name: "s", kernel: "ScaleKernel", input_ports: ["in"], output_ports: ["out"], options: { factor: 2 } }
+input_ports: ["in"]
+output_ports: ["out"]
+"#,
+    )
+    .unwrap();
+    let poller = graph.add_poller("out").unwrap();
+    graph.start().unwrap();
+    graph
+        .input("in")
+        .unwrap()
+        .send(Packet::from_i64(21).at(Timestamp(0)))
+        .unwrap();
+    graph.close_all_inputs();
+    graph.wait_done().unwrap();
+    assert_eq!(
+        poller.next().and_then(|p| p.as_i64()),
+        Some(42),
+        "from_i64 带正确 type_id,契约应放行"
+    );
 }
 
 /// 有状态算子:Sum 在 Close 时吐出总和。
