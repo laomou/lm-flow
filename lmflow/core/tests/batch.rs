@@ -80,11 +80,32 @@ output_ports: ["out"]
     assert_eq!(got, vec![4, 4], "two full batches of four 1s");
 }
 
-/// batch 策略要求恰好一个输入口 —— 多口在建图期被拒。
+/// batch 的 capacity 必须 >= 1(0 意味着「永远攒不满」,几乎肯定是漏配)。
+/// 多输入口**已支持**(按时间戳对齐,见 `tests/batch_multi.rs`),故不再拒。
 #[test]
-fn batch_rejects_multi_input() {
+fn batch_rejects_zero_capacity() {
     init();
     let err = Graph::from_yaml(
+        r#"
+nodes:
+  - name: b
+    kernel: BatchSumKernel
+    input_ports: ["in"]
+    output_ports: ["out"]
+    input_policy: { type: batch, capacity: 0 }
+input_ports: ["in"]
+output_ports: ["out"]
+"#,
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("batch size"), "{err}");
+}
+
+/// 多输入口的 batch 现在建图**通过**(此前被拒)。语义验收在 `tests/batch_multi.rs`。
+#[test]
+fn batch_accepts_multi_input() {
+    init();
+    let graph = Graph::from_yaml(
         r#"
 nodes:
   - name: b
@@ -95,7 +116,6 @@ nodes:
 input_ports: ["x", "y"]
 output_ports: ["out"]
 "#,
-    )
-    .unwrap_err();
-    assert!(err.to_string().contains("exactly one input port"), "{err}");
+    );
+    assert!(graph.is_ok(), "多输入口 batch 应可建图:{:?}", graph.err());
 }

@@ -46,8 +46,9 @@ pub enum InputPolicy {
     /// 且本次只带上该组的口(其余口留空)。分组是输入口的一个**完整划分**(每口恰属一组)。
     /// 用于「A、B 该配对,C 独立」这类图。存的是输入口序号(建图时由端口名解析)。
     SyncSet { sets: Vec<Vec<usize>> },
-    /// **批处理**:攒够 `size` 个包一次交给算子(`process()` 按批读 `input_count`/`input_at`);
-    /// 关流时不足一批也刷出。v1 仅单输入口。用于批推理 / 窗口聚合。见 docs/design.md §7.10。
+    /// **批处理**:攒够 `size` 个**对齐元组**一次交给算子(`process()` 按批读
+    /// `input_count`/`input_at`);关流时不足一批也刷出。多输入口时按时间戳对齐
+    /// (与 `Sync` 同源),各口取数可以不同。用于批推理 / 窗口聚合。见 docs/design.md §7.10。
     Batch { size: usize },
 }
 
@@ -113,6 +114,23 @@ impl InputPolicy {
 struct Ready {
     ts: Timestamp,
     ports: Option<Vec<usize>>,
+    /// 仅 `batch` 策略:就绪判定时已算好的取包计划。放在这里而不是认领时重算,
+    /// 是为了保住「每口只拿一次队列锁」(ADR #36)—— 判定期已把各口时间戳前缀
+    /// 快照过一次,认领期照计划批量弹出即可,不必再逐轮加锁。
+    batch: Option<BatchPlan>,
+}
+
+/// `batch` 策略的认领计划:每个**正向口**本次取多少个包,以及本批末尾的对齐时间戳。
+///
+/// 各口取数**可以不同** —— 某口在某个对齐时间戳上没有包,该轮就不取它。这与 `sync`
+/// 单包时的语义一致(`Context::input_count` 本就是按口计数的),而不是「各口各自数够
+/// `size` 个」:后者会把 0 号口的第 k 个与 1 号口的第 k 个配成一对,而它们未必是同一帧,
+/// 属于**静默的错误配对**。
+struct BatchPlan {
+    /// (端口号, 取包数)
+    take: Vec<(usize, usize)>,
+    /// 本批最后一轮对齐到的时间戳:用作 `input_ts`,并据此推进各口 bound。
+    last_ts: Timestamp,
 }
 
 // ---------------------------------------------------------------- 状态机
@@ -491,6 +509,7 @@ impl Node {
             return (!self.source_done.load(Ordering::SeqCst)).then_some(Ready {
                 ts: Timestamp::unset(),
                 ports: None,
+                batch: None,
             });
         }
         match &self.policy {
@@ -507,11 +526,16 @@ impl Node {
                 any.then_some(Ready {
                     ts: min,
                     ports: None,
+                    batch: None,
                 })
             }
-            InputPolicy::Sync | InputPolicy::FixedSize { .. } => self
-                .sync_align(self.forward_ports())
-                .map(|ts| Ready { ts, ports: None }),
+            InputPolicy::Sync | InputPolicy::FixedSize { .. } => {
+                self.sync_align(self.forward_ports()).map(|ts| Ready {
+                    ts,
+                    ports: None,
+                    batch: None,
+                })
+            }
             InputPolicy::SyncSet { sets } => {
                 // 每组独立对齐;取**最早就绪**的那组,本次只带该组的口。
                 let mut best: Option<Ready> = None;
@@ -521,23 +545,93 @@ impl Node {
                             best = Some(Ready {
                                 ts,
                                 ports: Some(set.clone()),
+                                batch: None,
                             });
                         }
                     }
                 }
                 best
             }
-            InputPolicy::Batch { size } => {
-                // 单口:攒够一批就跑;或关流时把不足一批的余量刷出(不丢数据)。
-                let have = self.queue_len(0);
-                let fire =
-                    have >= *size || (have > 0 && self.input_closed[0].load(Ordering::SeqCst));
-                fire.then(|| Ready {
-                    ts: self.front_ts(0).unwrap_or_else(Timestamp::unset),
-                    ports: None,
-                })
-            }
+            InputPolicy::Batch { size } => self.batch_readiness(*size),
         }
+    }
+
+    /// `batch` 策略的就绪判定:把 `sync` 的对齐**连续跑 `size` 轮**(只偷看、不弹出),
+    /// 算出每个正向口本次该取的包数。
+    ///
+    /// **为什么不是「各口各自攒够 `size` 个」**:那会把 0 号口的第 k 个与 1 号口的第 k 个
+    /// 配成一对,而它们未必是同一帧 —— 图像批与掩码批就此错位,且**不会报任何错**。
+    /// 本项目不接受静默的错误行为,故一批 = `size` 个**对齐元组**,对齐规则与 `sync` 完全同源。
+    ///
+    /// 不足一批时**只有所有正向口都已关闭**才把余量刷出(不可能再来数据了);否则继续等 ——
+    /// 提前交付就是过早切批,那也是一种静默的语义偏差。
+    ///
+    /// 锁:每口**只拿一次**队列锁,把前 `size` 个时间戳快照出来,之后纯内存模拟
+    /// (ADR #36)。前缀在此期间稳定 —— 只有 `try_claim` 会 pop 且全程持 `sched`
+    /// (ADR #30),别的线程只往队尾 push。每口游标每轮至多前进 1、共 `size` 轮,
+    /// 故快照 `size` 个足够。
+    fn batch_readiness(&self, size: usize) -> Option<Ready> {
+        let ports: Vec<usize> = self.forward_ports().collect();
+        if ports.is_empty() || size == 0 {
+            return None;
+        }
+
+        let ts_prefix: Vec<Vec<Timestamp>> = ports
+            .iter()
+            .map(|&p| {
+                let q = self.input_queues[p].lock().expect("queue lock poisoned");
+                q.iter().take(size).map(|pk| pk.timestamp()).collect()
+            })
+            .collect();
+
+        let mut take = vec![0usize; ports.len()];
+        let mut first_ts: Option<Timestamp> = None;
+        let mut last_ts = Timestamp::unset();
+        let mut rounds = 0usize;
+
+        while rounds < size {
+            // 一轮对齐,逻辑同 `sync_align`:游标处有包的口贡献 min_packet,
+            // 没包的口贡献它的 bound —— bound 不够大就说明还可能来更早的包,不能定这一轮。
+            let mut min_packet = Timestamp::done();
+            let mut min_bound = Timestamp::done();
+            for (pi, &p) in ports.iter().enumerate() {
+                match ts_prefix[pi].get(take[pi]) {
+                    Some(&ts) => min_packet = min_packet.min(ts),
+                    None => min_bound = min_bound.min(self.bound(p)),
+                }
+            }
+            if min_packet == Timestamp::done() || min_bound <= min_packet {
+                break;
+            }
+            for (pi, _) in ports.iter().enumerate() {
+                if ts_prefix[pi].get(take[pi]) == Some(&min_packet) {
+                    take[pi] += 1;
+                }
+            }
+            first_ts.get_or_insert(min_packet);
+            last_ts = min_packet;
+            rounds += 1;
+        }
+
+        if rounds == 0 {
+            return None;
+        }
+        if rounds < size
+            && !ports
+                .iter()
+                .all(|&p| self.input_closed[p].load(Ordering::SeqCst))
+        {
+            return None; // 还会有数据 → 继续攒,别过早切批
+        }
+
+        Some(Ready {
+            ts: first_ts.unwrap_or_else(Timestamp::unset),
+            ports: None,
+            batch: Some(BatchPlan {
+                take: ports.into_iter().zip(take).collect(),
+                last_ts,
+            }),
+        })
     }
 
     /// 在给定的一组输入口上做 sync 对齐,返回对齐到的时间戳(逻辑同 §7.2 的 min_bound>min_packet)。
@@ -1361,23 +1455,48 @@ impl GraphInner {
         // 仍持 sched 锁弹入输入 —— 保证 readiness+pop 原子。该槽此刻独占(刚从 free 取出)。
         let ctx = unsafe { node.ctx_slot(slot) };
         ctx.reset();
-        // 批处理:从 0 号口整批弹给算子(单口)。input_ts = 末包 ts,下游单调。
-        if let InputPolicy::Batch { size } = &node.policy {
-            let mut last_ts = ts;
-            let remaining = {
-                let mut q = node.input_queues[0].lock().expect("queue lock poisoned");
-                for _ in 0..*size {
-                    let Some(p) = q.pop_front() else { break };
+        // 批处理:按就绪期算好的计划,给每个正向口整批弹包。各口取数可以不同
+        // (对齐语义,见 `batch_readiness`)。input_ts = 本批末尾的对齐时间戳,下游单调。
+        if let Some(plan) = &ready.batch {
+            for &(port, count) in &plan.take {
+                let remaining = {
+                    let mut q = node.input_queues[port].lock().expect("queue lock poisoned");
+                    for _ in 0..count {
+                        let Some(p) = q.pop_front() else { break };
+                        self.shared.on_dequeue(p.byte_size());
+                        node.stats.packets_in.fetch_add(1, Ordering::Relaxed);
+                        ctx.input_batches[port].push(p);
+                    }
+                    q.len() // 顺手读,省一次同一把锁的再获取(ADR #36)
+                };
+                // 每个参与口都推进到末尾时间戳之后 —— 与 sync 一致:即便某口本批一个包
+                // 都没取到,也要告诉下游「本口不会再有 <= last_ts 的数据」。对齐保证了
+                // 各口 <= last_ts 的包都已被消费(每轮取的是全局最小)。
+                node.advance_bound(port, plan.last_ts.next_allowed_in_stream());
+                ctx.inputs_done[port] =
+                    node.input_closed[port].load(Ordering::SeqCst) && remaining == 0;
+            }
+            // 反馈口:多输入口的 batch 才使 batch + back_edges 成为可能(单口时它凑不出
+            // 「至少一个正向口 + 一个反馈口」)。语义与其它策略一致 —— 每次触发读一次最新值,
+            // 不参与对齐、不推进 bound。
+            for port in 0..node.input_queues.len() {
+                if !node.input_is_back_edge[port] {
+                    continue;
+                }
+                let (popped, remaining) = {
+                    let mut q = node.input_queues[port].lock().expect("queue lock poisoned");
+                    let p = q.pop_front();
+                    (p, q.len())
+                };
+                if let Some(p) = popped {
                     self.shared.on_dequeue(p.byte_size());
                     node.stats.packets_in.fetch_add(1, Ordering::Relaxed);
-                    last_ts = p.timestamp();
-                    ctx.input_batches[0].push(p);
+                    ctx.inputs[port] = Some(p);
                 }
-                q.len() // 顺手读,省一次同一把锁的再获取
-            };
-            node.advance_bound(0, last_ts.next_allowed_in_stream());
-            ctx.inputs_done[0] = node.input_closed[0].load(Ordering::SeqCst) && remaining == 0;
-            ctx.input_ts = last_ts;
+                ctx.inputs_done[port] =
+                    node.input_closed[port].load(Ordering::SeqCst) && remaining == 0;
+            }
+            ctx.input_ts = plan.last_ts;
             return true;
         }
         for port in 0..node.input_queues.len() {
