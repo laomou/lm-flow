@@ -194,6 +194,11 @@ max_queued_packets: 1
                 assert_eq!(stats.active_waiters, 1);
                 assert_eq!(stats.block_events, 1);
                 assert!(stats.blocked_for_us > 0);
+                let dot = graph.to_dot_with_stats();
+                assert!(dot.contains("queued 1/1 packets"));
+                assert!(dot.contains("input waits 1×"));
+                assert!(dot.contains("BLOCKED"));
+                assert!(dot.contains("color=\"#d62728\""));
                 break;
             }
             assert!(
@@ -402,6 +407,11 @@ output_ports: [poller_diagnostic_out]
                 assert_eq!(stats.active_waiters, 1);
                 assert_eq!(stats.block_events, 1);
                 assert!(stats.blocked_for_us > 0);
+                let dot = graph.to_dot_with_stats();
+                assert!(dot.contains("poller: poller_diagnostic_out"));
+                assert!(dot.contains("Block · queue 1/1"));
+                assert!(dot.contains("shape=cylinder"));
+                assert!(dot.contains("color=\"#d62728\""));
                 break;
             }
             assert!(
@@ -479,6 +489,10 @@ output_ports: [drop_diagnostic_out]
 
     let stats = poller.backpressure_stats();
     assert_eq!(stats.dropped_packets, 1);
+    let dot = graph.to_dot_with_stats();
+    assert!(dot.contains("DropNewest · queue 1/1"));
+    assert!(dot.contains("dropped 1"));
+    assert!(dot.contains("color=\"#d98c00\""));
     let logs = DIAGNOSTIC_LOGS
         .lock()
         .unwrap_or_else(|error| error.into_inner());

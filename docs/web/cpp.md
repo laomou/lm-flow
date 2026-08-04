@@ -813,6 +813,16 @@ waiters, block events, current/cumulative blocked time, and the relevant capacit
 `graph.dump()` includes matching `watermark` and `poller` diagnostic lines. The same information is
 reported through exponentially rate-limited WARN messages and matching recovery INFO messages.
 
+No additional host-side query API is required for visualization:
+`lmflow_graph_to_dot(g, true)` includes the global watermark once in the graph title. Graph input
+ports show only their own wait count/duration, avoiding the impression that the graph-wide limit is
+per-port. Consumer edges show queue capacity/occupancy/reservations and block history; each Poller
+is a cylinder with its policy, capacity, occupancy, drops, and block history. Active stalls are red
+and thick; recovered stalls or drops remain amber so transient incidents stay visible. Multi-input
+nodes contain a compact port summary. For sync-style policies, an empty open port that is preventing
+an already-full sibling from draining is highlighted yellow as `WAITING`; immediate-policy inputs
+are not inferred this way. Healthy edges retain only their port name.
+
 ```c
 int64_t      lmflow_graph_counter_value(LMFlowGraph*, const char* name);
 size_t       lmflow_graph_counter_count(LMFlowGraph*);

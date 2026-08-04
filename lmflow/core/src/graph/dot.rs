@@ -5,7 +5,7 @@
 //! 与 `mod.rs` 里的并发核心放在一起只会让后者更难审。本模块是 `graph` 的子模块,
 //! 故仍可访问 `Node` / `GraphInner` 的私有字段。
 
-use super::{GraphInner, NodeStats};
+use super::{GraphInner, InputPolicy, NodeStats};
 use std::sync::atomic::Ordering;
 
 /// 平均每次 process 耗时(µs);未跑过则 0。
@@ -91,6 +91,20 @@ impl GraphInner {
         out.push_str("  rankdir=LR;\n");
         out.push_str("  node [shape=box, style=\"rounded,filled\", fillcolor=white];\n");
         out.push_str("  edge [fontsize=10];\n");
+        if with_stats {
+            let limit = self.shared.config.max_queued_packets;
+            let limit = if limit == 0 {
+                "unbounded".to_string()
+            } else {
+                limit.to_string()
+            };
+            out.push_str(&format!(
+                "  graph [labelloc=t, label=\"state {:?} · queued {}/{} packets\"];\n",
+                self.state(),
+                self.shared.total_queued(),
+                limit,
+            ));
+        }
 
         // 预渲染每个节点(短名 + kernel + 执行器,按执行器上色),并建命名空间树。
         // `with_stats` 时额外标出运行统计,并把填充色换成按平均延迟的热力图。
@@ -124,7 +138,7 @@ impl GraphInner {
                     format!("{}={value}", n.in_ports.name(port).unwrap_or("?"))
                 })
                 .collect::<Vec<_>>();
-            let mut extra = if capacities.is_empty() {
+            let mut extra = if capacities.is_empty() || with_stats {
                 String::new()
             } else {
                 format!("\\ncap {}", capacities.join(", "))
@@ -179,6 +193,35 @@ impl GraphInner {
                 if errs > 0 {
                     extra.push_str(&format!(" · {errs} err"));
                 }
+                if !n.input_queues.is_empty() {
+                    let waiting_ports = self.dot_waiting_ports(i);
+                    extra.push_str("\\nports:");
+                    for port in 0..n.input_queues.len() {
+                        let queue = self
+                            .input_queue_stats(i, port)
+                            .expect("node input port exists");
+                        let capacity = queue
+                            .packet_capacity
+                            .map_or_else(|| "∞".to_string(), |value| value.to_string());
+                        let state = if queue.blocked {
+                            " BLOCKED"
+                        } else if waiting_ports.contains(&port) {
+                            " WAITING"
+                        } else if queue.block_events > 0 {
+                            " recovered"
+                        } else {
+                            ""
+                        };
+                        extra.push_str(&format!(
+                            "\\n  {} {}/{} r{}{}",
+                            esc(&queue.port_name),
+                            queue.queued_packets,
+                            capacity,
+                            queue.reserved_packets,
+                            state,
+                        ));
+                    }
+                }
                 // 按平均延迟上色:绿(快)→ 红(慢)。执行器配色让位给热力图。
                 fill = heat_color(avg, max_avg_us);
             }
@@ -198,9 +241,34 @@ impl GraphInner {
 
         // 图输入 / 输出口:独立形状。
         for &e in &self.graph_inputs {
+            let mut label = esc(&self.edges[e].name);
+            let mut fill = "#e8e8e8";
+            let mut color = "#777777";
+            let mut penwidth = 1;
+            if with_stats {
+                let stats = self.edges[e]
+                    .watermark_backpressure
+                    .snapshot(self.epoch_us());
+                label.push_str(&format!(
+                    "\\ninput waits {}× / {}µs",
+                    stats.block_events, stats.total_blocked_us,
+                ));
+                if stats.blocked {
+                    label.push_str(&format!(
+                        "\\nBLOCKED {}µs · {} waiters",
+                        stats.blocked_for_us, stats.active_waiters
+                    ));
+                    fill = "#ffd6d6";
+                    color = "#d62728";
+                    penwidth = 3;
+                } else if stats.block_events > 0 {
+                    fill = "#fff0c2";
+                    color = "#d98c00";
+                    penwidth = 2;
+                }
+            }
             out.push_str(&format!(
-                "  pin{e} [shape=cds, style=filled, fillcolor=\"#e8e8e8\", label=\"{}\"];\n",
-                esc(&self.edges[e].name)
+                "  pin{e} [shape=cds, style=filled, fillcolor=\"{fill}\", color=\"{color}\", penwidth={penwidth}, label=\"{label}\"];\n",
             ));
         }
         for &e in &self.graph_outputs {
@@ -210,21 +278,74 @@ impl GraphInner {
             ));
         }
 
-        // 边:生产者 → 消费者;图输入口 → 消费者;生产者 → 图输出口。label = 端口名。
+        // 边:生产者 → 消费者;图输入口 → 消费者;生产者 → 图输出口。
+        // 统计模式下,每个消费者输入口独立显示容量、积压、reservation 与背压状态。
         for (ei, e) in self.edges.iter().enumerate() {
             let label = esc(&e.name);
             if e.is_graph_input {
-                for &(c, _) in &e.consumers {
-                    out.push_str(&format!("  pin{ei} -> n{c} [label=\"{label}\"];\n"));
+                for &(c, port) in &e.consumers {
+                    let attrs = self.dot_edge_stats_attrs(c, port, &label, with_stats);
+                    out.push_str(&format!("  pin{ei} -> n{c} [{attrs}];\n"));
                 }
             } else if let Some(p) = e.producer {
-                for &(c, _) in &e.consumers {
-                    out.push_str(&format!("  n{p} -> n{c} [label=\"{label}\"];\n"));
+                for &(c, port) in &e.consumers {
+                    let attrs = self.dot_edge_stats_attrs(c, port, &label, with_stats);
+                    out.push_str(&format!("  n{p} -> n{c} [{attrs}];\n"));
                 }
             }
             if e.is_graph_output {
                 if let Some(p) = e.producer {
                     out.push_str(&format!("  n{p} -> pout{ei} [label=\"{label}\"];\n"));
+                }
+            }
+            if with_stats {
+                for (poller_index, poller) in e
+                    .pollers
+                    .lock()
+                    .expect("poller list lock poisoned")
+                    .iter()
+                    .enumerate()
+                {
+                    let stats = poller.block_backpressure.snapshot(self.epoch_us());
+                    let queued = poller.queue.lock().expect("poller lock poisoned").len();
+                    let dropped = poller.dropped.load(Ordering::Relaxed);
+                    let capacity = poller
+                        .capacity
+                        .map_or_else(|| "unbounded".to_string(), |value| value.to_string());
+                    let mut poller_label = format!(
+                        "poller: {}\\n{:?} · queue {}/{}\\ndropped {} · bp {}× / {}µs",
+                        label,
+                        poller.overflow,
+                        queued,
+                        capacity,
+                        dropped,
+                        stats.block_events,
+                        stats.total_blocked_us,
+                    );
+                    let (fill, color, penwidth) = if stats.blocked {
+                        poller_label.push_str(&format!(
+                            "\\nBLOCKED {}µs · {} waiters",
+                            stats.blocked_for_us, stats.active_waiters
+                        ));
+                        ("#ffd6d6", "#d62728", 3)
+                    } else if dropped > 0 || stats.block_events > 0 {
+                        ("#fff0c2", "#d98c00", 2)
+                    } else {
+                        ("#e8f1fb", "#4c78a8", 1)
+                    };
+                    out.push_str(&format!(
+                        "  poller{ei}_{poller_index} [shape=cylinder, style=filled, fillcolor=\"{fill}\", color=\"{color}\", penwidth={penwidth}, label=\"{poller_label}\"];\n"
+                    ));
+                    let source = if e.is_graph_output {
+                        format!("pout{ei}")
+                    } else if let Some(producer) = e.producer {
+                        format!("n{producer}")
+                    } else {
+                        format!("pin{ei}")
+                    };
+                    out.push_str(&format!(
+                        "  {source} -> poller{ei}_{poller_index} [style=dashed, color=\"{color}\", label=\"subscription\"];\n"
+                    ));
                 }
             }
         }
@@ -269,5 +390,77 @@ impl GraphInner {
 
         out.push_str("}\n");
         out
+    }
+
+    fn dot_edge_stats_attrs(
+        &self,
+        node: usize,
+        port: usize,
+        edge_label: &str,
+        with_stats: bool,
+    ) -> String {
+        if !with_stats {
+            return format!("label=\"{edge_label}\"");
+        }
+        let stats = self
+            .input_queue_stats(node, port)
+            .expect("consumer input port exists");
+        let waiting = self.dot_waiting_ports(node).contains(&port);
+        let capacity = stats
+            .packet_capacity
+            .map_or_else(|| "unbounded".to_string(), |value| value.to_string());
+        let mut label = format!(
+            "{edge_label}\\nqueue {}/{} · reserved {}\\nbp {}× / {}µs",
+            stats.queued_packets,
+            capacity,
+            stats.reserved_packets,
+            stats.block_events,
+            stats.total_blocked_us,
+        );
+        if stats.blocked {
+            label.push_str(&format!("\\nBLOCKED {}µs", stats.blocked_for_us));
+            format!("label=\"{label}\", color=\"#d62728\", fontcolor=\"#a51414\", penwidth=3")
+        } else if waiting {
+            label.push_str("\\nWAITING for aligned input");
+            format!("label=\"{label}\", color=\"#d6a700\", fontcolor=\"#806300\", penwidth=2")
+        } else if stats.block_events > 0 {
+            format!("label=\"{label}\", color=\"#d98c00\", fontcolor=\"#9a6200\", penwidth=2")
+        } else {
+            format!("label=\"{edge_label}\"")
+        }
+    }
+
+    fn dot_waiting_ports(&self, node_id: usize) -> std::collections::BTreeSet<usize> {
+        let node = &self.nodes[node_id];
+        let blocked_ports = (0..node.input_queues.len())
+            .filter(|&port| {
+                !node.input_is_back_edge[port]
+                    && node.input_queue_stats[port]
+                        .blocked_since_us
+                        .load(Ordering::Relaxed)
+                        != 0
+            })
+            .collect::<Vec<_>>();
+        if blocked_ports.is_empty() {
+            return std::collections::BTreeSet::new();
+        }
+        let is_empty_open = |port: usize| {
+            !node.input_is_back_edge[port]
+                && !node.input_closed[port].load(Ordering::Relaxed)
+                && node.queue_len(port) == 0
+        };
+        match &node.policy {
+            InputPolicy::Immediate => std::collections::BTreeSet::new(),
+            InputPolicy::Sync | InputPolicy::FixedSize { .. } | InputPolicy::Batch { .. } => node
+                .forward_ports()
+                .filter(|&port| is_empty_open(port))
+                .collect(),
+            InputPolicy::SyncSet { sets } => sets
+                .iter()
+                .filter(|set| set.iter().any(|port| blocked_ports.contains(port)))
+                .flat_map(|set| set.iter().copied())
+                .filter(|&port| is_empty_open(port))
+                .collect(),
+        }
     }
 }

@@ -750,6 +750,18 @@ emit 的批量若自身大于有效包数容量会明确报错,避免永远无�
 `Poller::backpressure_stats()` 同时提供策略、容量、积压、丢包与 Block 等待统计。
 `graph.dump()` 会输出 `watermark` 与 `poller` 行。Poller 有损策略的 WARN 统一包含输出口、
 策略、容量、当前积压和累计丢包数。reset 会把这些运行期统计全部清零。
+`graph.to_dot_with_stats()` / `lmflow_graph_to_dot(g, true)` 会把相同信息直接画进拓扑:
+图标题显示唯一的全局 queued/limit;图输入口只显示该句柄的等待次数/时长,避免把全局
+水位误读成每端口容量。消费者输入边显示 queue/capacity/reservation,输出端用
+Poller 虚拟节点显示策略、容量、积压与丢包。当前阻塞用红色粗线,历史阻塞或丢包用橙色。
+多输入节点在节点框内列紧凑端口表(`queued/capacity`,reservation,state);同步/批处理
+策略中,若一个口正在背压而同组另一个口为空且仍开放,后者以黄色 `WAITING` 标成疑似根因。
+`immediate` 不做这种推断。正常边只保留端口名,避免大图被零值统计淹没。
+
+线程池任务的全局在飞计数必须在**认领仍持节点调度锁时**递增,不能等到提交执行器时才加。
+否则两步之间存在「节点已有 ready 调用、全局计数仍为 0」的假空闲窗口,并发关流时
+`wait_done` 可能误报 nodes not closed。回归测试
+`wait_done_does_not_mistake_claimed_pool_work_for_idle` 高频覆盖该窗口。
 
 ### 7.6 关流与终止
 

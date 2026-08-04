@@ -358,9 +358,17 @@ input_ports: [in, gate]
     assert_eq!(blocked.block_events, 1);
     assert!(blocked.blocked_for_us > 0);
     assert!(graph.to_dot_with_stats().contains("bp 1×"));
-    assert!(graph
-        .to_dot_with_stats()
-        .contains("cap mid=1, gate=unbounded"));
+    let blocked_dot = graph.to_dot_with_stats();
+    assert!(blocked_dot.contains("ports:"));
+    assert!(blocked_dot.contains("mid 1/1 r"));
+    assert!(blocked_dot.contains("mid 1/1 r0 BLOCKED"));
+    assert!(blocked_dot.contains("gate 0/∞ r0 WAITING"));
+    assert!(blocked_dot.contains("queue 1/1 · reserved"));
+    assert!(blocked_dot.contains("bp 1×"));
+    assert!(blocked_dot.contains("color=\"#d62728\""));
+    assert!(blocked_dot.contains("BLOCKED"));
+    assert!(blocked_dot.contains("WAITING for aligned input"));
+    assert!(blocked_dot.contains("color=\"#d6a700\""));
     assert!(graph.dump().contains("capacity=1 packets"));
     assert!(graph.dump().contains("capacity=unbounded packets"));
     assert!(graph.dump().contains("blocked=true"));
@@ -559,6 +567,38 @@ output_ports: [out]
     assert_eq!(stats.reserved_packets, 0);
     assert!(!stats.blocked);
     assert!(stats.block_events > 0);
+}
+
+#[test]
+fn wait_done_does_not_mistake_claimed_pool_work_for_idle() {
+    register_test_kernels();
+    for round in 0..40 {
+        let graph = Graph::from_yaml(
+            r#"
+executors:
+  - { name: pool, num_threads: 4 }
+nodes:
+  - { name: producer, kernel: PassThrough, input_ports: [in], output_ports: [mid], executor: pool, max_in_flight: 4 }
+  - { name: consumer, kernel: PassThrough, input_ports: [mid], output_ports: [out], executor: pool, max_in_flight: 4 }
+input_ports: [in]
+output_ports: [out]
+"#,
+        )
+        .unwrap();
+        let output = graph.add_poller("out").unwrap();
+        graph.start().unwrap();
+        let input = graph.input("in").unwrap();
+        for timestamp in 0..16 {
+            input
+                .send(Packet::from_i64(timestamp).at(Timestamp(timestamp)))
+                .unwrap();
+        }
+        graph.close_all_inputs();
+        graph
+            .wait_done_timeout(Duration::from_secs(5))
+            .unwrap_or_else(|error| panic!("round {round}: {error}\n{}", graph.dump()));
+        assert_eq!(std::iter::from_fn(|| output.next()).count(), 16);
+    }
 }
 
 #[test]

@@ -1895,6 +1895,10 @@ impl GraphInner {
 
     /// 把一个已认领的调用派给节点所属的执行器。
     /// 与 `try_claim` 1:1 配对(每次成功认领派一个任务)。
+    ///
+    /// 全局 `in_flight` 已在认领仍持节点调度锁时递增,这里不能再加。否则
+    /// `try_claim` 返回到任务真正入队之间会出现「节点已有已认领调用、全局仍显示空闲」
+    /// 的窗口,`wait_done` 可能把正常排空误报成卡死。
     fn dispatch_task(&self, n: NodeId) {
         match self.nodes[n].executor {
             None => {
@@ -1905,9 +1909,6 @@ impl GraphInner {
                 self.notify_activity();
             }
             Some(i) => {
-                // 先记在飞、再投递 —— 反了会出现「已在跑但计数为 0」的空窗,
-                // 使 is_idle 误判为空闲、阻塞接口提前返回。
-                self.in_flight.fetch_add(1, Ordering::SeqCst);
                 if !self.executors[i].submit(n) {
                     // 池已关停(仅发生在拆图时):撤销全局计数。该次认领残留在 ready 里,
                     // 但拆图路径不依赖精确排空(GraphInner::drop 兜底关流),不会死锁。
@@ -1929,7 +1930,10 @@ impl GraphInner {
         self.notify_activity();
     }
 
-    /// 执行器空闲 = 主线程队列为空且线程池里没有在飞任务。
+    /// 执行器空闲 = 没有已认领调用,且主线程队列为空。
+    ///
+    /// `in_flight` 在 `try_claim` 内、仍持节点调度锁时递增,覆盖「已认领但尚未入队」
+    /// 的阶段;否则并发关流可能撞上瞬时假空闲。
     fn workers_idle(&self) -> bool {
         self.in_flight.load(Ordering::SeqCst) == 0
             && self
@@ -2026,6 +2030,7 @@ impl GraphInner {
         s.next_seq += 1;
         s.in_flight += 1;
         s.ready.push_back((slot, seq));
+        self.in_flight.fetch_add(1, Ordering::SeqCst);
 
         // 仍持 sched 锁弹入输入 —— 保证 readiness+pop 原子。该槽此刻独占(刚从 free 取出)。
         let ctx = unsafe { node.ctx_slot(slot) };
@@ -2160,6 +2165,8 @@ impl GraphInner {
         match next {
             Some(n) => {
                 self.run_node(n);
+                self.in_flight.fetch_sub(1, Ordering::SeqCst);
+                self.notify_activity();
                 true
             }
             None => false,
