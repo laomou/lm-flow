@@ -1442,21 +1442,24 @@ lm-flow/                          仓库根
 两处期望值都由**第三方实现(Python)独立算出**,不是从任一侧抄来的 —— 否则就是拿实现验证
 自己。为让编译期断言能穿透整条链,`NormalizeTypeId` 从 `inline` 改成了 `constexpr`。
 
-**上面这些都还抓不到跨编译器分歧** —— 它们钉的是**哈希函数**,在任何编译器上都同样通过。
-真正的互操作身份来自 `typeid(T).name()`,故另加一条:
+**上面这些都还抓不到编译器默认名称变化** —— 它们钉的是**哈希函数**,在任何编译器上都
+同样通过。真正的默认身份来自 `typeid(T).name()`,故测试分别钉住两套已支持 ABI:
 
 ```cpp
-assert(lmflow::TypeId<int>() == 12638195996648667684ULL);   // 与 packet.rs 同源常量
+#ifdef _MSC_VER
+assert(std::strcmp(typeid(int).name(), "int") == 0);
+assert(lmflow::TypeId<int>() == 3143511548502526014ULL);
+#else
+assert(std::strcmp(typeid(int).name(), "i") == 0);
+assert(lmflow::TypeId<int>() == 12638195996648667684ULL);
+#endif
 ```
-
-`packet.rs` 断言「Rust 对字符串 `"i"` 的哈希 == 该常量」,**没有**断言「本编译器的
-`typeid(int).name()` 真的是 `"i"`」。这两件事不同,而后者才是跨语言实际比对的东西。
 
 分歧比「修饰方案不同」更彻底:Itanium ABI(GCC/Clang)下是 `"i"`,而 **MSVC 的
 `type_info::name()` 返回未修饰的可读名** —— `"int"`、`"struct Foo"`(修饰形式在
-`raw_name()`)。故 `FNV("i")` 与 `FNV("int")` 毫不相干。这条在新编译器上失败**正是想要的
-信号**:该平台自定义类型的 type_id 与其它平台不一致,跨工具链传该类型必须改用
-`LMFLOW_DECLARE_TYPE_NAME`。让它成为**被审阅的显式决定**,而不是静默上线。
+`raw_name()`)。故 `FNV("i")` 与 `FNV("int")` 毫不相干。两套断言保证各自 ABI 内不会
+静默漂移,但不宣称默认 id 能跨 ABI 对齐;跨工具链传自定义类型仍必须改用
+`LMFLOW_DECLARE_TYPE_NAME`。
 
 「证明宏真生效」那条做过负对照:把 `LMFLOW_DECLARE_TYPE_NAME` 改成 no-op,测试立即断言失败。
 只断言「id == 某常量」是不够的 —— 那条单独看,一个 no-op 宏也可能巧合通过。
