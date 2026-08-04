@@ -252,12 +252,12 @@ impl GraphShared {
         // 用 saturating 语义,避免任何计数不平衡导致下溢回绕成天文数字
         let _ = self
             .total_queued
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
                 Some(v.saturating_sub(1))
             });
         let _ = self
             .total_queued_bytes
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
                 Some(v.saturating_sub(bytes))
             });
     }
