@@ -152,8 +152,8 @@ output_ports: ["out"]
 /// 同样是 `type_id == NONE`,但 payload 是 **Foreign**(C/C++ 自建、type_id 填 0)——
 /// 提示必须换成 C ABI 的说法,**不能**推荐 Rust 的 `Packet::from_i64` 之类。
 ///
-/// 存在意义:`NONE` 的来源不止 `Packet::new` —— `from_foreign(.., 0, ..)`、
-/// `new_interop(v, 0)`、以及 C 侧 `type_id` 填 0 的自建包都会走到这里
+/// 存在意义:`NONE` 的来源不止 `Packet::new` —— `from_foreign(.., 0, ..)`
+/// 以及 C 侧 `type_id` 填 0 的自建包都会走到这里
 /// (`tests/concurrency.rs` 的 `tracked_packet` 就是前者)。此前的提示一律归因到
 /// `Packet::new`,会把用不上的 Rust API 建议推给 C/C++ 宿主。
 #[test]

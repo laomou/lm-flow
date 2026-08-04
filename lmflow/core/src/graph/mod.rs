@@ -408,6 +408,7 @@ pub struct Node {
     executor: Option<usize>,
     policy: InputPolicy,
     input_types: Vec<u64>,
+    output_types: Vec<u64>,
     kernel: KernelInstance,
     /// 每次并行 in-flight 调用一个 context 槽(池大小 = max_in_flight)。
     /// 用 UnsafeCell 而非 Mutex:算子回调期间引擎必须交出一个 `*mut Context` 给 C 侧,
@@ -1747,7 +1748,7 @@ impl GraphInner {
             let got = pkt.type_id();
 
             // `HOST_OBJECT` 预留未启用(ADR #26)。契约声明它已在建图期拒掉,但包**自己**
-            // 带 7 是另一条路(`new_interop(v, 7)`、C 侧手填 type_id)。这一条必须在
+            // 带 7 是另一条路(C 侧手填 type_id,或 Rust unsafe `from_foreign`)。这一条必须在
             // `want == 0` 的短路**之前**判 —— 否则声明 `any` 的端口(最常见的情形)恰好
             // 就是漏网的那种,而那正是要堵的洞。
             if got == crate::packet::type_id::HOST_OBJECT {
@@ -1767,7 +1768,7 @@ impl GraphInner {
                 // `got == NONE` 是一个**有明确出路**的特例,但出路取决于包是谁造的 ——
                 // 按 payload 形态分别给建议,否则会把 Rust API 推给 C/C++ 宿主(或反之)。
                 // NONE 的来源不止一个:`Packet::new`(Native)、`from_foreign(.., 0, ..)`、
-                // `new_interop(v, 0)`、以及 C ABI 侧 type_id 填 0 的自建包(Foreign)。
+                // 以及 C ABI 侧 type_id 填 0 的自建包(Foreign)。
                 let hint = if got == crate::packet::type_id::NONE {
                     match pkt.payload() {
                         Some(crate::packet::Payload::Foreign(_)) => {
@@ -1781,8 +1782,9 @@ impl GraphInner {
                             " (the packet carries no declared type because its payload is \
                              Rust-native, e.g. built with `Packet::new`; use \
                              `Packet::from_i64` / `from_f64` / `from_builtin` for built-in \
-                             payloads, or `Packet::new_interop` with an agreed id for a \
-                             custom type)"
+                             payloads, implement `InteropType` and use `Packet::from_interop` \
+                             for a custom type, or use unsafe `Packet::new_interop` only after \
+                             manually proving the ABI layout)"
                         }
                     }
                 } else {
@@ -1808,17 +1810,30 @@ impl GraphInner {
         let node = &self.nodes[n];
         let ctx = unsafe { node.ctx_slot(slot) };
         for (port, packets) in ctx.staging.iter().enumerate() {
-            if packets
-                .iter()
-                .any(|pkt| pkt.type_id() == crate::packet::type_id::HOST_OBJECT)
-            {
-                return Err(Error::Kernel(format!(
-                    "[{}] output port `{}` carries LMFLOW_TYPE_HOST_OBJECT, which is reserved \
-                     and not enabled (see ADR #26); use LMFLOW_TYPE_BUFFER for numeric \
-                     collections, or LMFLOW_TYPE_STR carrying JSON for arbitrary metadata",
-                    node.name,
-                    node.out_ports.name(port).unwrap_or("?"),
-                )));
+            let want = node.output_types[port];
+            for pkt in packets {
+                if pkt.is_empty() {
+                    continue;
+                }
+                let got = pkt.type_id();
+                if got == crate::packet::type_id::HOST_OBJECT {
+                    return Err(Error::Kernel(format!(
+                        "[{}] output port `{}` carries LMFLOW_TYPE_HOST_OBJECT, which is reserved \
+                         and not enabled (see ADR #26); use LMFLOW_TYPE_BUFFER for numeric \
+                         collections, or LMFLOW_TYPE_STR carrying JSON for arbitrary metadata",
+                        node.name,
+                        node.out_ports.name(port).unwrap_or("?"),
+                    )));
+                }
+                if want != crate::packet::type_id::NONE && got != want {
+                    return Err(Error::Kernel(format!(
+                        "[{}] output port `{}` type mismatch: contract declares {}, actual {}",
+                        node.name,
+                        node.out_ports.name(port).unwrap_or("?"),
+                        crate::packet::type_name(want),
+                        crate::packet::type_name(got),
+                    )));
+                }
             }
         }
         Ok(())

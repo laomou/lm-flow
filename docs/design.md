@@ -2,7 +2,7 @@
 
 > 状态:**成品**。Rust 引擎、C ABI、C++ 糖层(含 OpenCV 互转)、18 个内置算子、
 > Python 绑定(pybind11)、原生 SDK 发布(各平台头文件+库)、三端文档站全部就位;
-> **300 个测试**(Rust 258 + soak 1 + doctest 3 + Python 38)全绿,TSan 硬门禁 0 竞态。Rust / C++ / Python 三种宿主的
+> **307 个测试**(Rust 265 + soak 1 + doctest 3 + Python 38)全绿,TSan 硬门禁 0 竞态。Rust / C++ / Python 三种宿主的
 > hello_world 都输出正确;支持线程池绑核 + 实时优先级(Linux/Android),可交叉编到
 > Android / iOS / 鸿蒙。
 > 定位:一个数据流图计算框架 —— 把计算描述成**有向图**,节点是**算子(Kernel)**,
@@ -83,11 +83,12 @@
 | 39 | **`reset` 保留算子实例的复位重跑** | 每会话重建图 + 重跑 `open`(重载模型)是实打实的开销。reset 复用已 open 的算子跑下一轮。安全靠「静止相」:要求 `Terminated + is_idle`(与 Drop/start 同依据),故 `&self` + 内部可变即可无并发复位 —— **不用 `Arc::get_mut`**(Poller 也持 `Arc<GraphInner>`,宿主留着 poller 时拿不到独占)。不碰线程池(worker 随图存活、park 着复用)。`epoch` 不 reset(只是诊断基准)。最易漏:`Edge::last_sent`(单调性)、`GraphShared` 的 error(无现成清除路径)、`input_bounds` 回 `pre_stream` 而非 `done` |
 | 40 | **F16 用自写的软件转换**,不用 `_Float16`、不用 F16C / NEON 内建 | F16 是移动端推理的标准张量 dtype,而张量前处理组此前遇 F16 直接报错 —— 在最相关的场景里用不了。选软件转换的理由:`_Float16` 不是所有目标编译器都有(**MSVC 没有可移植的 half 类型**,而 Windows 是待补平台),内建指令要按架构分派 + 运行期探测;而前处理不在最内层推理热路径上,这点成本换来「任意编译器 / 架构上逐位一致」是值得的 —— 且正因不依赖编译器,舍入行为才**能被测试钉死**。舍入取 IEEE 默认(就近、平局取偶);`double → half` **直接从 double 位模式做、不经 float 中转**,否则会双重舍入(极少数入参偏 1 ulp)。见 §5.3 |
 | 41 | **`batch` 多输入口 = `capacity` 个「对齐元组」**,而非「各口各自数够 `capacity` 个」 | 后者实现最省事,但会把 0 号口的第 k 个与 1 号口的第 k 个配成一对,而它们未必是同一帧 —— 图像批与掩码批就此错位,**且不报任何错**。静默的错误配对是本项目明确拒绝的失败模式,故一批 = 把 `sync` 的对齐连续跑 `capacity` 轮,**各口取数允许不同**(`input_count(i)` 本就按口计数,算子侧零改动)。不足一批只在**所有正向口都关闭**后才刷(否则是过早切批)。实现上就绪期快照时间戳前缀 + 算好每口取数,认领期照计划弹出 —— **每口仍只拿一次队列锁**,ADR #36 未破。见 §7.10 |
+| 42 | **类型契约做两级校验:静态可证的建图期拒绝,ANY 边保留运行期检查;算子输出也必须兑现契约** | producer output 与 consumer input 都声明具体类型且不同,无需等首包即可判错,故建图失败;任一侧为 ANY 时真实类型仍由包决定,继续逐包检查。输出契约不能只拿来推导下游:否则直接连 graph output 的错误包无人检查,故 process / close 的 staging 在 dispatch 前统一验证。Rust 自定义跨语言类型用 unsafe trait `InteropType` 把 ABI 承诺集中到实现处;任意 id 的 `new_interop` 降为 unsafe 且禁止伪装成内建类型 |
 | 22 | **`type_id` = FNV-1a(修饰名)**,而非 `typeid().hash_code()` | 后者实现定义、不保证跨动态库一致;而本项目 C++ 算子在 core、Python 绑定在另一 `.so`,天然跨产物。事后再改需全量重编,故一开始就用稳定方案 + `LMFLOW_DECLARE_TYPE_NAME` 逃生口。**注意修饰名跨编译器不保证相同**(GCC/Clang 走 Itanium ABI 一致,MSVC 不同),故跨工具链混用算子**必须**用逃生口显式声明稳定名。哈希算法在 C++ 与 Rust 各有一份独立实现,已用同一个字面量在两侧钉死(见 §13.5) |
 | 23 | **时间戳单调性:图输入口强制校验,内部边仅 debug 构建校验** | 外部数据进入的唯一门校验一次即可挡住绝大多数乱序;内部边逐包校验是热路径开销,且算子产出乱序属算子 bug,用 `debug_assertions` 捕获即可 |
 | 24 | **不做 stream header**,用 side packet 覆盖 | header 会引入「流上的第二种数据」及其生命周期问题;side packet 已能表达「整条流不变的属性」。少一个概念优于多一个 |
 | 25 | **不做程序化构图 API**,动态图由宿主生成 YAML | 保持单一真相源;builder API 是一大片表面积,应由真实需求驱动而非预先设计 |
-| 26 | **不启用 `LMFLOW_TYPE_HOST_OBJECT`**,且**明确拒绝**而非放任 | 见 ADR #9。原先「未启用」只靠「没有构造函数生产它」维持 —— 契约声明 7、包也带 7,数值相等检查就放行了,于是 `new_interop(v, 7)` 或 C 侧手填即可静默绕过。现两条入口都拒:**契约**声明它在**建图期**报错(配置错误应当早失败),**包**带它在运行期报错;后者的判断必须排在 `want == 0` 短路**之前**,否则声明 `any` 的端口(最常见的配置)恰好是漏网的那种。两条报错都给出替代方案(`BUFFER` / `STR`+JSON)。若将来启用,仍须配套「原生对象端口不得接异语言算子」的拓扑校验 |
+| 26 | **不启用 `LMFLOW_TYPE_HOST_OBJECT`**,且**明确拒绝**而非放任 | 见 ADR #9。原先「未启用」只靠「没有普通构造函数生产它」维持 —— 契约声明 7、C 侧手填 7 或 Rust unsafe `from_foreign` 仍可让数值相等检查放行。现契约、图输入、算子输出、side packet 四条入口都拒;报错给出 `BUFFER` / `STR`+JSON 替代方案。Rust 的 `new_interop` 也禁止使用内建保留区 0..15 |
 | 27 | **子图(subgraph)= 纯建图期展开,不进 ABI** | node 的 `type:` 填子图名;`subgraphs:` 段内联定义、`include:` 引外部子图库。建图期展平成扁平图(命名空间 `parent/inner` + 边界按位置重映射),引擎不感知子图。见 §7.11 |
 | 28 | **`max_in_flight > 1` 用 context 池 + 按序重排**,而非单纯放开并发 | 并行处理多个时间戳时,完成顺序 ≠ 时间戳顺序;必须按序号重排刷新,否则下游时间戳非单调。序号在认领时按「取最小就绪时间戳」的顺序分配,故序号序 = 时间戳序 |
 | 29 | **`max_in_flight > 1` 强制要求配 executor** | 默认执行器是宿主主线程,单线程下并行度恒为 1;配了才有意义,没配报错而非静默 |
@@ -1220,7 +1221,7 @@ lm-flow/                          仓库根
 
 ---
 
-## 13. 测试策略(已落地 300 个:Rust 258 + soak 1 + doctest 3 + Python 38;另有 3 个独立 C++ 测试)
+## 13. 测试策略(已落地 307 个:Rust 265 + soak 1 + doctest 3 + Python 38;另有 3 个独立 C++ 测试)
 
 | 测试文件 | 数量 | 覆盖 |
 |---|---|---|
@@ -1228,6 +1229,7 @@ lm-flow/                          仓库根
 | `tests/abi_layout.rs` | 10 | 跨界结构体 size/align/offset、状态码、type_id、dtype、时间戳哨兵 —— 与 `cpp/abi_assert.cc` 钉在同一组常量上 |
 | `tests/c_abi.rs` | 12 | **完全以 C 调用方的方式**驱动引擎:全流程、内建类型往返、缓冲分配与 CoW、空指针不崩、错误可读、observer、日志回调 |
 | `tests/e2e.rs` | 28 | 真实建图 + 真实调 C++ 算子:直通/扇出/多 poller、7 项图校验、状态机、时间戳单调性、跨语言按类型传值、兜底关流、side packet |
+| `tests/type_contracts.rs` | 5 | 类型契约两级校验:具体类型静态拒绝、ANY 两向兼容、运行期动态检查、算子输出兑现契约 |
 | `tests/memory.rs` | 7 | 所有权守恒记账(正常/积压/失败/取消路径)、**CoW 零拷贝不变量**(三级管线)、扇出复制不污染兄弟分支 |
 | `tests/buffer_ops.rs` | 11 | 张量前处理组端到端:Cast / Affine / Clamp / Reduce、真实前处理链、**F16 输入与输出**(含 u8→f32→归一化→f16 的移动端链路)、非连续缓冲与未知 dtype 被拒 |
 | `cpp/tests/` (C++) | 3 | `flow_hpp_test`(异常不穿越 FFI + 构造失败安全)· `buffer_util_test`(**F16 软件转换**:65536 个位模式往返 + 平局取偶 + 上下溢临界,`-O0`/`-O2` 双档)· `flow_cv_test`(装了 OpenCV 才编) |
@@ -1445,8 +1447,9 @@ Debug 三个配置做 `ninja -n` 干跑,断言 profile 与 `--config` 一致,并
   身份空间,自动映射会造出「看着能跨语言、实际只与自己一致」的 id,那是**静默**失配,
   比现在的明确报错糟得多。出路两条:内建 payload 用 `Packet::from_i64` / `from_f64` /
   `from_builtin`(它们带正确 `type_id`,也正是跨语言算子该交换的东西,见 ADR #9);
-  自定义类型用 `Packet::new_interop` + 双方约定的 id(通常是 C++ 侧
-  `LMFLOW_DECLARE_TYPE_NAME` 那个名字的 `fnv1a_type_id`)。
+  自定义类型优先实现 unsafe `InteropType` 后用 `Packet::from_interop`;底层逃生口
+  `Packet::new_interop` 是 unsafe,要求调用方自行证明 Rust/C++ ABI 布局一致,且拒绝
+  0..15 内建保留 id。双方通常以 C++ 侧 `LMFLOW_DECLARE_TYPE_NAME` 的稳定名字对齐。
   仍留在本节是因为**用户确实会撞上**:`Packet::new` 是最自然的名字,却是唯一过不了类型
   契约的构造函数,且失败在运行期第一个包而非建图期。缓解是把出路写进错误本身 ——
   `got == NONE` 时错误会点名 `Packet::new` 并列出该改用哪几个构造函数(有配对测试钉住:
