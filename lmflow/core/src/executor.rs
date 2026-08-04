@@ -50,7 +50,7 @@ pub struct ThreadPool {
 
 /// 把**当前线程**绑定到指定 CPU 核(Linux/Android)。绑核是尽力而为的优化 ——
 /// 其它平台、或核不存在等失败情形,一律静默降级为「不绑」,绝不影响正确性。
-#[cfg(any(target_os = "linux", target_os = "android"))]
+#[cfg(all(any(target_os = "linux", target_os = "android"), not(miri)))]
 fn pin_current_thread_to(cpu: usize) {
     // 直接声明 libc(glibc/Bionic)早已链接进来的符号,避免引入 libc crate(本引擎坚持零外部 crate 依赖)。
     extern "C" {
@@ -68,14 +68,14 @@ fn pin_current_thread_to(cpu: usize) {
     }
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "android")))]
+#[cfg(any(not(any(target_os = "linux", target_os = "android")), miri))]
 fn pin_current_thread_to(_cpu: usize) {}
 
 /// 把**当前线程**设为 SCHED_FIFO 实时优先级(Linux/Android)。**尽力而为**:设实时调度需要
 /// CAP_SYS_NICE / root,拿不到就静默失败(线程照常以普通分时跑,不影响正确性)。
 ///
 /// 与绑核配合是刻意的:实时线程只在被绑的核上抢占,万一算子死循环也不会拖垮整机。
-#[cfg(any(target_os = "linux", target_os = "android"))]
+#[cfg(all(any(target_os = "linux", target_os = "android"), not(miri)))]
 fn set_current_thread_rt_priority(prio: i32) {
     extern "C" {
         fn sched_setscheduler(pid: i32, policy: i32, param: *const SchedParam) -> i32;
@@ -93,6 +93,9 @@ fn set_current_thread_rt_priority(prio: i32) {
         let _ = sched_setscheduler(0, SCHED_FIFO, &param);
     }
 }
+
+#[cfg(miri)]
+fn set_current_thread_rt_priority(_prio: i32) {}
 
 /// Darwin(macOS/iOS)没有应用可用的 SCHED_FIFO 式实时优先级 —— Apple 用 **QoS class**
 /// 表达线程重要性。把 `priority>0` 映射成「用户在等结果」的高 QoS(推理正合适):
@@ -288,7 +291,7 @@ mod tests {
     }
 
     /// Linux 下验证绑核**真的生效**:让工作线程回读自己的亲和力掩码,应恰为所绑的核。
-    #[cfg(any(target_os = "linux", target_os = "android"))]
+    #[cfg(all(any(target_os = "linux", target_os = "android"), not(miri)))]
     #[test]
     fn affinity_actually_pins_worker_thread() {
         use std::sync::mpsc;
@@ -326,7 +329,7 @@ mod tests {
 
     /// 实时优先级是**尽力而为**的:有权限(CAP_SYS_NICE/root)时应真的切到 SCHED_FIFO;
     /// 无权限时静默失败、线程照常跑。两种情形都不能崩、不能改变功能。
-    #[cfg(any(target_os = "linux", target_os = "android"))]
+    #[cfg(all(any(target_os = "linux", target_os = "android"), not(miri)))]
     #[test]
     fn rt_priority_is_best_effort() {
         extern "C" {
