@@ -21,7 +21,7 @@ jobs:
     runs-on: ubuntu-latest
     defaults: { run: { working-directory: lmflow } }
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: flow.h 作为纯 C11
         run: |
           printf '#include "lmflow/flow.h"\nint main(void){return 0;}\n' > /tmp/c.c
@@ -54,9 +54,9 @@ jobs:
     runs-on: ubuntu-latest
     defaults: { run: { working-directory: lmflow/core } }
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
-        with: { components: rustfmt, clippy }
+        with: { components: 'rustfmt, clippy' }
       - name: 安装 Graphviz(DOT/SVG 回归)
         run: sudo apt-get update && sudo apt-get install -y graphviz
       - run: cargo fmt --all -- --check
@@ -109,7 +109,7 @@ jobs:
     runs-on: ubuntu-latest
     defaults: { run: { working-directory: lmflow } }
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo build --release --features builtin-kernels --manifest-path core/Cargo.toml
       - name: header 声明与库导出符号对齐
@@ -140,7 +140,7 @@ jobs:
     name: build · cmake SDK (configure/build/ctest/install/find_package)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - name: configure + build + ctest
         run: |
@@ -198,7 +198,7 @@ jobs:
     runs-on: ubuntu-latest
     defaults: { run: { working-directory: lmflow/core } }
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@nightly
         with: { components: rust-src }
       - name: TSan(Rust + C++ 混合,含 max_in_flight 并行路径)
@@ -211,9 +211,9 @@ jobs:
     runs-on: ubuntu-latest
     defaults: { run: { working-directory: lmflow/core } }
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@nightly
-        with: { components: rust-src, miri }
+        with: { components: 'rust-src, miri' }
       - name: ASan
         run: RUSTFLAGS="-Zsanitizer=address" cargo +nightly test --features builtin-kernels -Zbuild-std --target x86_64-unknown-linux-gnu --lib --tests
         continue-on-error: true
@@ -230,10 +230,10 @@ jobs:
     name: bindings · python (pybind11)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with: { submodules: recursive }   # third_party/pybind11
       - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with: { python-version: '3.11' }
       - name: pip install(scikit-build-core → CMake → 引擎 + pybind11 扩展)
         run: python -m pip install -v .
@@ -249,14 +249,14 @@ jobs:
     name: cross-platform · windows (MSVC + SDK + Python)
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with: { submodules: recursive }
       - uses: ilammy/msvc-dev-cmd@v1
         with: { arch: x64 }
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt, clippy
-      - uses: actions/setup-python@v5
+          components: 'rustfmt, clippy'
+      - uses: actions/setup-python@v7
         with: { python-version: '3.11' }
 
       - name: Rust + 内置 MSVC C++ 算子
@@ -348,7 +348,7 @@ jobs:
     runs-on: ubuntu-latest
     defaults: { run: { working-directory: lmflow } }
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with: { targets: aarch64-linux-android }
       - name: 交叉编译到 Android(用预装 NDK 编 C++ 算子)
@@ -367,7 +367,7 @@ jobs:
     runs-on: macos-latest
     defaults: { run: { working-directory: lmflow } }
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with: { targets: aarch64-apple-ios }
       # 原生 macOS:既验证 macOS 分支(QoS 优先级)能编,又让引擎真的在 macOS 上跑一遍
@@ -385,7 +385,7 @@ jobs:
     name: integration · opencv (flow_cv + py→c++ cv)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with: { submodules: recursive }   # 下面 python 部分要编 pybind11 扩展
       - uses: dtolnay/rust-toolchain@stable
       - run: sudo apt-get update && sudo apt-get install -y libopencv-dev
@@ -398,7 +398,7 @@ jobs:
           /tmp/flow_cv_test
       # 直接证明「Python numpy 图 → C++ OpenCV 算子 → 读回」是同一块内存:开 LMFLOW_WITH_CV_TEST
       # 把 CvInvertTest 编进扩展(仅测试构建链 OpenCV;生产扩展仍零 CV),再从 Python 调用。
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with: { python-version: '3.11' }
       - name: PY numpy → C++ CV 算子(CvInvertTest)端到端
         run: |

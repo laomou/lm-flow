@@ -66,6 +66,9 @@ to each GitHub Release.
 
 ### Changed
 
+- **GitHub Actions Node 24 migration.** Official checkout, Python setup, artifact, and Pages actions
+  now use their Node 24-based major versions. Rust toolchain component lists are quoted so YAML does
+  not reinterpret `clippy` or `miri` as unexpected action inputs.
 - **Large-graph Graphviz readability.** Statistics-enabled titles summarize running, error,
   blocked, waiting, and dropped hotspots. Compact view omits zero-valued throughput and queue
   details from inactive nodes. Long node, kernel, cluster, executor, and port labels are truncated
