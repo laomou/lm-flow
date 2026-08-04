@@ -781,10 +781,10 @@ mod slow_sink_kernel {
                 close: None,
                 destroy: None,
             };
-            let vt: &'static _ = Box::leak(Box::new(vt));
+            // 引擎在 register 内按值拷贝 vtable,返回后不再引用 —— 故栈上量即可,无需泄漏。
             let name = std::ffi::CString::new("SlowSink").unwrap();
             let rc = unsafe {
-                lmflow::ffi::lmflow_register_kernel(name.as_ptr(), vt, std::ptr::null_mut())
+                lmflow::ffi::lmflow_register_kernel(name.as_ptr(), &vt, std::ptr::null_mut())
             };
             assert_eq!(rc, 0, "failed to register SlowSink");
         });

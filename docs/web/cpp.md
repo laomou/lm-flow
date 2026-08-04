@@ -630,8 +630,10 @@ typedef struct {
 LMFlowStatus lmflow_register_kernel(const char* name, const LMFlowKernelVTable* vt, void* factory);
 ```
 
-Only `process` is required; the rest may be `NULL`. `vt` must point at **static storage** — the
-engine keeps the pointer, not a copy. No exception or panic may cross these callbacks.
+Only `process` is required; the rest may be `NULL`. The engine copies `*vt` **by value** during
+the call, so `vt` may be a stack temporary — it does not need static storage. The `factory`
+pointer, by contrast, is retained (passed back to `create`/`get_contract` on every
+instantiation), so it must outlive the graph. No exception or panic may cross these callbacks.
 
 Every `Context` and `Contract` method shown above has a plain C counterpart: `lmflow_ctx_input`,
 `lmflow_ctx_emit`, `lmflow_ctx_option_i64`, `lmflow_contract_input_set_type`, and so on.

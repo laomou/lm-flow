@@ -60,11 +60,10 @@ mod reverse_sleep_kernel {
                 close: None,
                 destroy: None,
             };
-            // 泄漏一个 'static 的 vtable(注册表只存指针)
-            let vt: &'static _ = Box::leak(Box::new(vt));
+            // 引擎在 register 内按值拷贝 vtable,返回后不再引用 —— 故栈上量即可,无需泄漏。
             let name = std::ffi::CString::new("ReverseSleep").unwrap();
             let rc = unsafe {
-                lmflow::ffi::lmflow_register_kernel(name.as_ptr(), vt, std::ptr::null_mut())
+                lmflow::ffi::lmflow_register_kernel(name.as_ptr(), &vt, std::ptr::null_mut())
             };
             assert_eq!(rc, 0, "failed to register ReverseSleep");
         });
@@ -253,10 +252,9 @@ mod reverse_sleep2_kernel {
                 close: None,
                 destroy: None,
             };
-            let vt: &'static _ = Box::leak(Box::new(vt));
             let name = std::ffi::CString::new("ReverseSleep2").unwrap();
             let rc = unsafe {
-                lmflow::ffi::lmflow_register_kernel(name.as_ptr(), vt, std::ptr::null_mut())
+                lmflow::ffi::lmflow_register_kernel(name.as_ptr(), &vt, std::ptr::null_mut())
             };
             assert_eq!(rc, 0, "failed to register ReverseSleep2");
         });
