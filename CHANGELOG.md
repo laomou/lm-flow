@@ -12,9 +12,12 @@ to each GitHub Release.
 
 ### Added
 
-- **C/C++ and Python backpressure snapshots.** Input handles expose global-watermark wait
-  statistics, while Poller handles expose capacity, policy, queue, drop, and Block-wait
-  statistics through struct-size-guarded C ABI records, C++ helpers, and Python dictionaries.
+- **Backpressure-aware graph visualization.** Statistics-enabled Graphviz output now shows the
+  global packet watermark, per-input queue capacity/occupancy/reservations, and Poller
+  capacity/occupancy/drop state. Multi-port nodes include a compact port table; active stalls are
+  red, likely missing aligned inputs are yellow, and historical stalls or drops are amber. Healthy
+  edges stay compact. Durations use adaptive units, a diagnostics legend explains the styling,
+  SVG tooltips retain detailed snapshots, and the title includes the current run's elapsed time.
 - **Global-watermark and Poller backpressure diagnostics.** Rust input and Poller handles expose
   active waiters, event counts, and blocked durations. Exponentially rate-limited WARN/INFO logs
   and graph dumps include port, policy, capacity, occupancy, timeout, and drop context; reset clears

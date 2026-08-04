@@ -358,9 +358,17 @@ input_ports: [in, gate]
     assert_eq!(blocked.block_events, 1);
     assert!(blocked.blocked_for_us > 0);
     assert!(graph.to_dot_with_stats().contains("bp 1×"));
-    assert!(graph
-        .to_dot_with_stats()
-        .contains("cap mid=1, gate=unbounded"));
+    let blocked_dot = graph.to_dot_with_stats();
+    assert!(blocked_dot.contains("ports:"));
+    assert!(blocked_dot.contains("mid 1/1 r"));
+    assert!(blocked_dot.contains("mid 1/1 r0 BLOCKED"));
+    assert!(blocked_dot.contains("gate 0/∞ r0 WAITING"));
+    assert!(blocked_dot.contains("queue 1/1 · reserved"));
+    assert!(blocked_dot.contains("bp 1×"));
+    assert!(blocked_dot.contains("color=\"#d62728\""));
+    assert!(blocked_dot.contains("BLOCKED"));
+    assert!(blocked_dot.contains("WAITING for aligned input"));
+    assert!(blocked_dot.contains("color=\"#d6a700\""));
     assert!(graph.dump().contains("capacity=1 packets"));
     assert!(graph.dump().contains("capacity=unbounded packets"));
     assert!(graph.dump().contains("blocked=true"));

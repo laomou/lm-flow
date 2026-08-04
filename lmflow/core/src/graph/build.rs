@@ -11,7 +11,7 @@
 use std::cell::UnsafeCell;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Instant;
 
@@ -364,6 +364,7 @@ impl GraphInner {
             side_packets: Mutex::new(BTreeMap::new()),
             required_side_packets: required,
             epoch: Instant::now(),
+            run_started_us: AtomicI64::new(0),
             timing,
         })
     }
