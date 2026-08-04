@@ -12,6 +12,12 @@ to each GitHub Release.
 
 ### Added
 
+- **Native Windows/MSVC CI coverage.** Windows now builds and runs the Rust engine with the
+  bundled C++ kernels, compiles the public C/C++ headers and header-only tests with MSVC, validates
+  Debug and Release Visual Studio CMake builds, installs and consumes the native SDK through
+  a minimal `find_package` ABI smoke, and builds/runs the Python extension. CMake now selects
+  `lmflow.lib`, propagates
+  Rust's required Windows system libraries, and keeps the MSVC runtime consistent with rustc.
 - **Backpressure-aware graph visualization.** Statistics-enabled Graphviz output now shows the
   global packet watermark, per-input queue capacity/occupancy/reservations, and Poller
   capacity/occupancy/drop state. Multi-port nodes include a compact port table; active stalls are

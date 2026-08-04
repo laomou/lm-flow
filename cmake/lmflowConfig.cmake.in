@@ -3,7 +3,7 @@
 # lmflow 原生 SDK 的 CMake 配置。消费者:
 #   find_package(lmflow REQUIRED)
 #   target_link_libraries(my_app PRIVATE lmflow::core)
-# 即拿到公共头 + liblmflow.a + 所需系统库。
+# 即拿到公共头 + 平台对应的 lmflow staticlib + 所需系统库。
 
 include(CMakeFindDependencyMacro)
 find_dependency(Threads)
@@ -11,9 +11,17 @@ find_dependency(Threads)
 if(NOT TARGET lmflow::core)
   add_library(lmflow::core STATIC IMPORTED)
   set_target_properties(lmflow::core PROPERTIES
-    IMPORTED_LOCATION "${PACKAGE_PREFIX_DIR}/lib/liblmflow.a"
-    INTERFACE_INCLUDE_DIRECTORIES "${PACKAGE_PREFIX_DIR}/include"
-    INTERFACE_LINK_LIBRARIES "Threads::Threads;${CMAKE_DL_LIBS};m")
+    IMPORTED_LOCATION "${PACKAGE_PREFIX_DIR}/lib/@LMFLOW_STATIC_LIBRARY_FILENAME@"
+    INTERFACE_INCLUDE_DIRECTORIES "${PACKAGE_PREFIX_DIR}/include")
+  target_link_libraries(lmflow::core INTERFACE Threads::Threads)
+  if(WIN32)
+    target_link_libraries(lmflow::core INTERFACE kernel32 ntdll userenv ws2_32 dbghelp)
+  else()
+    target_link_libraries(lmflow::core INTERFACE ${CMAKE_DL_LIBS} m)
+  endif()
+  if(MSVC)
+    target_compile_options(lmflow::core INTERFACE /MD)
+  endif()
 endif()
 
 check_required_components(lmflow)

@@ -1,4 +1,16 @@
 cmake_minimum_required(VERSION 3.18)
+
+# Rust 的 windows-msvc 标准库与 staticlib 固定使用动态 Release CRT(`/MD`,
+# `/defaultlib:msvcrt`)。若 CMake 在 Debug 下默认用 `/MDd`,同一进程会混入两套 CRT,
+# MSVC 会以 RuntimeLibrary mismatch 拒绝链接。CMP0091 必须在 project() 前启用,
+# 让所有本工程目标无论配置都与 Rust 保持 `/MD`。
+if(POLICY CMP0091)
+  cmake_policy(SET CMP0091 NEW)
+endif()
+# 这里不能用 `if(MSVC)`:编译器尚未由 project() 启用,MSVC 变量此时还不存在。
+# 非 MSVC 生成器会忽略这个变量。
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreadedDLL")
+
 project(lmflow VERSION 0.2.0 LANGUAGES CXX)
 
 # 引擎是 Rust crate(lmflow/core),cargo 权威构建(build.rs 经 cc 顺带编 lmflow/cpp

@@ -14,11 +14,17 @@
 # 故改用生成器表达式,让 profile 跟着**实际构建的那个配置**走。单配置生成器行为不变。
 set(_lmflow_optimized "$<OR:$<CONFIG:Release>,$<CONFIG:RelWithDebInfo>,$<CONFIG:MinSizeRel>>")
 
-# 引擎 crate(lmflow)的 target 落在它自己目录下。
-# cargo 只有 dev / release 两档,故 RelWithDebInfo / MinSizeRel 都映到 release。
-set(LMFLOW_LIB "${LMFLOW_SRC}/core/target/$<IF:${_lmflow_optimized},release,debug>/liblmflow.a")
-set(_lmflow_lib_debug "${LMFLOW_SRC}/core/target/debug/liblmflow.a")
-set(_lmflow_lib_release "${LMFLOW_SRC}/core/target/release/liblmflow.a")
+# 引擎 crate(lmflow)的 staticlib 落在它自己目录下。MSVC 不带 `lib` 前缀且后缀为
+# `.lib`;Unix / MinGW 使用 `liblmflow.a`。cargo 只有 dev / release 两档,故
+# RelWithDebInfo / MinSizeRel 都映到 release。
+if(MSVC)
+  set(LMFLOW_STATIC_LIBRARY_FILENAME "lmflow.lib")
+else()
+  set(LMFLOW_STATIC_LIBRARY_FILENAME "liblmflow.a")
+endif()
+set(LMFLOW_LIB "${LMFLOW_SRC}/core/target/$<IF:${_lmflow_optimized},release,debug>/${LMFLOW_STATIC_LIBRARY_FILENAME}")
+set(_lmflow_lib_debug "${LMFLOW_SRC}/core/target/debug/${LMFLOW_STATIC_LIBRARY_FILENAME}")
+set(_lmflow_lib_release "${LMFLOW_SRC}/core/target/release/${LMFLOW_STATIC_LIBRARY_FILENAME}")
 
 find_program(CARGO cargo REQUIRED)
 find_package(Threads REQUIRED)
@@ -34,7 +40,7 @@ add_custom_target(flow_engine ALL
   BYPRODUCTS "${LMFLOW_LIB}"
   COMMAND ${CARGO} build "$<${_lmflow_optimized}:--release>" --features builtin-kernels
   WORKING_DIRECTORY "${LMFLOW_SRC}/core"
-  COMMENT "cargo build ($<IF:${_lmflow_optimized},release,dev> profile) — Rust engine + C++ kernels → liblmflow.a"
+  COMMENT "cargo build ($<IF:${_lmflow_optimized},release,dev> profile) — Rust engine + C++ kernels → ${LMFLOW_STATIC_LIBRARY_FILENAME}"
   COMMAND_EXPAND_LISTS VERBATIM USES_TERMINAL)
 
 # 按配置分别给出产物位置(多配置生成器要靠 IMPORTED_LOCATION_<CONFIG> 选)。
@@ -50,5 +56,17 @@ set_target_properties(lmflow_core PROPERTIES
 target_include_directories(lmflow_core INTERFACE
   "$<BUILD_INTERFACE:${LMFLOW_SRC}/include>"
   "$<INSTALL_INTERFACE:include>")
-target_link_libraries(lmflow_core INTERFACE Threads::Threads ${CMAKE_DL_LIBS} m)
+target_link_libraries(lmflow_core INTERFACE Threads::Threads)
+if(WIN32)
+  # `cargo rustc --target x86_64-pc-windows-msvc -- --print native-static-libs`
+  # 给出的 Rust staticlib 系统依赖。顺序与 rustc 输出保持一致。
+  target_link_libraries(lmflow_core INTERFACE kernel32 ntdll userenv ws2_32 dbghelp)
+else()
+  target_link_libraries(lmflow_core INTERFACE ${CMAKE_DL_LIBS} m)
+endif()
+if(MSVC)
+  # installed target 的消费者也需要 `/MD`;这里只设置 INTERFACE 是因为 imported target
+  # 自身不编译。显式选项放在 CMake 默认 `/MDd` 之后,Debug 消费者也不会混入 debug CRT。
+  target_compile_options(lmflow_core INTERFACE /MD)
+endif()
 add_library(lmflow::core ALIAS lmflow_core)
