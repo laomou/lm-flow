@@ -657,15 +657,29 @@ B 规则:**每个输入口都有 ≥1 包** → 取各口队首组成一次 `Pro
 | 机制 | 性质 | 满了怎样 |
 |---|---|---|
 | `max_queue_size`(默认 100) | **只是软水位,对所有边一视同仁** | 仅告警(指数退避)+ 可用 `queue_depth` 观测。**不阻塞任何人** |
-| `max_queued_packets` / `max_queued_bytes`(全局水位,**默认 0 = 不限**) | **唯一的硬机制** | 转化为**图输入口**背压:`send` 等排水,`try_send` 返回 `LMFLOW_ERR_WOULD_BLOCK` |
+| `max_queued_packets` / `max_queued_bytes`(全局水位,**默认 0 = 不限**) | 全图硬预算,但只在图输入口施压 | `send` 等排水,`try_send` 返回 `LMFLOW_ERR_WOULD_BLOCK` |
 | `fixed_size` 输入策略(**按节点输入口**,非按边) | 有界 + **有意有损** | 丢最旧;计数 + 首次 WARN。不阻塞上游 |
+| 有界 Poller(`capacity` + overflow policy) | 图输出订阅队列的局部上界 | `block` 无损等待宿主排水;`drop_oldest` / `drop_newest` / `latest` 有损并计数告警 |
 
 > ⚠ **本表曾经是错的**,而且错在一条安全属性上:它写着「图输入口有界(`max_queue_size`),
 > 满时 `send` 阻塞至有空位」。实际上 `max_queue_size` 在全引擎**只被 `warn_if_over_soft_limit`
 > 读一次**,`send` 从不看它 —— 它对图输入口和内部边同样只是告警。真正让 `send` 等待的是
 > **全局水位**,而它**默认为 0(不限)**。也就是说:**不显式配置 `max_queued_packets` /
-> `max_queued_bytes` 时,内存没有任何上界**,只有 depth 100 时的一条 WARN。
+> `max_queued_bytes` 时,普通内部队列没有任何硬上界,只有 depth 100 时的一条 WARN。
 > (`flow.h` 的对应段落曾有同样的错误描述,已一并修正。)
+
+**Poller 队列属于全局水位统计**:每个 Poller 是独立订阅者,因此同一包投给 N 个 Poller
+会计 N 个队列槽(引用计数共享 payload,但每个订阅者都能独立滞留它)。默认
+`add_poller` 保持历史兼容——无容量限制;需要严格约束输出滞留时用 bounded Poller:
+
+- `block`:满时阻塞产出该边的线程,直到宿主取走一包。无损,但宿主必须从另一线程并发排水;
+- `drop_oldest`:丢最旧,保留最近 `capacity` 包;
+- `drop_newest`:保留已有积压,拒绝新包;
+- `latest`:容量固定为 1,永远只保留最新值。
+
+有损策略都有独立 `dropped_count` 与指数退避 WARN。Poller pop、overflow 丢弃、reset
+清空均同步扣减全局 packet/byte 计数。已注册 type descriptor 的自定义 Foreign payload
+按固定对象 `size` 计量;这是浅尺寸,不包含 `std::vector` 等对象内部堆分配。
 
 **为什么内部边不设硬上界** —— 否则「扇出后再汇合」的合法 DAG 会死锁:
 

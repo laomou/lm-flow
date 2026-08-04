@@ -204,22 +204,128 @@ unsafe impl Send for Observer {}
 
 pub struct PollerInner {
     edge: EdgeId,
+    edge_name: String,
     queue: Mutex<VecDeque<Packet>>,
     closed: AtomicBool,
+    capacity: Option<usize>,
+    overflow: PollerOverflow,
+    dropped: AtomicU64,
+    active: AtomicBool,
 }
 
 impl PollerInner {
-    fn push(&self, p: Packet) {
-        self.queue
-            .lock()
-            .expect("poller lock poisoned")
-            .push_back(p);
+    fn push(&self, graph: &GraphInner, p: Packet) -> bool {
+        loop {
+            if !self.active.load(Ordering::SeqCst) {
+                return false;
+            }
+            let before = graph.activity_gen();
+            let mut queue = self.queue.lock().expect("poller lock poisoned");
+            if !self.active.load(Ordering::SeqCst) {
+                return false;
+            }
+            let full = self
+                .capacity
+                .is_some_and(|capacity| queue.len() >= capacity);
+            if !full {
+                graph.shared.on_enqueue(p.byte_size());
+                queue.push_back(p);
+                return true;
+            }
+            match self.overflow {
+                PollerOverflow::Block => {
+                    drop(queue);
+                    if !self.active.load(Ordering::SeqCst)
+                        || graph.shared.is_cancelled()
+                        || graph.shared.has_error()
+                    {
+                        return false;
+                    }
+                    graph.wait_activity_since(before, std::time::Duration::from_millis(100));
+                }
+                PollerOverflow::DropOldest => {
+                    if let Some(old) = queue.pop_front() {
+                        graph.shared.on_dequeue(old.byte_size());
+                        self.note_dropped(1);
+                    }
+                    graph.shared.on_enqueue(p.byte_size());
+                    queue.push_back(p);
+                    return true;
+                }
+                PollerOverflow::DropNewest => {
+                    drop(queue);
+                    self.note_dropped(1);
+                    return false;
+                }
+                PollerOverflow::Latest => {
+                    let dropped = queue.len() as u64;
+                    while let Some(old) = queue.pop_front() {
+                        graph.shared.on_dequeue(old.byte_size());
+                    }
+                    if dropped != 0 {
+                        self.note_dropped(dropped);
+                    }
+                    graph.shared.on_enqueue(p.byte_size());
+                    queue.push_back(p);
+                    return true;
+                }
+            }
+        }
     }
-    fn pop(&self) -> Option<Packet> {
-        self.queue.lock().expect("poller lock poisoned").pop_front()
+
+    fn pop(&self, graph: &GraphInner) -> Option<Packet> {
+        let packet = self.queue.lock().expect("poller lock poisoned").pop_front();
+        if let Some(packet) = &packet {
+            graph.shared.on_dequeue(packet.byte_size());
+            graph.notify_activity();
+        }
+        packet
     }
+
     fn is_empty(&self) -> bool {
         self.queue.lock().expect("poller lock poisoned").is_empty()
+    }
+
+    fn clear(&self, graph: &GraphInner) {
+        let mut queue = self.queue.lock().expect("poller lock poisoned");
+        while let Some(packet) = queue.pop_front() {
+            graph.shared.on_dequeue(packet.byte_size());
+        }
+        drop(queue);
+        graph.notify_activity();
+    }
+
+    fn note_dropped(&self, count: u64) {
+        let before = self.dropped.fetch_add(count, Ordering::Relaxed);
+        let after = before + count;
+        if before == 0 || after.is_power_of_two() {
+            runtime::log_warn(&format!(
+                "poller on edge `{}` has dropped {} packets total due to overflow policy {:?}",
+                self.edge_name, after, self.overflow
+            ));
+        }
+    }
+}
+
+/// A bounded poller's behavior when its queue reaches capacity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PollerOverflow {
+    Block,
+    DropOldest,
+    DropNewest,
+    Latest,
+}
+
+/// Options for [`Graph::add_poller_with_options`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PollerOptions {
+    pub capacity: usize,
+    pub overflow: PollerOverflow,
+}
+
+impl PollerOptions {
+    pub fn new(capacity: usize, overflow: PollerOverflow) -> Self {
+        Self { capacity, overflow }
     }
 }
 
@@ -243,12 +349,12 @@ impl Poller {
 
     fn next_deadline(&self, deadline: Option<std::time::Instant>) -> Result<Option<Packet>> {
         loop {
-            if let Some(p) = self.inner.pop() {
+            if let Some(p) = self.inner.pop(&self.graph) {
                 return Ok(Some(p));
             }
             if self.inner.closed.load(Ordering::SeqCst) || self.graph.shared.has_error() {
                 // 先把队列排干再宣告结束
-                return Ok(self.inner.pop());
+                return Ok(self.inner.pop(&self.graph));
             }
             // 有主线程任务就顺手跑掉(默认执行器就是宿主线程)
             if self.graph.pump_step() {
@@ -258,7 +364,7 @@ impl Poller {
             let before = self.graph.activity_gen_pub();
             if self.graph.is_idle_pub() {
                 // 主线程与线程池都空了 —— 不会再有新输出
-                return Ok(self.inner.pop());
+                return Ok(self.inner.pop(&self.graph));
             }
             // 线程池还在跑,等它有进展
             match self.graph.remaining_for_poller(deadline) {
@@ -272,11 +378,15 @@ impl Poller {
 
     /// 非阻塞:仅看现有队列。
     pub fn try_next(&self) -> Option<Packet> {
-        self.inner.pop()
+        self.inner.pop(&self.graph)
     }
 
     pub fn is_empty(&self) -> bool {
         self.inner.is_empty()
+    }
+
+    pub fn dropped_count(&self) -> u64 {
+        self.inner.dropped.load(Ordering::Relaxed)
     }
 }
 
@@ -782,6 +892,24 @@ impl Graph {
     }
 
     pub fn add_poller(&self, port: &str) -> Result<Poller> {
+        self.add_poller_inner(port, None)
+    }
+
+    pub fn add_poller_with_options(&self, port: &str, options: PollerOptions) -> Result<Poller> {
+        if options.capacity == 0 {
+            return Err(Error::InvalidArg(
+                "poller capacity must be at least 1".into(),
+            ));
+        }
+        if options.overflow == PollerOverflow::Latest && options.capacity != 1 {
+            return Err(Error::InvalidArg(
+                "poller overflow=latest requires capacity 1".into(),
+            ));
+        }
+        self.add_poller_inner(port, Some(options))
+    }
+
+    fn add_poller_inner(&self, port: &str, options: Option<PollerOptions>) -> Result<Poller> {
         let st = self.state();
         if st != State::Initialized {
             return Err(Error::State(format!(
@@ -794,8 +922,13 @@ impl Graph {
             })?;
         let inner = Arc::new(PollerInner {
             edge,
+            edge_name: port.to_string(),
             queue: Mutex::new(VecDeque::new()),
             closed: AtomicBool::new(false),
+            capacity: options.map(|options| options.capacity),
+            overflow: options.map_or(PollerOverflow::Block, |options| options.overflow),
+            dropped: AtomicU64::new(0),
+            active: AtomicBool::new(true),
         });
         self.inner.edges[edge]
             .pollers
@@ -842,6 +975,7 @@ impl Graph {
 
     pub fn cancel(&self) {
         self.inner.shared.cancel();
+        self.inner.notify_activity();
     }
 
     pub fn wait_done(&self) -> Result<()> {
@@ -978,6 +1112,19 @@ impl Graph {
 
     pub fn node_stats(&self, i: usize) -> Option<NodeStatsSnapshot> {
         self.inner.node_stats(i)
+    }
+}
+
+impl Drop for Poller {
+    fn drop(&mut self) {
+        self.inner.active.store(false, Ordering::SeqCst);
+        let edge = &self.graph.edges[self.inner.edge];
+        edge.pollers
+            .lock()
+            .expect("poller list lock poisoned")
+            .retain(|poller| !Arc::ptr_eq(poller, &self.inner));
+        self.inner.clear(&self.graph);
+        self.graph.notify_activity();
     }
 }
 
@@ -1222,12 +1369,15 @@ impl GraphInner {
 
         // 订阅者(poller / observer)各自独立一份
         {
-            let pollers = edge.pollers.lock().expect("poller list lock poisoned");
+            let pollers = edge
+                .pollers
+                .lock()
+                .expect("poller list lock poisoned")
+                .clone();
             let mut any = false;
-            for p in pollers.iter() {
+            for p in &pollers {
                 for pkt in packets {
-                    p.push(pkt.clone());
-                    any = true;
+                    any |= p.push(self, pkt.clone());
                 }
             }
             if any {
@@ -2006,8 +2156,9 @@ impl GraphInner {
             // poller / observer 是宿主持有、engine 存 Arc —— **保留**列表,只复位内容,
             // 让宿主复用同一个 Poller 句柄再取下一轮输出。
             for pl in e.pollers.lock().expect("poller list lock poisoned").iter() {
-                pl.queue.lock().expect("poller lock poisoned").clear();
+                pl.clear(self);
                 pl.closed.store(false, Ordering::SeqCst);
+                pl.dropped.store(0, Ordering::Relaxed);
             }
         }
 

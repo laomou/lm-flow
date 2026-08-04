@@ -99,6 +99,47 @@ fn custom_type_descriptor_registration_is_strict_and_queryable() {
     }
 }
 
+#[test]
+fn bounded_poller_exposes_drop_policy_and_watermark_accounting() {
+    lmflow::register_builtin_kernels();
+    unsafe {
+        let graph = lmflow_graph_new();
+        let yaml = cs(r#"
+nodes:
+  - { name: pass, kernel: PassThroughKernel, input_ports: [in], output_ports: [out] }
+input_ports: [in]
+output_ports: [out]
+"#);
+        assert_eq!(lmflow_graph_init_from_yaml(graph, yaml.as_ptr()), 0);
+        let output = cs("out");
+        let poller =
+            lmflow_graph_add_poller_bounded(graph, output.as_ptr(), 1, LMFLOW_POLLER_DROP_OLDEST);
+        assert!(!poller.is_null(), "{}", last_error());
+        assert_eq!(lmflow_graph_start(graph), 0);
+        let input_name = cs("in");
+        let input = lmflow_graph_input(graph, input_name.as_ptr());
+
+        assert_eq!(lmflow_input_send(input, make_int_packet(1, 1)), 0);
+        assert_eq!(lmflow_graph_wait_until_idle(graph), 0);
+        assert_eq!(lmflow_input_send(input, make_int_packet(2, 2)), 0);
+        assert_eq!(lmflow_graph_wait_until_idle(graph), 0);
+        assert_eq!(lmflow_graph_total_queued(graph), 1);
+        assert_eq!(lmflow_poller_dropped_count(poller), 1);
+
+        let mut packet = LMFlowPacket::default();
+        assert!(lmflow_poller_next(poller, &mut packet));
+        assert_eq!(*(packet.payload as *const i32), 2);
+        lmflow_packet_drop(&mut packet);
+        assert_eq!(lmflow_graph_total_queued(graph), 0);
+
+        lmflow_graph_close_all_inputs(graph);
+        assert_eq!(lmflow_graph_wait_done(graph), 0);
+        lmflow_input_free(input);
+        lmflow_poller_free(poller);
+        lmflow_graph_free(graph);
+    }
+}
+
 /// 与 examples/cpp/hello_world/hello_world_host.cc 等价的完整流程。
 #[test]
 fn full_pipeline_through_c_abi() {

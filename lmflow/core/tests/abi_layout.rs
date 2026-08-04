@@ -77,6 +77,18 @@ fn status_codes_match_header() {
 }
 
 #[test]
+fn poller_overflow_policy_ids_match_header() {
+    use lmflow::ffi::{
+        LMFLOW_POLLER_BLOCK, LMFLOW_POLLER_DROP_NEWEST, LMFLOW_POLLER_DROP_OLDEST,
+        LMFLOW_POLLER_LATEST,
+    };
+    assert_eq!(LMFLOW_POLLER_BLOCK, 0);
+    assert_eq!(LMFLOW_POLLER_DROP_OLDEST, 1);
+    assert_eq!(LMFLOW_POLLER_DROP_NEWEST, 2);
+    assert_eq!(LMFLOW_POLLER_LATEST, 3);
+}
+
+#[test]
 fn builtin_type_ids_match_header() {
     use lmflow::packet::type_id;
     assert_eq!(type_id::NONE, 0);
