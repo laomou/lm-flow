@@ -500,7 +500,6 @@ struct InputQueueReservation {
     node: NodeId,
     port: usize,
     packets: usize,
-    bytes: u64,
 }
 
 #[derive(Debug, Default)]
@@ -633,12 +632,8 @@ pub struct Node {
     input_queues: Vec<Mutex<VecDeque<Packet>>>,
     /// 每个正向输入口的无损包数容量。`None` = 不限。
     input_queue_capacity: Vec<Option<usize>>,
-    /// 每个正向输入口的无损 payload 浅字节容量。`None` = 不限。
-    input_queue_byte_capacity: Vec<Option<u64>>,
     /// 已由上游刷新预留、尚未真正入队的槽数。与 queue len 合计做并发容量判定。
     input_queue_reserved: Vec<AtomicUsize>,
-    /// 已由上游刷新预留、尚未真正入队的字节数。
-    input_queue_reserved_bytes: Vec<AtomicU64>,
     /// 当前各输入队列内 payload 的浅字节数。
     input_queue_bytes: Vec<AtomicU64>,
     /// 每个输入口的背压与高水位统计。
@@ -1335,11 +1330,9 @@ pub struct InputQueueStatsSnapshot {
     pub port_name: String,
     pub producer_name: Option<String>,
     pub packet_capacity: Option<usize>,
-    pub byte_capacity: Option<u64>,
     pub queued_packets: usize,
     pub queued_bytes: u64,
     pub reserved_packets: usize,
-    pub reserved_bytes: u64,
     pub peak_queued_packets: usize,
     pub peak_queued_bytes: u64,
     pub blocked: bool,
@@ -2304,21 +2297,12 @@ impl GraphInner {
         let input_ts = unsafe { node.ctx_slot(slot) }.input_ts;
         let reservations = {
             let ctx = unsafe { node.ctx_slot(slot) };
-            let outputs: Vec<(EdgeId, usize, u64, bool)> = node
+            let outputs: Vec<(EdgeId, usize)> = node
                 .outputs
                 .iter()
                 .copied()
                 .zip(ctx.staging.iter())
-                .map(|(edge, packets)| {
-                    let mut bytes = 0u64;
-                    let mut unmeasurable = false;
-                    for packet in packets {
-                        let packet_bytes = packet.byte_size();
-                        unmeasurable |= !packet.has_measurable_byte_size();
-                        bytes = bytes.saturating_add(packet_bytes);
-                    }
-                    (edge, packets.len(), bytes, unmeasurable)
-                })
+                .map(|(edge, packets)| (edge, packets.len()))
                 .collect();
             let Some(reservations) = self.reserve_internal_capacity(n, &outputs)? else {
                 return Ok(false);
@@ -2351,10 +2335,10 @@ impl GraphInner {
     fn reserve_internal_capacity(
         &self,
         producer: NodeId,
-        outputs: &[(EdgeId, usize, u64, bool)],
+        outputs: &[(EdgeId, usize)],
     ) -> Result<Option<Vec<InputQueueReservation>>> {
         let mut reservations = Vec::new();
-        for &(edge, count, bytes, unmeasurable) in outputs {
+        for &(edge, count) in outputs {
             if count == 0 {
                 continue;
             }
@@ -2366,41 +2350,20 @@ impl GraphInner {
                     continue;
                 }
                 let packet_capacity = node.input_queue_capacity[port];
-                let byte_capacity = node.input_queue_byte_capacity[port];
-                if packet_capacity.is_none() && byte_capacity.is_none() {
+                if packet_capacity.is_none() {
                     continue;
                 }
                 if let Some(capacity) = packet_capacity.filter(|&capacity| count > capacity) {
                     self.release_internal_reservations(&reservations);
                     return Err(Error::Kernel(format!(
                         "node `{}` emits a batch of {count} packets to edge `{}`, exceeding consumer \
-                         `{}` input port `{}` capacity {capacity}; increase the capacity or emit smaller batches",
+                         `{}` input port `{}` effective packet capacity {capacity}; set \
+                         `input_queues.packets` or `input_queues.ports.{}.packets` to at least {count}, \
+                         or emit smaller batches",
                         self.nodes[producer].name,
                         self.edges[edge].name,
                         node.name,
                         node.in_ports.name(port).unwrap_or("?"),
-                    )));
-                }
-                if byte_capacity.is_some() && unmeasurable {
-                    self.release_internal_reservations(&reservations);
-                    return Err(Error::Kernel(format!(
-                        "node `{}` emits an unmeasurable payload to edge `{}`, but consumer `{}` \
-                         input port `{}` has a byte capacity; use a builtin payload or register a \
-                         fixed-size custom type descriptor",
-                        self.nodes[producer].name,
-                        self.edges[edge].name,
-                        node.name,
-                        node.in_ports.name(port).unwrap_or("?"),
-                    )));
-                }
-                if let Some(capacity) = byte_capacity.filter(|&capacity| bytes > capacity) {
-                    self.release_internal_reservations(&reservations);
-                    return Err(Error::Kernel(format!(
-                        "node `{}` emits a batch of {bytes} bytes to edge `{}`, exceeding consumer \
-                         `{}` input port `{}` byte capacity {capacity}; increase the capacity or emit smaller batches",
-                        self.nodes[producer].name,
-                        self.edges[edge].name,
-                        node.name,
                         node.in_ports.name(port).unwrap_or("?"),
                     )));
                 }
@@ -2409,18 +2372,10 @@ impl GraphInner {
                 // 两个刷新都以为有空位而共同越过容量。
                 let queue = node.input_queues[port].lock().expect("queue lock poisoned");
                 let queued = queue.len();
-                let queued_bytes = node.input_queue_bytes[port].load(Ordering::SeqCst);
                 let reserved = node.input_queue_reserved[port].load(Ordering::SeqCst);
-                let reserved_bytes = node.input_queue_reserved_bytes[port].load(Ordering::SeqCst);
                 let packets_full =
                     packet_capacity.is_some_and(|capacity| queued + reserved + count > capacity);
-                let bytes_full = byte_capacity.is_some_and(|capacity| {
-                    queued_bytes
-                        .saturating_add(reserved_bytes)
-                        .saturating_add(bytes)
-                        > capacity
-                });
-                if packets_full || bytes_full {
+                if packets_full {
                     drop(queue);
                     self.mark_input_queue_blocked(consumer, port);
                     self.release_internal_reservations(&reservations);
@@ -2428,12 +2383,10 @@ impl GraphInner {
                 }
                 self.finish_input_queue_block(consumer, port);
                 node.input_queue_reserved[port].fetch_add(count, Ordering::SeqCst);
-                node.input_queue_reserved_bytes[port].fetch_add(bytes, Ordering::SeqCst);
                 reservations.push(InputQueueReservation {
                     node: consumer,
                     port,
                     packets: count,
-                    bytes,
                 });
                 drop(queue);
             }
@@ -2445,8 +2398,6 @@ impl GraphInner {
         for reservation in reservations {
             self.nodes[reservation.node].input_queue_reserved[reservation.port]
                 .fetch_sub(reservation.packets, Ordering::SeqCst);
-            self.nodes[reservation.node].input_queue_reserved_bytes[reservation.port]
-                .fetch_sub(reservation.bytes, Ordering::SeqCst);
         }
     }
 
@@ -2677,9 +2628,6 @@ impl GraphInner {
             for reserved in &node.input_queue_reserved {
                 reserved.store(0, Ordering::SeqCst);
             }
-            for reserved in &node.input_queue_reserved_bytes {
-                reserved.store(0, Ordering::SeqCst);
-            }
             for stats in &node.input_queue_stats {
                 stats.reset();
             }
@@ -2772,7 +2720,7 @@ impl GraphInner {
                 if !blocked.is_empty() {
                     return Err(Error::Kernel(format!(
                         "wait_done: internal backpressure cannot make progress; blocked producers: [{}]. \
-                         increase the input queue packet/byte capacity or inspect downstream alignment",
+                         increase the input queue packet capacity or inspect downstream alignment",
                         blocked.join(", ")
                     )));
                 }

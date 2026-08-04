@@ -302,7 +302,6 @@ output_ports: ["b"]
             output_ports: vec!["final".into()],
             max_queue_size: 100,
             max_queued_packets: 0,
-            max_queued_bytes: 0,
             watchdog_ms: 0,
             ..Default::default()
         };
@@ -343,7 +342,6 @@ output_ports: ["b"]
             output_ports: vec!["clean".into()],
             max_queue_size: 100,
             max_queued_packets: 0,
-            max_queued_bytes: 0,
             watchdog_ms: 0,
             ..Default::default()
         };
@@ -364,7 +362,6 @@ output_ports: ["b"]
             output_ports: vec!["clean".into()],
             max_queue_size: 100,
             max_queued_packets: 0,
-            max_queued_bytes: 0,
             watchdog_ms: 0,
             ..Default::default()
         };
@@ -386,7 +383,6 @@ output_ports: ["b"]
             output_ports: vec!["out".into()],
             max_queue_size: 100,
             max_queued_packets: 0,
-            max_queued_bytes: 0,
             watchdog_ms: 0,
             ..Default::default()
         };
@@ -416,7 +412,6 @@ output_ports: ["b"]
             output_ports: vec!["clean".into()],
             max_queue_size: 100,
             max_queued_packets: 0,
-            max_queued_bytes: 0,
             watchdog_ms: 0,
             ..Default::default()
         };

@@ -602,11 +602,9 @@ fn introspection_through_c_abi() {
             port_name: std::ptr::null(),
             producer_name: std::ptr::null(),
             packet_capacity: 0,
-            byte_capacity: 0,
             queued_packets: 0,
             queued_bytes: 0,
             reserved_packets: 0,
-            reserved_bytes: 0,
             peak_queued_packets: 0,
             peak_queued_bytes: 0,
             blocked: false,
@@ -627,7 +625,6 @@ fn introspection_through_c_abi() {
             "in"
         );
         assert_eq!(queue_stats.packet_capacity, 0);
-        assert_eq!(queue_stats.byte_capacity, 0);
         assert!(!queue_stats.blocked);
 
         lmflow_graph_free(g);

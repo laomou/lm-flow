@@ -276,8 +276,7 @@ impl GraphShared {
     /// 「水位」该有的语义,不需要精确的那一瞬间。
     pub fn over_watermark(&self) -> bool {
         let c = &self.config;
-        (c.max_queued_packets > 0 && self.total_queued() >= c.max_queued_packets)
-            || (c.max_queued_bytes > 0 && self.total_queued_bytes() >= c.max_queued_bytes)
+        c.max_queued_packets > 0 && self.total_queued() >= c.max_queued_packets
     }
 
     // ---- 计数器 ----

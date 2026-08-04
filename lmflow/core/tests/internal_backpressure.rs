@@ -253,10 +253,9 @@ nodes:
     output_ports: []
     input_queues:
       packets: 1
-      bytes: 8
       ports:
-        wide: { packets: 2, bytes: 16 }
-        gate: { packets: 0, bytes: 0 }
+        wide: { packets: 2 }
+        gate: { packets: 0 }
 input_ports: [in, gate]
 "#,
     )
@@ -272,40 +271,6 @@ input_ports: [in, gate]
 }
 
 #[test]
-fn byte_capacity_preserves_packets_and_bounds_queue_depth() {
-    register_test_kernels();
-    let graph = Graph::from_yaml(
-        r#"
-executors:
-  - { name: pool, num_threads: 1 }
-nodes:
-  - { name: producer, kernel: PassThrough, input_ports: [in], output_ports: [mid] }
-  - name: consumer
-    kernel: InternalBpSlowPass
-    input_ports: [mid]
-    output_ports: [out]
-    executor: pool
-    input_queues: { bytes: 20 }
-input_ports: [in]
-output_ports: [out]
-"#,
-    )
-    .unwrap();
-    let output = graph.add_poller("out").unwrap();
-    graph.start().unwrap();
-    let input = graph.input("in").unwrap();
-    for timestamp in 0..20 {
-        input
-            .send(Packet::from_bytes(vec![timestamp as u8; 10]).at(Timestamp(timestamp)))
-            .unwrap();
-    }
-    graph.close_all_inputs();
-    graph.wait_done_timeout(Duration::from_secs(5)).unwrap();
-    assert_eq!(std::iter::from_fn(|| output.next()).count(), 20);
-    assert!(graph.node_stats(1).unwrap().peak_queue_depth <= 2);
-}
-
-#[test]
 fn input_queue_stats_report_active_and_accumulated_backpressure() {
     register_test_kernels();
     let graph = Graph::from_yaml(
@@ -314,7 +279,14 @@ executors:
   - { name: pool, num_threads: 1 }
 nodes:
   - { name: producer, kernel: PassThrough, input_ports: [in], output_ports: [mid], executor: pool }
-  - { name: waiting_join, kernel: InternalBpPortJoinCount, input_ports: [mid, gate], output_ports: [], executor: pool, input_queues: { packets: 1, bytes: 8 } }
+  - name: waiting_join
+    kernel: InternalBpPortJoinCount
+    input_ports: [mid, gate]
+    output_ports: []
+    executor: pool
+    input_queues:
+      packets: 1
+      ports: { gate: { packets: 0 } }
 input_ports: [in, gate]
 "#,
     )
@@ -340,12 +312,16 @@ input_ports: [in, gate]
     assert_eq!(blocked.port_name, "mid");
     assert_eq!(blocked.producer_name.as_deref(), Some("producer"));
     assert_eq!(blocked.packet_capacity, Some(1));
-    assert_eq!(blocked.byte_capacity, Some(8));
     assert_eq!(blocked.queued_packets, 1);
     assert_eq!(blocked.queued_bytes, 8);
     assert_eq!(blocked.block_events, 1);
     assert!(blocked.blocked_for_us > 0);
     assert!(graph.to_dot_with_stats().contains("bp 1×"));
+    assert!(graph
+        .to_dot_with_stats()
+        .contains("cap mid=1, gate=unbounded"));
+    assert!(graph.dump().contains("capacity=1 packets"));
+    assert!(graph.dump().contains("capacity=unbounded packets"));
     assert!(graph.dump().contains("blocked=true"));
 
     graph
@@ -405,7 +381,7 @@ executors:
   - { name: pool, num_threads: 4 }
 nodes:
   - { name: producer, kernel: PassThrough, input_ports: [in], output_ports: [mid], executor: pool, max_in_flight: 4 }
-  - { name: consumer, kernel: InternalBpSlowPass, input_ports: [mid], output_ports: [out], executor: pool, input_queues: { packets: 2, bytes: 16 } }
+  - { name: consumer, kernel: InternalBpSlowPass, input_ports: [mid], output_ports: [out], executor: pool, input_queues: { packets: 2 } }
 input_ports: [in]
 output_ports: [out]
 "#,
@@ -429,77 +405,56 @@ output_ports: [out]
     assert_eq!(stats.queued_packets, 0);
     assert_eq!(stats.queued_bytes, 0);
     assert_eq!(stats.reserved_packets, 0);
-    assert_eq!(stats.reserved_bytes, 0);
     assert!(!stats.blocked);
     assert!(stats.block_events > 0);
 }
 
 #[test]
-fn emitted_batch_larger_than_byte_capacity_fails_loudly() {
+fn byte_capacity_fields_are_rejected() {
     register_test_kernels();
-    let graph = Graph::from_yaml(
+    let error = Graph::from_yaml(
         r#"
 nodes:
-  - { name: producer, kernel: PassThrough, input_ports: [in], output_ports: [mid] }
-  - { name: sink, kernel: Sink, input_ports: [mid], output_ports: [], input_queues: { bytes: 8 } }
+  - { name: sink, kernel: Sink, input_ports: [in], output_ports: [], input_queues: { bytes: 8 } }
 input_ports: [in]
 "#,
     )
-    .unwrap();
-    graph.start().unwrap();
-    graph
-        .input("in")
-        .unwrap()
-        .send(Packet::from_bytes(vec![0; 9]).at(Timestamp(0)))
-        .unwrap();
-    graph.close_all_inputs();
-    let error = graph.wait_done().unwrap_err();
-    assert!(error.to_string().contains("batch of 9 bytes"));
+    .unwrap_err();
+    assert!(error.to_string().contains("unknown field `bytes`"));
 }
 
 #[test]
-fn byte_capacity_rejects_unmeasurable_payloads() {
+fn per_port_byte_capacity_fields_are_rejected() {
     register_test_kernels();
-    let graph = Graph::from_yaml(
+    let error = Graph::from_yaml(
         r#"
 nodes:
-  - { name: producer, kernel: PassThrough, input_ports: [in], output_ports: [mid] }
-  - { name: sink, kernel: Sink, input_ports: [mid], output_ports: [], input_queues: { bytes: 8 } }
+  - name: sink
+    kernel: Sink
+    input_ports: [in]
+    output_ports: []
+    input_queues:
+      ports: { in: { bytes: 8 } }
 input_ports: [in]
 "#,
     )
-    .unwrap();
-    graph.start().unwrap();
-    graph
-        .input("in")
-        .unwrap()
-        .send(Packet::new(1u32).at(Timestamp(0)))
-        .unwrap();
-    graph.close_all_inputs();
-    let error = graph.wait_done().unwrap_err();
-    assert!(error.to_string().contains("unmeasurable payload"));
+    .unwrap_err();
+    assert!(error.to_string().contains("unknown field `bytes`"));
 }
 
 #[test]
-fn byte_capacity_accepts_measurable_zero_length_payloads() {
+fn max_queued_bytes_is_rejected() {
     register_test_kernels();
-    let graph = Graph::from_yaml(
+    let error = Graph::from_yaml(
         r#"
-nodes:
-  - { name: producer, kernel: PassThrough, input_ports: [in], output_ports: [mid] }
-  - { name: sink, kernel: Sink, input_ports: [mid], output_ports: [], input_queues: { bytes: 1 } }
-input_ports: [in]
+nodes: []
+max_queued_bytes: 1024
 "#,
     )
-    .unwrap();
-    graph.start().unwrap();
-    graph
-        .input("in")
-        .unwrap()
-        .send(Packet::from_bytes(Vec::new()).at(Timestamp(0)))
-        .unwrap();
-    graph.close_all_inputs();
-    graph.wait_done().unwrap();
+    .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("unknown field `max_queued_bytes`"));
 }
 
 #[test]
@@ -572,7 +527,7 @@ nodes:
     output_ports: []
     back_edges: [feedback]
     input_queues:
-      ports: { feedback: { bytes: 8 } }
+      ports: { feedback: { packets: 8 } }
 input_ports: [in, feedback]
 "#,
     )

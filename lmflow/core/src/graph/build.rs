@@ -306,20 +306,7 @@ impl GraphInner {
                     })
                     .map(|capacity| (capacity != 0).then_some(capacity))
                     .collect(),
-                input_queue_byte_capacity: ins
-                    .names()
-                    .iter()
-                    .map(|port| {
-                        n.input_queues
-                            .ports
-                            .get(port)
-                            .and_then(|limits| limits.bytes)
-                            .unwrap_or(n.input_queues.bytes)
-                    })
-                    .map(|capacity| (capacity != 0).then_some(capacity))
-                    .collect(),
                 input_queue_reserved: (0..ins.len()).map(|_| AtomicUsize::new(0)).collect(),
-                input_queue_reserved_bytes: (0..ins.len()).map(|_| AtomicU64::new(0)).collect(),
                 input_queue_bytes: (0..ins.len()).map(|_| AtomicU64::new(0)).collect(),
                 input_queue_stats: (0..ins.len()).map(|_| InputQueueStats::default()).collect(),
                 input_closed: (0..ins.len()).map(|_| AtomicBool::new(false)).collect(),

@@ -657,17 +657,17 @@ B 规则:**每个输入口都有 ≥1 包** → 取各口队首组成一次 `Pro
 | 机制 | 性质 | 满了怎样 |
 |---|---|---|
 | `max_queue_size`(默认 100) | **只是软水位,对所有边一视同仁** | 仅告警(指数退避)+ 可用 `queue_depth` 观测。**不阻塞任何人** |
-| `max_queued_packets` / `max_queued_bytes`(全局水位,**默认 0 = 不限**) | 全图硬预算,但只在图输入口施压 | `send` 等排水,`try_send` 返回 `LMFLOW_ERR_WOULD_BLOCK` |
+| `max_queued_packets`(全局水位,**默认 0 = 不限**) | 全图在途包数硬预算,只在图输入口施压 | `send` 等排水,`try_send` 返回 `LMFLOW_ERR_WOULD_BLOCK` |
 | `fixed_size` 输入策略(**按节点输入口**,非按边) | 有界 + **有意有损** | 丢最旧;计数 + 首次 WARN。不阻塞上游 |
 | 有界 Poller(`capacity` + overflow policy) | 图输出订阅队列的局部上界 | `block` 无损但**要求宿主并发排水**、带等待上界(默认 5s,到点响亮失败);`drop_oldest` / `drop_newest` / `latest` 有损并计数告警 |
 | `input_queues.packets` / `input_queues.ports.*.packets` | 内部输入口无损包数硬上界 | 满时生产者保留 staging、释放 worker;下游出队后协作式恢复 |
-| `input_queues.bytes` / `input_queues.ports.*.bytes` | 内部输入口可计量 payload 浅字节硬上界 | 队列字节 + pending staging reservation 一起判定;不可计量 payload 明确拒绝 |
 
 > ⚠ **本表曾经是错的**,而且错在一条安全属性上:它写着「图输入口有界(`max_queue_size`),
 > 满时 `send` 阻塞至有空位」。实际上 `max_queue_size` 在全引擎**只被 `warn_if_over_soft_limit`
 > 读一次**,`send` 从不看它 —— 它对图输入口和内部边同样只是告警。真正让 `send` 等待的是
-> **全局水位**,而它**默认为 0(不限)**。也就是说:**不显式配置 `max_queued_packets` /
-> `max_queued_bytes` 时,普通内部队列没有任何硬上界,只有 depth 100 时的一条 WARN。
+> **全局包数水位**,而它**默认为 0(不限)**。也就是说:**不显式配置
+> `max_queued_packets` 或节点级 `input_queues.packets` 时,普通内部队列没有任何硬上界,
+> 只有 depth 100 时的一条 WARN。
 > (`flow.h` 的对应段落曾有同样的错误描述,已一并修正。)
 
 **Poller 队列属于全局水位统计**:每个 Poller 是独立订阅者,因此同一包投给 N 个 Poller
@@ -715,19 +715,16 @@ C 迅速填满 D 的输入队列而阻塞;D 却要等 B 那一路才能消费;B 
 新输入。任一下游从输入队列弹包后重试 pending flush。限制的是**节点继续产出**,
 不是占住线程等待,diamond 不形成线程循环等待。
 
-`input_queues.packets` / `bytes` 是节点所有正向输入口的默认上限;
-`input_queues.ports.video: {packets: 2, bytes: 16777216}` 按端口名覆盖。某个维度省略时
-继承节点默认值,显式 `0` 表示该端口该维度不限。配置只保留这一套统一语法,不再同时维护
-四个易混淆的拆分字段。
+`input_queues.packets` 是节点所有正向输入口的默认上限;
+`input_queues.ports.video: {packets: 2}` 按端口名覆盖。未列出的端口继承节点默认值,
+显式 `0` 表示该端口不限。容量只按包数判定。
 
-字节计量使用 `Packet::byte_size()` 的 payload **浅尺寸**。队列内已有字节和并发生产者
-已经预留、仍留在 staging 的字节一起参与容量判定,因此不会因 flush 尚未真正入队而超限。
-内建 payload 与已注册固定布局 descriptor 的 Foreign payload 可计量;Rust `Packet::new`
-等不可计量的非空 payload 在字节硬限端口上会明确报错,不能按 0 字节绕过限制。它仍不包含
-`std::vector` 等自定义对象内部另行分配的堆内存,也不试图按共享 `Arc` 的唯一物理内存去重。
+`queued_bytes` / `peak_queued_bytes` / `total_queued_bytes` 仍使用 `Packet::byte_size()` 记录
+payload **浅尺寸**,但只作诊断,不参与背压。它不包含 `std::vector` 等自定义对象内部
+另行分配的堆内存,也不试图按共享 `Arc` 的唯一物理内存去重。
 
 这些无损容量与 `fixed_size` 互斥:前者暂停生产者,后者有损丢最旧。一次调用向同一输出口
-emit 的批量若自身大于包数或字节容量会明确报错,避免永远无法满足的等待。若时间戳对齐
+emit 的批量若自身大于有效包数容量会明确报错,避免永远无法满足的等待。若时间戳对齐
 导致下游永远不能消费、所有 worker 又已空闲,等待接口会报告
 `internal backpressure cannot make progress`,而不是永久挂起。
 
