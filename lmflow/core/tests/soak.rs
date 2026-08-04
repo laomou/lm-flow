@@ -22,6 +22,11 @@
 //! `--nocapture` 会打印采样到的 RSS 曲线,便于人眼看趋势(自动断言之外的补充)。
 //!
 //! 纯 Rust 算子,故 `--no-default-features` 下同样可跑。
+//!
+//! ⚠ **本文件的测试必须串行跑**(`--test-threads=1`)。`rss_kb()` 读的是 `/proc/self/status`,
+//! 即**整个进程**的 RSS —— 两条测量型测试并行时会互相污染(实测:单跑增长 4364 KiB,
+//! 与另一条并行时虚高到 8720 KiB,多出来的是对方的常驻 footprint 而非泄漏)。
+//! CI 的 soak 步骤已带 `--test-threads=1`。
 
 use std::time::Duration;
 
@@ -33,6 +38,9 @@ const PACKET_BYTES: usize = 128 * 1024;
 const MAX_QUEUED_BYTES: u64 = 4 * 1024 * 1024;
 /// 默认包数(CI 友好:约 250 MiB 吞吐、数秒)。可用环境变量放大。
 const DEFAULT_PACKETS: usize = 2000;
+/// diamond 用**按个数**的水位(字节水位对 Native/Foreign payload 计 0,只对内建有效)。
+/// 注意扇出后每包占 **2 个**队列槽 —— `on_enqueue` 是按消费者调用的。
+const DIAMOND_MAX_QUEUED_PACKETS: usize = 64;
 
 fn packets() -> usize {
     std::env::var("LMFLOW_SOAK_PACKETS")
@@ -77,6 +85,41 @@ fn big_packet(i: usize) -> Packet {
     let mut bd = BufferData::new(&[PACKET_BYTES as i64], 0 /* u8 */).unwrap();
     bd.bytes = vec![(i & 0xFF) as u8; PACKET_BYTES];
     Packet::from_builtin(Builtin::Buffer(bd)).at(Timestamp(i as i64))
+}
+
+/// 慢转发者:取走、睡一会、原样产出 —— diamond 里的慢分支。
+#[derive(Default)]
+struct SlowRelay;
+impl Kernel for SlowRelay {
+    fn process(&mut self, cc: &mut KernelCtx) -> lmflow::Result<()> {
+        let pkt = cc.take_input(0);
+        std::thread::sleep(Duration::from_micros(200));
+        cc.emit(0, pkt)
+    }
+}
+
+/// 快转发者:立刻产出 —— diamond 里的快分支。
+#[derive(Default)]
+struct FastRelay;
+impl Kernel for FastRelay {
+    fn process(&mut self, cc: &mut KernelCtx) -> lmflow::Result<()> {
+        cc.forward(0, 0)
+    }
+}
+
+/// 汇合点:两路都取走、都释放,不产出(sink)。默认 `sync` 策略 → 按时间戳对齐。
+#[derive(Default)]
+struct JoinSink {
+    seen: u64,
+}
+impl Kernel for JoinSink {
+    fn process(&mut self, cc: &mut KernelCtx) -> lmflow::Result<()> {
+        let _a = cc.take_input(0);
+        let _b = cc.take_input(1);
+        self.seen += 1;
+        cc.counter_add("join.fired", 1);
+        Ok(())
+    }
 }
 
 #[test]
@@ -186,5 +229,121 @@ max_queued_bytes: {MAX_QUEUED_BYTES}
         "RSS 增长 {growth_kb} KiB 超过允许的 {allowed_kb} KiB。\
          本次共推入 {pushed_mib} MiB —— 若增长与吞吐同量级,说明包没有被释放\
          (水位读数可能仍然正常:那意味着某条路径漏了 on_dequeue 之外的释放)"
+    );
+}
+
+/// **扇出 + 汇合(diamond)拓扑下的内存曲线** —— ADR #11 / §7.5 唯一要保护的那个形状。
+///
+/// ```text
+///            ┌─► slow ─► s ─┐
+///   in ──────┤               ├──► join(sync 对齐)
+///            └─► fast ─► f ─┘
+/// ```
+///
+/// 为什么必须单独测:`docs/design.md` §13.1 一直声称有一条「专门构造扇出汇合(diamond)
+/// 拓扑 + 慢分支」的死锁回归 —— **实际并不存在**。全仓库每一个多输入节点都是从**图输入口**
+/// 喂的,没有任何一处是内部边扇出后再汇合。也就是说 ADR #11「内部边不设硬上界」的论证
+/// 本身此前是**断言而非实测**,而唯一的内存证据(上一条 soak)是单节点线性图。
+///
+/// 本测试同时回答两个问题:
+///   1. **活性** —— 慢分支拖着,图仍能跑完(内部边无界 ⇒ 不形成循环等待);
+///   2. **内存** —— RSS 增长仍受**水位**约束,而非受总吞吐约束(与线性图同一结论)。
+///
+/// 用 `max_queued_packets`(按**个数**)而非字节水位:`Payload::byte_size()` 对
+/// `Native` / `Foreign` 计 0,故字节水位只对内建 payload 有效,而个数水位对所有形态都成立
+/// (`flow.h` 已注明这点)。这里用 Buffer payload,两种水位都能生效,但**断言挂在个数上**。
+#[test]
+#[ignore = "长跑压测:默认不进常规套件,用 --ignored 显式跑"]
+fn watermark_bounds_memory_in_diamond_topology() {
+    let _ = register_kernel::<SlowRelay>("SoakSlowRelay");
+    let _ = register_kernel::<FastRelay>("SoakFastRelay");
+    let _ = register_kernel::<JoinSink>("SoakJoinSink");
+    let n = packets();
+
+    // 一条图输入边被**两个**节点消费 = 真正的内部扇出;两路再汇到 join 的两个输入口。
+    // join 用默认 sync 策略:必须两路在同一时间戳齐备才触发 —— 这正是 §7.5 里
+    // 「D 要等 B 那一路」的那个 D。
+    // 水位按个数:扇出后每包占 2 个队列槽(on_enqueue 是**每消费者**一次)。
+    let cfg = format!(
+        r#"
+executors:
+  - {{ name: "cpu", type: "ThreadPoolExecutor", num_threads: 3 }}
+nodes:
+  - {{ name: "slow", kernel: "SoakSlowRelay", executor: "cpu", input_ports: ["in"], output_ports: ["s"] }}
+  - {{ name: "fast", kernel: "SoakFastRelay", executor: "cpu", input_ports: ["in"], output_ports: ["f"] }}
+  - {{ name: "join", kernel: "SoakJoinSink", executor: "cpu", input_ports: ["s", "f"], output_ports: [] }}
+input_ports: ["in"]
+max_queue_size: 100000
+max_queued_packets: {DIAMOND_MAX_QUEUED_PACKETS}
+"#
+    );
+
+    let graph = Graph::from_yaml(&cfg).unwrap();
+    graph.start().unwrap();
+    let input = graph.input("in").unwrap();
+    let shared = graph.shared_for_inspection();
+
+    for i in 0..32 {
+        input.send(big_packet(i)).unwrap();
+    }
+    std::thread::sleep(Duration::from_millis(50));
+    let baseline = rss_kb();
+
+    let mut curve: Vec<u64> = Vec::new();
+    let mut peak_queued: usize = 0;
+    let sample_every = (n / 20).max(1);
+
+    for i in 32..n {
+        input
+            .send(big_packet(i))
+            .unwrap_or_else(|e| panic!("send #{i} failed: {e}"));
+        peak_queued = peak_queued.max(shared.total_queued());
+        if i % sample_every == 0 {
+            if let Some(kb) = rss_kb() {
+                curve.push(kb);
+            }
+        }
+    }
+
+    graph.close_all_inputs();
+    // 活性断言:慢分支拖着,但内部边无界 ⇒ 不该形成循环等待。若哪天给内部边加了
+    // 阻塞式硬上界,这里就是第一个挂住的地方 —— 那正是 ADR #11 要防的东西。
+    graph
+        .wait_done_timeout(Duration::from_secs(300))
+        .expect("diamond 必须能跑完 —— 挂住就说明扇出汇合形成了循环等待");
+
+    let pushed_mib = (n as u64 * PACKET_BYTES as u64) / (1024 * 1024);
+    let fired = graph.counter_value("join.fired");
+    println!("diamond: {n} packets × {PACKET_BYTES} B = {pushed_mib} MiB pushed");
+    println!("diamond: join 触发 {fired} 次(每次消费两路各一包)");
+    println!("diamond: peak total_queued = {peak_queued} 槽(水位 64)");
+
+    // 汇合点必须把每个时间戳都对齐处理掉 —— 无丢失、无错配。
+    assert_eq!(
+        fired, n as i64,
+        "sync 汇合应对齐处理全部 {n} 个时间戳,实际 {fired}"
+    );
+    // 水位真的被压到过(否则内存断言不具说服力)。
+    assert!(
+        peak_queued >= DIAMOND_MAX_QUEUED_PACKETS / 2,
+        "水位从未被压到(峰值 {peak_queued} 槽 < 半个水位)—— 本次没形成积压,断言无意义"
+    );
+
+    let Some(base) = baseline else {
+        println!("diamond: 非 Linux,跳过 RSS 断言(活性与无丢失断言仍有效)");
+        return;
+    };
+    let peak_rss = curve.iter().copied().max().unwrap_or(base);
+    let growth_kb = peak_rss.saturating_sub(base);
+    println!("diamond: RSS 基线 {base} KiB → 峰值 {peak_rss} KiB(增长 {growth_kb} KiB)");
+    println!("diamond: RSS 曲线(KiB){curve:?}");
+
+    // 64 槽 × 128 KiB = 8 MiB 的在途上界,加 32 MiB 常数开销(分配器 / 三个线程栈 /
+    // 扇出时同一 payload 被两路共享故实际更省)。关键仍是**该界与 n 无关**。
+    let allowed_kb = DIAMOND_MAX_QUEUED_PACKETS as u64 * (PACKET_BYTES as u64 / 1024) + 32 * 1024;
+    assert!(
+        growth_kb <= allowed_kb,
+        "diamond 下 RSS 增长 {growth_kb} KiB 超过允许的 {allowed_kb} KiB。\
+         本次推入 {pushed_mib} MiB —— 若增长与吞吐同量级,说明扇出/汇合路径上有包没被释放"
     );
 }

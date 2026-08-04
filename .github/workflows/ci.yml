@@ -95,7 +95,10 @@ jobs:
       # 与 2.5 GiB 吞吐下增长同为 ~4.3 MiB);CI 用约 1 GiB 规模,几秒即可。
       - name: 全局水位内存曲线(soak)
         env: { LMFLOW_SOAK_PACKETS: '8000' }
-        run: timeout 300 cargo test --test soak -- --ignored --nocapture
+        # --test-threads=1:RSS 是**进程级**读数,两条测量型测试并行会互相污染
+        # (实测同进程并行时增长从 4364 KiB 虚高到 8720 KiB —— 那是对方的常驻footprint,
+        # 不是泄漏)。串行后每条各自取基线、各自量增长,信号才干净。
+        run: timeout 300 cargo test --test soak -- --ignored --nocapture --test-threads=1
 
   # 外部宿主视角:header 声明的符号必须都在库里,且真的能链接+运行。
   # 这条曾抓到两个真问题:lmflow_register_builtin_kernels 漏在 header 之外、

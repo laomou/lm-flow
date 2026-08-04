@@ -553,10 +553,14 @@ void lmflow_graph_free(LMFlowGraph*); /* 内部先 cancel + wait,再释放 */
  * 句柄式为热路径推荐用法(免去每包按名字查表);句柄生命周期随 graph,无需释放。
  * ---- 背压策略(重要)----
  * **只有图输入口是限流点;图内部的边不对生产者施加背压。**
- *   - 图输入口:有界队列。满时 lmflow_input_send 阻塞至有空位或图终止;
- *     lmflow_input_try_send 立即返回 LMFLOW_ERR_WOULD_BLOCK。
- *   - 内部边(节点→节点):不阻塞生产者,只在超过软水位时告警/计数
- *     (可用 lmflow_graph_queue_depth 观测)。
+ *   - max_queue_size(默认 100)**只是软水位**,对图输入口与内部边一视同仁:
+ *     仅告警(指数退避)+ 可用 lmflow_graph_queue_depth 观测,**不阻塞任何人**。
+ *   - 唯一的硬机制是**全局水位** max_queued_packets / max_queued_bytes,它把压力
+ *     转化为**图输入口**背压:满时 lmflow_input_send 等排水,lmflow_input_try_send
+ *     立即返回 LMFLOW_ERR_WOULD_BLOCK。⚠ 两者**默认都是 0 = 不限** —— 不显式配置时
+ *     内存没有任何上界,只有 depth 100 时的一条 WARN。
+ *   - 内部边(节点→节点):不阻塞生产者。要给某个节点的输入口设硬上界,用
+ *     input_policy: fixed_size(有界 + 满则丢最旧,**按节点输入口**而非按边)。
  *
  * 为什么内部边不设硬上界:否则「扇出后再汇合」的合法 DAG 会死锁 ——
  *      A ─┬─► B(慢) ─┐
