@@ -156,6 +156,7 @@ pub struct Edge {
     pub is_graph_output: bool,
     closed: AtomicBool,
     dropped: AtomicU64,
+    watermark_backpressure: BackpressureStats,
     /// 该边上最近一次投递的时间戳。**必须独立记录**,不能拿「队列里还剩的包」当参照 ——
     /// 队列一排空参照就消失了,回退的时间戳就能混进来。
     last_sent: Mutex<Timestamp>,
@@ -173,6 +174,7 @@ impl Edge {
             is_graph_output: false,
             closed: AtomicBool::new(false),
             dropped: AtomicU64::new(0),
+            watermark_backpressure: BackpressureStats::default(),
             last_sent: Mutex::new(Timestamp::unset()),
             pollers: Mutex::new(Vec::new()),
             observers: Mutex::new(Vec::new()),
@@ -212,20 +214,87 @@ pub struct PollerInner {
     /// `Block` 等宿主腾位的上界;`None` = 无上界(见 `PollerOptions::block_timeout`)。
     block_timeout: Option<std::time::Duration>,
     dropped: AtomicU64,
+    block_backpressure: BackpressureStats,
     active: AtomicBool,
+}
+
+#[derive(Debug, Default)]
+struct BackpressureStats {
+    active_waiters: AtomicUsize,
+    block_events: AtomicU64,
+    blocked_total_us: AtomicU64,
+    blocked_since_us: AtomicI64,
+}
+
+impl BackpressureStats {
+    fn enter(&self, now_us: i64) -> Option<u64> {
+        let before = self.active_waiters.fetch_add(1, Ordering::SeqCst);
+        if before != 0 {
+            return None;
+        }
+        self.blocked_since_us
+            .store(now_us.saturating_add(1), Ordering::SeqCst);
+        Some(self.block_events.fetch_add(1, Ordering::Relaxed) + 1)
+    }
+
+    fn leave(&self, now_us: i64) -> Option<(u64, u64)> {
+        let before = self.active_waiters.fetch_sub(1, Ordering::SeqCst);
+        debug_assert!(before > 0);
+        if before != 1 {
+            return None;
+        }
+        let since = self.blocked_since_us.swap(0, Ordering::SeqCst);
+        let elapsed = now_us.saturating_sub(since.saturating_sub(1)).max(0) as u64;
+        self.blocked_total_us.fetch_add(elapsed, Ordering::Relaxed);
+        Some((self.block_events.load(Ordering::Relaxed), elapsed))
+    }
+
+    fn snapshot(&self, now_us: i64) -> BackpressureStatsSnapshot {
+        let since = self.blocked_since_us.load(Ordering::SeqCst);
+        let blocked_for_us = if since == 0 {
+            0
+        } else {
+            now_us.saturating_sub(since.saturating_sub(1)).max(0) as u64
+        };
+        BackpressureStatsSnapshot {
+            blocked: self.active_waiters.load(Ordering::SeqCst) != 0,
+            active_waiters: self.active_waiters.load(Ordering::SeqCst),
+            blocked_for_us,
+            block_events: self.block_events.load(Ordering::Relaxed),
+            total_blocked_us: self
+                .blocked_total_us
+                .load(Ordering::Relaxed)
+                .saturating_add(blocked_for_us),
+        }
+    }
+
+    fn reset(&self) {
+        self.active_waiters.store(0, Ordering::SeqCst);
+        self.block_events.store(0, Ordering::Relaxed);
+        self.blocked_total_us.store(0, Ordering::Relaxed);
+        self.blocked_since_us.store(0, Ordering::SeqCst);
+    }
 }
 
 impl PollerInner {
     fn push(&self, graph: &GraphInner, p: Packet) -> bool {
         // 仅 `Block` 用:首次撞满时才起算,故「排水正常但偶尔撞满」不会累积成超时。
         let mut deadline: Option<std::time::Instant> = None;
+        let mut blocked = false;
         loop {
             if !self.active.load(Ordering::SeqCst) {
+                if blocked {
+                    self.finish_block(graph, false);
+                }
                 return false;
             }
             let before = graph.activity_gen();
             let mut queue = self.queue.lock().expect("poller lock poisoned");
             if !self.active.load(Ordering::SeqCst) {
+                drop(queue);
+                if blocked {
+                    self.finish_block(graph, false);
+                }
                 return false;
             }
             let full = self
@@ -234,15 +303,25 @@ impl PollerInner {
             if !full {
                 graph.shared.on_enqueue(p.byte_size());
                 queue.push_back(p);
+                drop(queue);
+                if blocked {
+                    self.finish_block(graph, true);
+                }
                 return true;
             }
             match self.overflow {
                 PollerOverflow::Block => {
+                    let queued = queue.len();
                     drop(queue);
+                    if !blocked {
+                        blocked = true;
+                        self.begin_block(graph, queued);
+                    }
                     if !self.active.load(Ordering::SeqCst)
                         || graph.shared.is_cancelled()
                         || graph.shared.has_error()
                     {
+                        self.finish_block(graph, false);
                         return false;
                     }
                     // 有上界的等待:`Block` 是在 dispatch 内部原地等的,而 dispatch 可能
@@ -259,9 +338,10 @@ impl PollerInner {
                         }
                         if let Some(at) = deadline {
                             if std::time::Instant::now() >= at {
+                                self.finish_block(graph, false);
                                 graph.shared.record_error(Error::Kernel(format!(
                                     "poller on output port `{}`: blocked for {:?} waiting for the \
-                                     host to free a slot (capacity {}). `PollerOverflow::Block` \
+                                     host to free a slot (capacity {}, queued {}). `PollerOverflow::Block` \
                                      requires a host that drains the poller *concurrently*; a host \
                                      that sends/waits first and drains afterwards will deadlock, \
                                      because the producer parks inside dispatch and never reaches \
@@ -272,6 +352,7 @@ impl PollerInner {
                                     self.edge_name,
                                     limit,
                                     self.capacity.unwrap_or(0),
+                                    queued,
                                 )));
                                 return false;
                             }
@@ -280,17 +361,27 @@ impl PollerInner {
                     graph.wait_activity_since(before, std::time::Duration::from_millis(100));
                 }
                 PollerOverflow::DropOldest => {
-                    if let Some(old) = queue.pop_front() {
+                    let dropped = if let Some(old) = queue.pop_front() {
                         graph.shared.on_dequeue(old.byte_size());
-                        self.note_dropped(1);
-                    }
+                        1
+                    } else {
+                        0
+                    };
                     graph.shared.on_enqueue(p.byte_size());
                     queue.push_back(p);
+                    let queued = queue.len();
+                    drop(queue);
+                    if dropped != 0 {
+                        let total = self.record_dropped(dropped);
+                        self.log_dropped(total, queued);
+                    }
                     return true;
                 }
                 PollerOverflow::DropNewest => {
+                    let queued = queue.len();
                     drop(queue);
-                    self.note_dropped(1);
+                    let total = self.record_dropped(1);
+                    self.log_dropped(total, queued);
                     return false;
                 }
                 PollerOverflow::Latest => {
@@ -298,11 +389,14 @@ impl PollerInner {
                     while let Some(old) = queue.pop_front() {
                         graph.shared.on_dequeue(old.byte_size());
                     }
-                    if dropped != 0 {
-                        self.note_dropped(dropped);
-                    }
                     graph.shared.on_enqueue(p.byte_size());
                     queue.push_back(p);
+                    let queued = queue.len();
+                    drop(queue);
+                    if dropped != 0 {
+                        let total = self.record_dropped(dropped);
+                        self.log_dropped(total, queued);
+                    }
                     return true;
                 }
             }
@@ -331,13 +425,49 @@ impl PollerInner {
         graph.notify_activity();
     }
 
-    fn note_dropped(&self, count: u64) {
-        let before = self.dropped.fetch_add(count, Ordering::Relaxed);
-        let after = before + count;
-        if before == 0 || after.is_power_of_two() {
+    fn begin_block(&self, graph: &GraphInner, queued: usize) {
+        let Some(event) = self.block_backpressure.enter(graph.epoch_us()) else {
+            return;
+        };
+        if event.is_power_of_two() {
             runtime::log_warn(&format!(
-                "poller on edge `{}` has dropped {} packets total due to overflow policy {:?}",
-                self.edge_name, after, self.overflow
+                "poller backpressure #{event}: output `{}` blocked (policy=Block, capacity={}, \
+                 queued={queued}, timeout={}); waiting for the host to drain concurrently",
+                self.edge_name,
+                self.capacity.unwrap_or(0),
+                self.block_timeout.map_or_else(
+                    || "none".to_string(),
+                    |timeout| format!("{}ms", timeout.as_millis())
+                ),
+            ));
+        }
+    }
+
+    fn finish_block(&self, graph: &GraphInner, log_recovery: bool) {
+        let Some((event, elapsed)) = self.block_backpressure.leave(graph.epoch_us()) else {
+            return;
+        };
+        if log_recovery && event.is_power_of_two() {
+            runtime::log_info(&format!(
+                "poller backpressure #{event} cleared: output `{}` resumed after {elapsed}us",
+                self.edge_name,
+            ));
+        }
+    }
+
+    fn record_dropped(&self, count: u64) -> u64 {
+        let before = self.dropped.fetch_add(count, Ordering::Relaxed);
+        before + count
+    }
+
+    fn log_dropped(&self, total: u64, queued: usize) {
+        if total == 1 || total.is_power_of_two() {
+            runtime::log_warn(&format!(
+                "poller overflow: output `{}` policy={:?} capacity={} queued={queued} \
+                 dropped_total={total}",
+                self.edge_name,
+                self.overflow,
+                self.capacity.unwrap_or(0),
             ));
         }
     }
@@ -448,6 +578,25 @@ impl Poller {
 
     pub fn dropped_count(&self) -> u64 {
         self.inner.dropped.load(Ordering::Relaxed)
+    }
+
+    pub fn backpressure_stats(&self) -> PollerBackpressureStatsSnapshot {
+        let stats = self
+            .inner
+            .block_backpressure
+            .snapshot(self.graph.epoch_us());
+        PollerBackpressureStatsSnapshot {
+            port_name: self.inner.edge_name.clone(),
+            capacity: self.inner.capacity,
+            overflow: self.inner.overflow,
+            queued_packets: self.inner.queue.lock().expect("poller lock poisoned").len(),
+            dropped_packets: self.inner.dropped.load(Ordering::Relaxed),
+            blocked: stats.blocked,
+            active_waiters: stats.active_waiters,
+            blocked_for_us: stats.blocked_for_us,
+            block_events: stats.block_events,
+            total_blocked_us: stats.total_blocked_us,
+        }
     }
 }
 
@@ -1047,6 +1196,7 @@ impl Graph {
             overflow: options.map_or(PollerOverflow::Block, |options| options.overflow),
             block_timeout: options.and_then(|options| options.block_timeout),
             dropped: AtomicU64::new(0),
+            block_backpressure: BackpressureStats::default(),
             active: AtomicBool::new(true),
         });
         self.inner.edges[edge]
@@ -1291,6 +1441,20 @@ impl Input {
     pub fn try_send(&self, pkt: Packet) -> Result<()> {
         self.graph.send(self.edge, pkt, false)
     }
+    pub fn backpressure_stats(&self) -> WatermarkBackpressureStatsSnapshot {
+        let edge = &self.graph.edges[self.edge];
+        let stats = edge.watermark_backpressure.snapshot(self.graph.epoch_us());
+        WatermarkBackpressureStatsSnapshot {
+            port_name: edge.name.clone(),
+            packet_limit: self.graph.shared.config.max_queued_packets,
+            total_queued_packets: self.graph.shared.total_queued(),
+            blocked: stats.blocked,
+            active_waiters: stats.active_waiters,
+            blocked_for_us: stats.blocked_for_us,
+            block_events: stats.block_events,
+            total_blocked_us: stats.total_blocked_us,
+        }
+    }
     pub fn close(&self) {
         self.graph.close_edge(self.edge);
         self.graph.set_state_draining_if_all_inputs_closed();
@@ -1347,6 +1511,41 @@ pub struct InputQueueStatsSnapshot {
     pub peak_queued_packets: usize,
     pub peak_queued_bytes: u64,
     pub blocked: bool,
+    pub blocked_for_us: u64,
+    pub block_events: u64,
+    pub total_blocked_us: u64,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct BackpressureStatsSnapshot {
+    blocked: bool,
+    active_waiters: usize,
+    blocked_for_us: u64,
+    block_events: u64,
+    total_blocked_us: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct WatermarkBackpressureStatsSnapshot {
+    pub port_name: String,
+    pub packet_limit: usize,
+    pub total_queued_packets: usize,
+    pub blocked: bool,
+    pub active_waiters: usize,
+    pub blocked_for_us: u64,
+    pub block_events: u64,
+    pub total_blocked_us: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct PollerBackpressureStatsSnapshot {
+    pub port_name: String,
+    pub capacity: Option<usize>,
+    pub overflow: PollerOverflow,
+    pub queued_packets: usize,
+    pub dropped_packets: u64,
+    pub blocked: bool,
+    pub active_waiters: usize,
     pub blocked_for_us: u64,
     pub block_events: u64,
     pub total_blocked_us: u64,
@@ -1452,15 +1651,22 @@ impl GraphInner {
         }
 
         // 全局水位:超限时把压力转化成图输入口背压(§7.5)。
+        let mut watermark_blocked = false;
         while self.shared.over_watermark() {
             if !blocking {
                 return Err(Error::WouldBlock);
             }
+            if !watermark_blocked {
+                watermark_blocked = true;
+                self.begin_watermark_block(edge);
+            }
             // 长时间背压等待期间图可能被取消/出错,及时退出而不是傻等。
             if self.shared.is_cancelled() {
+                self.finish_watermark_block(edge, false);
                 return Err(Error::Cancelled);
             }
             if let Some(e) = self.shared.first_error() {
+                self.finish_watermark_block(edge, false);
                 return Err(e);
             }
             // 先记活动代数,再尝试推进/等待 —— 避免判定与等待之间丢唤醒。
@@ -1471,9 +1677,13 @@ impl GraphInner {
             // 本线程推不动。若线程池还有在飞任务,就等它们排水(这才是真正的背压);
             // 若全图都空了水位却下不去(如下游无人消费),那是真卡死 —— 报错而非永久阻塞。
             if self.workers_idle() {
+                self.finish_watermark_block(edge, false);
                 return Err(Error::WouldBlock);
             }
             self.wait_activity_since(before, std::time::Duration::from_millis(100));
+        }
+        if watermark_blocked {
+            self.finish_watermark_block(edge, true);
         }
 
         // 时间戳单调性:图输入口强制校验(ADR #23)
@@ -1483,6 +1693,42 @@ impl GraphInner {
         self.dispatch(edge, std::slice::from_ref(&pkt)); // 单包不必为它分配 Vec
         self.schedule_consumers(edge);
         Ok(())
+    }
+
+    fn begin_watermark_block(&self, edge: EdgeId) {
+        let Some(event) = self.edges[edge]
+            .watermark_backpressure
+            .enter(self.epoch_us())
+        else {
+            return;
+        };
+        if event.is_power_of_two() {
+            runtime::log_warn(&format!(
+                "global watermark backpressure #{event}: graph input `{}` blocked \
+                 (queued={}, limit={}); waiting for downstream queues and pollers to drain",
+                self.edges[edge].name,
+                self.shared.total_queued(),
+                self.shared.config.max_queued_packets,
+            ));
+        }
+    }
+
+    fn finish_watermark_block(&self, edge: EdgeId, log_recovery: bool) {
+        let Some((event, elapsed)) = self.edges[edge]
+            .watermark_backpressure
+            .leave(self.epoch_us())
+        else {
+            return;
+        };
+        if log_recovery && event.is_power_of_two() {
+            runtime::log_info(&format!(
+                "global watermark backpressure #{event} cleared: graph input `{}` resumed after \
+                 {elapsed}us (queued={}, limit={})",
+                self.edges[edge].name,
+                self.shared.total_queued(),
+                self.shared.config.max_queued_packets,
+            ));
+        }
     }
 
     /// 图输入口的时间戳必须严格递增(ADR #23)。
@@ -2683,6 +2929,7 @@ impl GraphInner {
         for e in &self.edges {
             e.closed.store(false, Ordering::SeqCst);
             e.dropped.store(0, Ordering::Relaxed);
+            e.watermark_backpressure.reset();
             *e.last_sent.lock().expect("last_sent lock poisoned") = Timestamp::unset();
             // poller / observer 是宿主持有、engine 存 Arc —— **保留**列表,只复位内容,
             // 让宿主复用同一个 Poller 句柄再取下一轮输出。
@@ -2690,6 +2937,7 @@ impl GraphInner {
                 pl.clear(self);
                 pl.closed.store(false, Ordering::SeqCst);
                 pl.dropped.store(0, Ordering::Relaxed);
+                pl.block_backpressure.reset();
             }
         }
 

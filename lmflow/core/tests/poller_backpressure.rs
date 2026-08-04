@@ -1,4 +1,54 @@
-use lmflow::{Graph, InteropType, Packet, PollerOptions, PollerOverflow, Timestamp};
+use std::ffi::{c_char, CStr};
+use std::sync::Mutex;
+use std::time::Duration;
+
+use lmflow::{
+    register_kernel, Graph, InteropType, Kernel, KernelCtx, Packet, PollerOptions, PollerOverflow,
+    Timestamp,
+};
+
+static LOG_TEST_LOCK: Mutex<()> = Mutex::new(());
+static DIAGNOSTIC_LOGS: Mutex<Vec<(i32, String)>> = Mutex::new(Vec::new());
+
+unsafe extern "C" fn capture_log(_user: *mut std::ffi::c_void, level: i32, msg: *const c_char) {
+    let message = unsafe { CStr::from_ptr(msg) }
+        .to_string_lossy()
+        .into_owned();
+    DIAGNOSTIC_LOGS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .push((level, message));
+}
+
+struct LogCallbackGuard;
+
+impl LogCallbackGuard {
+    fn install() -> Self {
+        DIAGNOSTIC_LOGS
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clear();
+        lmflow::ffi::lmflow_set_log_callback(Some(capture_log), std::ptr::null_mut());
+        Self
+    }
+}
+
+impl Drop for LogCallbackGuard {
+    fn drop(&mut self) {
+        lmflow::ffi::lmflow_set_log_callback(None, std::ptr::null_mut());
+    }
+}
+
+#[derive(Default)]
+struct DiagnosticBusySource;
+
+impl Kernel for DiagnosticBusySource {
+    fn process(&mut self, context: &mut KernelCtx) -> lmflow::Result<()> {
+        std::thread::sleep(Duration::from_millis(500));
+        context.source_done();
+        Ok(())
+    }
+}
 
 fn graph() -> Graph {
     Graph::from_yaml(
@@ -95,6 +145,102 @@ max_queued_packets: 1
         .unwrap();
     drop(poller.next());
     finish(&graph);
+}
+
+#[test]
+fn global_watermark_reports_block_and_recovery() {
+    let _log_guard = LOG_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let _callback_guard = LogCallbackGuard::install();
+    let _ = register_kernel::<DiagnosticBusySource>("DiagnosticBusySource");
+    let graph = Graph::from_yaml(
+        r#"
+executors:
+  - { name: diagnostic_pool, num_threads: 1 }
+nodes:
+  - { name: diagnostic_pass, kernel: PassThrough, input_ports: [diagnostic_in], output_ports: [diagnostic_out] }
+  - { name: diagnostic_busy, kernel: DiagnosticBusySource, executor: diagnostic_pool, input_ports: [], output_ports: [] }
+input_ports: [diagnostic_in]
+output_ports: [diagnostic_out]
+max_queued_packets: 1
+"#,
+    )
+    .unwrap();
+    let driver = graph.add_poller("diagnostic_out").unwrap();
+    let poller = graph.add_poller("diagnostic_out").unwrap();
+    graph.start().unwrap();
+    let input = graph.input("diagnostic_in").unwrap();
+    input.send(Packet::from_i64(0).at(Timestamp(0))).unwrap();
+    assert_eq!(
+        driver
+            .next_timeout(Duration::from_secs(2))
+            .unwrap()
+            .and_then(|p| p.as_i64()),
+        Some(0)
+    );
+
+    std::thread::scope(|scope| {
+        let sender = scope.spawn(|| {
+            input.send(Packet::from_i64(1).at(Timestamp(1))).unwrap();
+        });
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            let stats = input.backpressure_stats();
+            if stats.blocked {
+                assert_eq!(stats.port_name, "diagnostic_in");
+                assert_eq!(stats.packet_limit, 1);
+                assert_eq!(stats.total_queued_packets, 1);
+                assert_eq!(stats.active_waiters, 1);
+                assert_eq!(stats.block_events, 1);
+                assert!(stats.blocked_for_us > 0);
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "global watermark block was not observed"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        drop(poller.try_next());
+        sender.join().unwrap();
+    });
+
+    let stats = input.backpressure_stats();
+    assert!(!stats.blocked);
+    assert_eq!(stats.active_waiters, 0);
+    assert_eq!(stats.block_events, 1);
+    assert!(stats.total_blocked_us > 0);
+    let dump = graph.dump();
+    assert!(dump.contains("watermark limit=1"));
+    assert!(dump.contains("events=1"));
+    drop(poller.try_next());
+    finish(&graph);
+
+    let logs = DIAGNOSTIC_LOGS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let messages: Vec<&str> = logs
+        .iter()
+        .map(|(_, message)| message.as_str())
+        .filter(|message| message.contains("graph input `diagnostic_in`"))
+        .collect();
+    assert!(messages
+        .iter()
+        .any(|message| message.contains("global watermark backpressure #1:")));
+    assert!(messages
+        .iter()
+        .any(|message| message.contains("queued=1, limit=1")));
+    assert!(messages
+        .iter()
+        .any(|message| message.contains("#1 cleared")));
+
+    graph.reset().unwrap();
+    let reset = input.backpressure_stats();
+    assert!(!reset.blocked);
+    assert_eq!(reset.active_waiters, 0);
+    assert_eq!(reset.block_events, 0);
+    assert_eq!(reset.total_blocked_us, 0);
 }
 
 #[test]
@@ -210,6 +356,141 @@ fn block_waits_until_the_host_drains_a_slot() {
         Some(1)
     );
     finish(&graph);
+}
+
+#[test]
+fn poller_block_reports_stats_and_recovery() {
+    let _log_guard = LOG_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let _callback_guard = LogCallbackGuard::install();
+    let graph = Graph::from_yaml(
+        r#"
+nodes:
+  - { name: poller_diagnostic_pass, kernel: PassThrough, input_ports: [in], output_ports: [poller_diagnostic_out] }
+input_ports: [in]
+output_ports: [poller_diagnostic_out]
+"#,
+    )
+    .unwrap();
+    let poller = graph
+        .add_poller_with_options(
+            "poller_diagnostic_out",
+            PollerOptions::new(1, PollerOverflow::Block),
+        )
+        .unwrap();
+    graph.start().unwrap();
+    send(&graph, 0);
+
+    std::thread::scope(|scope| {
+        let sender = scope.spawn(|| {
+            graph
+                .input("in")
+                .unwrap()
+                .send(Packet::from_i64(1).at(Timestamp(1)))
+                .unwrap();
+            graph.wait_until_idle().unwrap();
+        });
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            let stats = poller.backpressure_stats();
+            if stats.blocked {
+                assert_eq!(stats.port_name, "poller_diagnostic_out");
+                assert_eq!(stats.capacity, Some(1));
+                assert_eq!(stats.overflow, PollerOverflow::Block);
+                assert_eq!(stats.queued_packets, 1);
+                assert_eq!(stats.active_waiters, 1);
+                assert_eq!(stats.block_events, 1);
+                assert!(stats.blocked_for_us > 0);
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "poller block was not observed"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        drop(poller.try_next());
+        sender.join().unwrap();
+    });
+
+    let stats = poller.backpressure_stats();
+    assert!(!stats.blocked);
+    assert_eq!(stats.active_waiters, 0);
+    assert_eq!(stats.block_events, 1);
+    assert!(stats.total_blocked_us > 0);
+    let dump = graph.dump();
+    assert!(dump.contains("poller policy=Block capacity=1"));
+    assert!(dump.contains("events=1"));
+    drop(poller.try_next());
+    finish(&graph);
+
+    let logs = DIAGNOSTIC_LOGS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let messages: Vec<&str> = logs
+        .iter()
+        .map(|(_, message)| message.as_str())
+        .filter(|message| message.contains("output `poller_diagnostic_out`"))
+        .collect();
+    assert!(messages
+        .iter()
+        .any(|message| message.contains("poller backpressure #1:")));
+    assert!(messages
+        .iter()
+        .any(|message| message.contains("capacity=1, queued=1")));
+    assert!(messages
+        .iter()
+        .any(|message| message.contains("#1 cleared")));
+
+    graph.reset().unwrap();
+    let reset = poller.backpressure_stats();
+    assert!(!reset.blocked);
+    assert_eq!(reset.active_waiters, 0);
+    assert_eq!(reset.block_events, 0);
+    assert_eq!(reset.total_blocked_us, 0);
+}
+
+#[test]
+fn poller_drop_warning_includes_policy_capacity_and_queue() {
+    let _log_guard = LOG_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let _callback_guard = LogCallbackGuard::install();
+    let graph = Graph::from_yaml(
+        r#"
+nodes:
+  - { name: drop_diagnostic_pass, kernel: PassThrough, input_ports: [in], output_ports: [drop_diagnostic_out] }
+input_ports: [in]
+output_ports: [drop_diagnostic_out]
+"#,
+    )
+    .unwrap();
+    let poller = graph
+        .add_poller_with_options(
+            "drop_diagnostic_out",
+            PollerOptions::new(1, PollerOverflow::DropNewest),
+        )
+        .unwrap();
+    graph.start().unwrap();
+    send(&graph, 0);
+    send(&graph, 1);
+    finish(&graph);
+
+    let stats = poller.backpressure_stats();
+    assert_eq!(stats.dropped_packets, 1);
+    let logs = DIAGNOSTIC_LOGS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let warning = logs
+        .iter()
+        .map(|(_, message)| message.as_str())
+        .find(|message| message.contains("output `drop_diagnostic_out`"))
+        .expect("poller overflow warning");
+    assert!(warning.contains("policy=DropNewest"));
+    assert!(warning.contains("capacity=1"));
+    assert!(warning.contains("queued=1"));
+    assert!(warning.contains("dropped_total=1"));
 }
 
 #[test]

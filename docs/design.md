@@ -745,6 +745,12 @@ emit 的批量若自身大于有效包数容量会明确报错,避免永远无�
   > 一撞水位就误报 `WOULD_BLOCK`(阻塞 send 退化成了报错)。已修正为「推不动且池仍在跑就等排水」,
   > 并有回归测试 `blocking_send_applies_backpressure_on_pool_instead_of_erroring` 守卫。
 
+全局水位与 Poller 背压现在也使用同一套诊断规则:第 1、2、4、8… 次阻塞打 WARN,
+恢复打 INFO。`Input::backpressure_stats()` 提供图输入端口的当前等待者、事件数和累计时长;
+`Poller::backpressure_stats()` 同时提供策略、容量、积压、丢包与 Block 等待统计。
+`graph.dump()` 会输出 `watermark` 与 `poller` 行。Poller 有损策略的 WARN 统一包含输出口、
+策略、容量、当前积压和累计丢包数。reset 会把这些运行期统计全部清零。
+
 ### 7.6 关流与终止
 
 - `close_all_inputs` → 所有图输入边标 `closed`,并唤醒其消费者(触发排空)。
