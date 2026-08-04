@@ -12,6 +12,10 @@ to each GitHub Release.
 
 ### Added
 
+- **Actionable internal backpressure diagnostics.** Exponentially rate-limited WARN messages now
+  identify the producer, consumer port, effective capacity, queue occupancy, reservations, and
+  incoming batch. Matching INFO messages report recovery duration, while terminal stall errors
+  list the exact blocked queue relationships instead of producer names alone.
 - **Per-input queue backpressure observability.** Rust and C hosts can inspect current and peak
   packet/byte occupancy, pending reservations, active producer blocking, block event counts, and
   cumulative blocked time. DOT and graph dumps include aggregate backpressure diagnostics, with

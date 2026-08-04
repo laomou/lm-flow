@@ -1,7 +1,41 @@
+use std::ffi::{c_char, CStr};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Mutex;
 use std::time::Duration;
 
 use lmflow::{register_kernel, Graph, Kernel, KernelContract, KernelCtx, Packet, Timestamp};
+
+static LOG_TEST_LOCK: Mutex<()> = Mutex::new(());
+static BACKPRESSURE_LOGS: Mutex<Vec<(i32, String)>> = Mutex::new(Vec::new());
+
+unsafe extern "C" fn capture_log(_user: *mut std::ffi::c_void, level: i32, msg: *const c_char) {
+    let message = unsafe { CStr::from_ptr(msg) }
+        .to_string_lossy()
+        .into_owned();
+    BACKPRESSURE_LOGS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .push((level, message));
+}
+
+struct LogCallbackGuard;
+
+impl LogCallbackGuard {
+    fn install() -> Self {
+        BACKPRESSURE_LOGS
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clear();
+        lmflow::ffi::lmflow_set_log_callback(Some(capture_log), std::ptr::null_mut());
+        Self
+    }
+}
+
+impl Drop for LogCallbackGuard {
+    fn drop(&mut self) {
+        lmflow::ffi::lmflow_set_log_callback(None, std::ptr::null_mut());
+    }
+}
 
 #[derive(Default)]
 struct SlowPass;
@@ -272,14 +306,18 @@ input_ports: [in, gate]
 
 #[test]
 fn input_queue_stats_report_active_and_accumulated_backpressure() {
+    let _log_guard = LOG_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let _callback_guard = LogCallbackGuard::install();
     register_test_kernels();
     let graph = Graph::from_yaml(
         r#"
 executors:
   - { name: pool, num_threads: 1 }
 nodes:
-  - { name: producer, kernel: PassThrough, input_ports: [in], output_ports: [mid], executor: pool }
-  - name: waiting_join
+  - { name: diagnostics_producer, kernel: PassThrough, input_ports: [in], output_ports: [mid], executor: pool }
+  - name: diagnostics_join
     kernel: InternalBpPortJoinCount
     input_ports: [mid, gate]
     output_ports: []
@@ -308,9 +346,12 @@ input_ports: [in, gate]
         );
         std::thread::sleep(Duration::from_millis(1));
     };
-    assert_eq!(blocked.node_name, "waiting_join");
+    assert_eq!(blocked.node_name, "diagnostics_join");
     assert_eq!(blocked.port_name, "mid");
-    assert_eq!(blocked.producer_name.as_deref(), Some("producer"));
+    assert_eq!(
+        blocked.producer_name.as_deref(),
+        Some("diagnostics_producer")
+    );
     assert_eq!(blocked.packet_capacity, Some(1));
     assert_eq!(blocked.queued_packets, 1);
     assert_eq!(blocked.queued_bytes, 8);
@@ -338,6 +379,117 @@ input_ports: [in, gate]
     assert!(finished.total_blocked_us >= blocked.blocked_for_us);
     assert_eq!(finished.peak_queued_packets, 1);
     assert_eq!(finished.peak_queued_bytes, 8);
+
+    let logs = BACKPRESSURE_LOGS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let warnings: Vec<&str> = logs
+        .iter()
+        .filter(|(level, _)| *level == lmflow::runtime::LOG_WARN)
+        .map(|(_, message)| message.as_str())
+        .filter(|message| message.contains("consumer `diagnostics_join`"))
+        .collect();
+    assert_eq!(warnings.len(), 1, "first block should emit one warning");
+    assert!(warnings[0].contains("producer `diagnostics_producer`"));
+    assert!(warnings[0].contains("consumer `diagnostics_join` input `mid`"));
+    assert!(warnings[0].contains("capacity=1"));
+    assert!(warnings[0].contains("queued=1"));
+    assert!(warnings[0].contains("incoming=1"));
+    let recoveries: Vec<&str> = logs
+        .iter()
+        .filter(|(level, _)| *level == lmflow::runtime::LOG_INFO)
+        .map(|(_, message)| message.as_str())
+        .filter(|message| message.contains("consumer `diagnostics_join`"))
+        .collect();
+    assert_eq!(recoveries.len(), 1, "warned block should emit one recovery");
+    assert!(recoveries[0].contains("producer `diagnostics_producer` resumed"));
+    assert!(recoveries[0].contains("consumer `diagnostics_join` input `mid` drained"));
+}
+
+#[test]
+fn backpressure_logs_are_exponentially_rate_limited() {
+    let _log_guard = LOG_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let _callback_guard = LogCallbackGuard::install();
+    register_test_kernels();
+    let graph = Graph::from_yaml(
+        r#"
+executors:
+  - { name: pool, num_threads: 1 }
+nodes:
+  - { name: rate_limit_producer, kernel: PassThrough, input_ports: [in], output_ports: [mid], executor: pool }
+  - name: rate_limit_join
+    kernel: InternalBpPortJoinCount
+    input_ports: [mid, gate]
+    output_ports: []
+    executor: pool
+    input_queues:
+      packets: 1
+      ports: { gate: { packets: 0 } }
+input_ports: [in, gate]
+"#,
+    )
+    .unwrap();
+    graph.start().unwrap();
+    let input = graph.input("in").unwrap();
+    let gate = graph.input("gate").unwrap();
+
+    for event in 1..=3 {
+        let first = (event - 1) * 2;
+        input
+            .send(Packet::from_i64(first).at(Timestamp(first)))
+            .unwrap();
+        input
+            .send(Packet::from_i64(first + 1).at(Timestamp(first + 1)))
+            .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            if graph.input_queue_stats(1, 0).unwrap().block_events >= event as u64 {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "backpressure event #{event} was not observed"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        gate.send(Packet::from_i64(first).at(Timestamp(first)))
+            .unwrap();
+        gate.send(Packet::from_i64(first + 1).at(Timestamp(first + 1)))
+            .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while graph.input_queue_stats(1, 0).unwrap().blocked {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "backpressure event #{event} did not clear"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+    graph.close_all_inputs();
+    graph.wait_done_timeout(Duration::from_secs(2)).unwrap();
+
+    let logs = BACKPRESSURE_LOGS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let backpressure: Vec<&str> = logs
+        .iter()
+        .map(|(_, message)| message.as_str())
+        .filter(|message| message.contains("consumer `rate_limit_join`"))
+        .collect();
+    assert!(backpressure.iter().any(|message| message.contains("#1:")));
+    assert!(backpressure.iter().any(|message| message.contains("#2:")));
+    assert!(!backpressure.iter().any(|message| message.contains("#3:")));
+    assert!(backpressure
+        .iter()
+        .any(|message| message.contains("#1 cleared")));
+    assert!(backpressure
+        .iter()
+        .any(|message| message.contains("#2 cleared")));
+    assert!(!backpressure
+        .iter()
+        .any(|message| message.contains("#3 cleared")));
 }
 
 #[test]
@@ -610,6 +762,12 @@ input_ports: [in, never]
     let error = graph
         .wait_until_idle_timeout(Duration::from_secs(1))
         .unwrap_err();
-    assert!(error.to_string().contains("cannot make progress"));
+    let message = error.to_string();
+    assert!(message.contains("cannot make progress"));
+    assert!(message.contains("producer -> waiting_join.mid"));
+    assert!(message.contains("capacity=1"));
+    assert!(message.contains("queued=1"));
+    assert!(message.contains("reserved=0"));
+    assert!(message.contains("blocked="));
     graph.cancel();
 }
