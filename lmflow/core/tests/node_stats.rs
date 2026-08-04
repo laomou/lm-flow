@@ -122,9 +122,16 @@ fn dot_with_stats_annotates_and_keeps_structure() {
     assert!(stats.contains("3 pkts"), "应标出处理包数:\n{stats}");
     assert!(stats.contains("peakQ"), "应标出队列峰值");
     assert!(stats.contains("peakQ 1 / 8B"), "应标出队列字节峰值");
-    assert!(stats.contains("in 3 / out 3"), "应标出收发包数");
+    assert!(
+        stats.contains("in 3 (+3) / out 3 (+3)"),
+        "应标出累计与区间收发包数"
+    );
     assert!(stats.contains("ports:"), "节点内应包含端口摘要");
     assert!(stats.contains("snapshot +"), "标题应标出本轮快照时长");
+    assert!(
+        stats.contains("window since start"),
+        "首次统计图应使用本轮启动作为区间基线"
+    );
     assert!(
         stats.contains("cluster_diagnostics_legend"),
         "统计图应包含诊断图例"
@@ -159,14 +166,43 @@ fn dot_with_stats_annotates_and_keeps_structure() {
 }
 
 #[test]
+fn dot_stats_use_deltas_between_exports() {
+    let graph = run_chain(2);
+    let first = graph.to_dot_with_stats();
+    assert!(first.contains("2 pkts (+2 ·"));
+
+    std::thread::sleep(Duration::from_millis(2));
+    let second = graph.to_dot_with_stats();
+    assert!(second.contains("window "));
+    assert!(!second.contains("window since start"));
+    assert!(second.contains("2 pkts (+0 · 0"));
+    assert!(second.contains("in 2 (+0) / out 2 (+0)"));
+}
+
+#[test]
+fn start_rebases_dot_interval_after_prestart_export() {
+    let graph = Graph::from_yaml(CHAIN).unwrap();
+    let prestart = graph.to_dot_compact();
+    assert!(prestart.contains("window since start 0µs"));
+
+    graph.start().unwrap();
+    graph.close_all_inputs();
+    graph.wait_done_timeout(Duration::from_secs(2)).unwrap();
+    let running = graph.to_dot_compact();
+    assert!(running.contains("window since start"));
+}
+
+#[test]
 fn dot_view_modes_separate_compact_and_diagnostics() {
     let graph = Graph::from_yaml(CHAIN).unwrap();
     let compact = graph.to_dot_compact();
     let explicit = graph.to_dot_with_view(DotView::Compact);
     let diagnostics = graph.to_dot_with_stats();
 
-    assert_eq!(compact, explicit);
     assert!(compact.contains("@main\\nCREATED"));
+    assert!(explicit.contains("@main\\nCREATED"));
+    assert!(compact.contains("window since start"));
+    assert!(explicit.contains("window "));
     assert!(!compact.contains("CREATED · 0 pkts"));
     assert!(compact.contains("cluster_node_state_legend"));
     assert!(!compact.contains("ports:"));

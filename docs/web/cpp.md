@@ -841,6 +841,14 @@ ellipsis, while SVG tooltips keep the complete node, kernel, namespace, executor
 names. Nodes carry executor groups and stable state ordering; Graphviz rank/node spacing is tuned
 without `concentrate`, so separate multi-port edges are never merged.
 
+Statistics-enabled views also show a sampling window. The first export covers the current run from
+`start`; later exports use the interval since the previous export of the same view. Node labels keep
+cumulative totals while adding interval packet deltas, rates, input/output deltas, and interval
+latency. Diagnostic edges and Pollers add interval backpressure duration/event deltas and drops.
+Port annotations name the likely bottleneck directly: a full consumer queue, a missing aligned
+input, a slowly draining downstream consumer, the global packet limit, or a slow/dropping Poller.
+Compact and diagnostics views keep independent baselines, and `reset` clears both.
+
 ```c
 int64_t      lmflow_graph_counter_value(LMFlowGraph*, const char* name);
 size_t       lmflow_graph_counter_count(LMFlowGraph*);

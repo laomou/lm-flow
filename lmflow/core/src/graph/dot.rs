@@ -13,6 +13,95 @@ const KERNEL_LABEL_CHARS: usize = 28;
 const PORT_LABEL_CHARS: usize = 28;
 const CLUSTER_LABEL_CHARS: usize = 24;
 
+#[derive(Debug, Clone, Copy, Default)]
+struct DotNodeCounters {
+    processed: u64,
+    errors: u64,
+    total_us: i64,
+    packets_in: u64,
+    packets_out: u64,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct DotPressureCounters {
+    block_events: u64,
+    total_blocked_us: u64,
+    dropped: u64,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(super) struct DotIntervalSnapshot {
+    at_us: i64,
+    nodes: Vec<DotNodeCounters>,
+    ports: Vec<Vec<DotPressureCounters>>,
+    edges: Vec<DotPressureCounters>,
+    pollers: Vec<Vec<DotPressureCounters>>,
+}
+
+#[derive(Debug, Default)]
+pub(super) struct DotIntervalBaselines {
+    compact: Option<DotIntervalSnapshot>,
+    diagnostics: Option<DotIntervalSnapshot>,
+}
+
+#[derive(Debug, Clone)]
+struct DotInterval {
+    elapsed_us: u64,
+    first: bool,
+    current: DotIntervalSnapshot,
+    previous: DotIntervalSnapshot,
+}
+
+impl DotInterval {
+    fn node(&self, node: usize) -> DotNodeCounters {
+        let current = self.current.nodes[node];
+        let previous = self.previous.nodes[node];
+        DotNodeCounters {
+            processed: current.processed.saturating_sub(previous.processed),
+            errors: current.errors.saturating_sub(previous.errors),
+            total_us: current.total_us.saturating_sub(previous.total_us),
+            packets_in: current.packets_in.saturating_sub(previous.packets_in),
+            packets_out: current.packets_out.saturating_sub(previous.packets_out),
+        }
+    }
+
+    fn port(&self, node: usize, port: usize) -> DotPressureCounters {
+        pressure_delta(
+            self.current.ports[node][port],
+            self.previous.ports[node][port],
+        )
+    }
+
+    fn edge(&self, edge: usize) -> DotPressureCounters {
+        pressure_delta(self.current.edges[edge], self.previous.edges[edge])
+    }
+
+    fn poller(&self, edge: usize, poller: usize) -> DotPressureCounters {
+        pressure_delta(
+            self.current.pollers[edge][poller],
+            self.previous
+                .pollers
+                .get(edge)
+                .and_then(|pollers| pollers.get(poller))
+                .copied()
+                .unwrap_or_default(),
+        )
+    }
+}
+
+fn pressure_delta(
+    current: DotPressureCounters,
+    previous: DotPressureCounters,
+) -> DotPressureCounters {
+    DotPressureCounters {
+        block_events: current.block_events.saturating_sub(previous.block_events),
+        total_blocked_us: current
+            .total_blocked_us
+            .saturating_sub(previous.total_blocked_us),
+        dropped: current.dropped.saturating_sub(previous.dropped),
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum NodeRunState {
     Created,
@@ -109,6 +198,18 @@ fn duration_us_f64(value: f64) -> String {
     duration_us(value.max(0.0).round().min(u64::MAX as f64) as u64)
 }
 
+fn rate_per_second(count: u64, elapsed_us: u64) -> String {
+    if elapsed_us == 0 {
+        return "0/s".to_string();
+    }
+    let rate = count as f64 * 1_000_000.0 / elapsed_us as f64;
+    if rate < 10.0 {
+        format!("{rate:.1}/s")
+    } else {
+        format!("{rate:.0}/s")
+    }
+}
+
 /// 热力图配色:按 `v / max` 从绿(快)线性过渡到红(慢)。`max <= 0` 时返回白色。
 fn heat_color(v: f64, max: f64) -> String {
     if max <= 0.0 {
@@ -126,6 +227,115 @@ fn heat_color(v: f64, max: f64) -> String {
 }
 
 impl GraphInner {
+    fn dot_interval(&self, now_us: i64, view: DotView) -> DotInterval {
+        let nodes = self
+            .nodes
+            .iter()
+            .map(|node| DotNodeCounters {
+                processed: node.stats.processed.load(Ordering::Relaxed),
+                errors: node.stats.errors.load(Ordering::Relaxed),
+                total_us: node.stats.total_us.load(Ordering::Relaxed),
+                packets_in: node.stats.packets_in.load(Ordering::Relaxed),
+                packets_out: node.stats.packets_out.load(Ordering::Relaxed),
+            })
+            .collect();
+        let ports = self
+            .nodes
+            .iter()
+            .map(|node| {
+                node.input_queue_stats
+                    .iter()
+                    .map(|stats| {
+                        let since = stats.blocked_since_us.load(Ordering::Relaxed);
+                        let active_us = if since == 0 {
+                            0
+                        } else {
+                            now_us.saturating_sub(since.saturating_sub(1)).max(0) as u64
+                        };
+                        DotPressureCounters {
+                            block_events: stats.block_events.load(Ordering::Relaxed),
+                            total_blocked_us: stats
+                                .blocked_total_us
+                                .load(Ordering::Relaxed)
+                                .saturating_add(active_us),
+                            dropped: 0,
+                        }
+                    })
+                    .collect()
+            })
+            .collect();
+        let mut edges = Vec::with_capacity(self.edges.len());
+        let mut pollers = Vec::with_capacity(self.edges.len());
+        for edge in &self.edges {
+            let watermark = edge.watermark_backpressure.snapshot(now_us);
+            edges.push(DotPressureCounters {
+                block_events: watermark.block_events,
+                total_blocked_us: watermark.total_blocked_us,
+                dropped: edge.dropped.load(Ordering::Relaxed),
+            });
+            pollers.push(
+                edge.pollers
+                    .lock()
+                    .expect("poller list lock poisoned")
+                    .iter()
+                    .map(|poller| {
+                        let pressure = poller.block_backpressure.snapshot(now_us);
+                        DotPressureCounters {
+                            block_events: pressure.block_events,
+                            total_blocked_us: pressure.total_blocked_us,
+                            dropped: poller.dropped.load(Ordering::Relaxed),
+                        }
+                    })
+                    .collect(),
+            );
+        }
+        let current = DotIntervalSnapshot {
+            at_us: now_us,
+            nodes,
+            ports,
+            edges,
+            pollers,
+        };
+        let mut baselines = self
+            .dot_intervals
+            .lock()
+            .expect("DOT interval lock poisoned");
+        let baseline = match view {
+            DotView::Compact => &mut baselines.compact,
+            DotView::Diagnostics => &mut baselines.diagnostics,
+            DotView::Topology => unreachable!("topology has no statistics interval"),
+        };
+        let first = baseline.is_none();
+        let previous = baseline.replace(current.clone()).unwrap_or_else(|| {
+            let started = self.run_started_us.load(Ordering::Relaxed);
+            DotIntervalSnapshot {
+                at_us: if started == 0 {
+                    now_us
+                } else {
+                    started.saturating_sub(1)
+                },
+                nodes: vec![DotNodeCounters::default(); current.nodes.len()],
+                ports: current
+                    .ports
+                    .iter()
+                    .map(|ports| vec![DotPressureCounters::default(); ports.len()])
+                    .collect(),
+                edges: vec![DotPressureCounters::default(); current.edges.len()],
+                pollers: current
+                    .pollers
+                    .iter()
+                    .map(|pollers| vec![DotPressureCounters::default(); pollers.len()])
+                    .collect(),
+            }
+        });
+        DotInterval {
+            elapsed_us: now_us.saturating_sub(previous.at_us).max(0) as u64,
+            first,
+            current,
+            previous,
+        }
+    }
+
     fn dot_node_state(&self, node_id: usize) -> NodeRunState {
         let node = &self.nodes[node_id];
         let (opened, closed) = {
@@ -196,6 +406,7 @@ impl GraphInner {
         let with_stats = view != DotView::Topology;
         let diagnostics = view == DotView::Diagnostics;
         let snapshot_us = with_stats.then(|| self.epoch_us());
+        let interval = snapshot_us.map(|snapshot_us| self.dot_interval(snapshot_us, view));
         // 执行器配色板(浅色填充);按执行器序号取模。
         const COLORS: &[&str] = &[
             "#cde4ff", "#d7f0d0", "#ffe4c7", "#f0d0e8", "#d0eeee", "#efe6b0", "#e0d4f0", "#ffd6d6",
@@ -272,10 +483,21 @@ impl GraphInner {
                     .max(0) as u64;
                 format!("snapshot +{}", duration_us(elapsed))
             };
+            let interval_label = interval.as_ref().map_or_else(
+                || "window unavailable".to_string(),
+                |interval| {
+                    if interval.first {
+                        format!("window since start {}", duration_us(interval.elapsed_us))
+                    } else {
+                        format!("window {}", duration_us(interval.elapsed_us))
+                    }
+                },
+            );
             out.push_str(&format!(
-                "  graph [labelloc=t, label=\"state {:?} · {} · queued {}/{} packets\\n{}\"];\n",
+                "  graph [labelloc=t, label=\"state {:?} · {} · {} · queued {}/{} packets\\n{}\"];\n",
                 self.state(),
                 snapshot,
+                interval_label,
                 self.shared.total_queued(),
                 limit,
                 hotspots.label(),
@@ -291,7 +513,18 @@ impl GraphInner {
         let max_avg_us = if with_stats {
             self.nodes
                 .iter()
-                .map(|n| avg_process_us(&n.stats))
+                .enumerate()
+                .map(|(node, n)| {
+                    let delta = interval
+                        .as_ref()
+                        .expect("statistics interval exists")
+                        .node(node);
+                    if delta.processed == 0 {
+                        avg_process_us(&n.stats)
+                    } else {
+                        delta.total_us.max(0) as f64 / delta.processed as f64
+                    }
+                })
                 .fold(0.0f64, f64::max)
         } else {
             0.0
@@ -331,7 +564,15 @@ impl GraphInner {
             if with_stats {
                 let st = &n.stats;
                 let processed = st.processed.load(Ordering::Relaxed);
-                let avg = avg_process_us(st);
+                let delta = interval
+                    .as_ref()
+                    .expect("statistics interval exists")
+                    .node(i);
+                let avg = if delta.processed == 0 {
+                    avg_process_us(st)
+                } else {
+                    delta.total_us.max(0) as f64 / delta.processed as f64
+                };
                 let packets_in = st.packets_in.load(Ordering::Relaxed);
                 let packets_out = st.packets_out.load(Ordering::Relaxed);
                 let peak_queue_depth = st.peak_queue_depth.load(Ordering::Relaxed);
@@ -369,11 +610,21 @@ impl GraphInner {
                 extra.push_str(&format!("\\n{}", node_state.label()));
                 if diagnostics || processed > 0 || active_or_abnormal {
                     extra.push_str(&format!(
-                        " · {} pkts · {} avg\\nin {} / out {}",
+                        " · {} pkts (+{} · {}) · {} avg\\nin {} (+{}) / out {} (+{})",
                         processed,
+                        delta.processed,
+                        rate_per_second(
+                            delta.processed,
+                            interval
+                                .as_ref()
+                                .expect("statistics interval exists")
+                                .elapsed_us,
+                        ),
                         duration_us_f64(avg),
                         packets_in,
+                        delta.packets_in,
                         packets_out,
+                        delta.packets_out,
                     ));
                 }
                 if diagnostics || peak_queue_depth > 0 || peak_bytes > 0 {
@@ -391,7 +642,7 @@ impl GraphInner {
                     }
                 }
                 if errs > 0 {
-                    extra.push_str(&format!(" · {errs} err"));
+                    extra.push_str(&format!(" · {errs} err (+{})", delta.errors));
                 }
                 if diagnostics && !n.input_queues.is_empty() {
                     let waiting_ports = self.dot_waiting_ports(i);
@@ -408,11 +659,11 @@ impl GraphInner {
                             .packet_capacity
                             .map_or_else(|| "∞".to_string(), |value| value.to_string());
                         let state = if queue.blocked {
-                            " BLOCKED"
+                            " BLOCKED: queue full"
                         } else if waiting_ports.contains(&port) {
-                            " WAITING"
+                            " WAITING: aligned input"
                         } else if queue.block_events > 0 {
-                            " recovered"
+                            " recovered: downstream slow"
                         } else {
                             ""
                         };
@@ -476,6 +727,7 @@ impl GraphInner {
             let mut fill = "#e8e8e8";
             let mut color = "#777777";
             let mut penwidth = 1;
+            let delta = interval.as_ref().map(|interval| interval.edge(e));
             let stats = diagnostics.then(|| {
                 self.edges[e]
                     .watermark_backpressure
@@ -487,9 +739,16 @@ impl GraphInner {
                     stats.block_events,
                     duration_us(stats.total_blocked_us),
                 ));
+                if let Some(delta) = delta {
+                    label.push_str(&format!(
+                        "\\nwindow +{}× / +{}",
+                        delta.block_events,
+                        duration_us(delta.total_blocked_us),
+                    ));
+                }
                 if stats.blocked {
                     label.push_str(&format!(
-                        "\\nBLOCKED {} · {} waiters",
+                        "\\nBLOCKED: global packet limit {} · {} waiters",
                         duration_us(stats.blocked_for_us),
                         stats.active_waiters
                     ));
@@ -540,6 +799,7 @@ impl GraphInner {
                         &e.name,
                         diagnostics
                             .then(|| snapshot_us.expect("statistics snapshot timestamp exists")),
+                        interval.as_ref(),
                     );
                     out.push_str(&format!("  pin{ei} -> n{c} [{attrs}];\n"));
                 }
@@ -552,6 +812,7 @@ impl GraphInner {
                         &e.name,
                         diagnostics
                             .then(|| snapshot_us.expect("statistics snapshot timestamp exists")),
+                        interval.as_ref(),
                     );
                     out.push_str(&format!("  n{p} -> n{c} [{attrs}];\n"));
                 }
@@ -574,6 +835,10 @@ impl GraphInner {
                         .snapshot(snapshot_us.expect("statistics snapshot timestamp exists"));
                     let queued = poller.queue.lock().expect("poller lock poisoned").len();
                     let dropped = poller.dropped.load(Ordering::Relaxed);
+                    let delta = interval
+                        .as_ref()
+                        .expect("statistics interval exists")
+                        .poller(ei, poller_index);
                     let capacity = poller
                         .capacity
                         .map_or_else(|| "unbounded".to_string(), |value| value.to_string());
@@ -587,14 +852,24 @@ impl GraphInner {
                         stats.block_events,
                         duration_us(stats.total_blocked_us),
                     );
+                    poller_label.push_str(&format!(
+                        "\\nwindow dropped +{} · bp +{}× / +{}",
+                        delta.dropped,
+                        delta.block_events,
+                        duration_us(delta.total_blocked_us),
+                    ));
                     let (fill, color, penwidth) = if stats.blocked {
                         poller_label.push_str(&format!(
-                            "\\nBLOCKED {} · {} waiters",
+                            "\\nBLOCKED: subscriber queue full {} · {} waiters",
                             duration_us(stats.blocked_for_us),
                             stats.active_waiters
                         ));
                         ("#ffd6d6", "#d62728", 3)
-                    } else if dropped > 0 || stats.block_events > 0 {
+                    } else if dropped > 0 {
+                        poller_label.push_str("\\nBOTTLENECK: subscriber dropping");
+                        ("#fff0c2", "#d98c00", 2)
+                    } else if stats.block_events > 0 {
+                        poller_label.push_str("\\nBOTTLENECK: slow subscriber");
                         ("#fff0c2", "#d98c00", 2)
                     } else {
                         ("#e8f1fb", "#4c78a8", 1)
@@ -718,6 +993,7 @@ impl GraphInner {
         edge_label: &str,
         edge_name: &str,
         snapshot_us: Option<i64>,
+        interval: Option<&DotInterval>,
     ) -> String {
         let Some(snapshot_us) = snapshot_us else {
             return format!(
@@ -729,39 +1005,73 @@ impl GraphInner {
             .input_queue_stats_at(node, port, snapshot_us)
             .expect("consumer input port exists");
         let waiting = self.dot_waiting_ports(node).contains(&port);
+        let edge = self.nodes[node].inputs[port];
+        let delta = interval
+            .expect("diagnostic edge has statistics interval")
+            .port(node, port);
+        let edge_delta = interval
+            .expect("diagnostic edge has statistics interval")
+            .edge(edge);
         let capacity = stats
             .packet_capacity
             .map_or_else(|| "unbounded".to_string(), |value| value.to_string());
         let mut label = format!(
-            "{edge_label}\\nqueue {}/{} · reserved {}\\nbp {}× / {}",
+            "{edge_label}\\nqueue {}/{} · reserved {}\\nbp {}× / {} · window +{}× / +{}",
             stats.queued_packets,
             capacity,
             stats.reserved_packets,
             stats.block_events,
             duration_us(stats.total_blocked_us),
+            delta.block_events,
+            duration_us(delta.total_blocked_us),
         );
+        if edge_delta.dropped > 0 {
+            label.push_str(&format!("\\ndropped +{} in window", edge_delta.dropped));
+        }
+        let reason = if stats.blocked {
+            "consumer queue full"
+        } else if waiting {
+            "missing aligned input"
+        } else if edge_delta.dropped > 0 {
+            "consumer cannot keep up"
+        } else if delta.block_events > 0 || stats.block_events > 0 {
+            "downstream drained slowly"
+        } else {
+            "healthy"
+        };
         let tooltip = format!(
-            "edge {} to {}.{}: queue {}/{}, reserved {}, block events {}, blocked total {}, current blocked {}, producer {}",
+            "edge {} to {}.{}: reason {}, queue {}/{}, reserved {}, block events {}, blocked total {}, window block events {}, window blocked {}, window dropped {}, current blocked {}, producer {}",
             edge_name,
             stats.node_name,
             stats.port_name,
+            reason,
             stats.queued_packets,
             capacity,
             stats.reserved_packets,
             stats.block_events,
             duration_us(stats.total_blocked_us),
+            delta.block_events,
+            duration_us(delta.total_blocked_us),
+            edge_delta.dropped,
             duration_us(stats.blocked_for_us),
             stats.producer_name.as_deref().unwrap_or("graph input"),
         )
         .replace('\\', "\\\\")
         .replace('"', "\\\"");
         if stats.blocked {
-            label.push_str(&format!("\\nBLOCKED {}", duration_us(stats.blocked_for_us)));
+            label.push_str(&format!(
+                "\\nBLOCKED: queue full {}",
+                duration_us(stats.blocked_for_us)
+            ));
             format!("label=\"{label}\", color=\"#d62728\", fontcolor=\"#a51414\", penwidth=3, tooltip=\"{tooltip}\"")
         } else if waiting {
-            label.push_str("\\nWAITING for aligned input");
+            label.push_str("\\nWAITING: missing aligned input");
             format!("label=\"{label}\", color=\"#d6a700\", fontcolor=\"#806300\", penwidth=2, tooltip=\"{tooltip}\"")
+        } else if edge_delta.dropped > 0 {
+            label.push_str("\\nBOTTLENECK: consumer cannot keep up");
+            format!("label=\"{label}\", color=\"#d98c00\", fontcolor=\"#9a6200\", penwidth=2, tooltip=\"{tooltip}\"")
         } else if stats.block_events > 0 {
+            label.push_str("\\nRECOVERED: downstream drained slowly");
             format!("label=\"{label}\", color=\"#d98c00\", fontcolor=\"#9a6200\", penwidth=2, tooltip=\"{tooltip}\"")
         } else {
             format!("label=\"{edge_label}\", tooltip=\"{tooltip}\"")

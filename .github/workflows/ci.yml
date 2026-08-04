@@ -338,7 +338,10 @@ jobs:
           & "$env:RUNNER_TEMP\sdk-consumer-build\Release\sdk_smoke.exe"
 
       - name: Windows wheel 构建 + Python 测试
+        shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
           python -m pip install -v .
           python -m unittest discover -s lmflow/python/tests -v
           python -m compileall -q lmflow/python

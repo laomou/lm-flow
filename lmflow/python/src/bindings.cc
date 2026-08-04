@@ -109,8 +109,9 @@ py::array wrap_buffer(const LMFlowBuffer& b, const py::object& owner, bool writa
 }  // namespace
 
 // 类名刻意不用 `Py*` 前缀:那是 CPython 的命名空间(例如 CPython 自己就有
-// `PyContext`),占用它会撞名。放进 `lmflow` 命名空间后用普通名字即可。
-namespace lmflow {
+// `PyContext`),占用它会撞名。绑定包装类型也不能放进公开 `lmflow` 命名空间,
+// 否则与 flow.hpp 的 Packet / Context / Contract 在 LTO 下构成 ODR 冲突。
+namespace lmflow_python {
 
 // ---------------------------------------------------------------- Packet
 
@@ -768,8 +769,6 @@ py::tuple Graph::new_buffer(const std::vector<int64_t>& shape, const py::object&
 
 // ---------------------------------------------------------------- 模块
 
-extern "C" void lmflow_register_builtin_kernels(void);
-
 // 仅当以 --with-cv-test 构建时:CV 测试算子(链 OpenCV)被编进本扩展,
 // 由 cpp/tests/cv_test_register.cc 提供这个 extern "C" 注册入口。生产构建里它不存在,
 // 扩展保持零 OpenCV 依赖(ADR #14)。
@@ -791,9 +790,9 @@ void log_trampoline(void* /*user*/, LMFlowLogLevel level, const char* msg) {
 }
 }  // namespace
 
-}  // namespace lmflow
+}  // namespace lmflow_python
 
-using namespace lmflow;
+using namespace lmflow_python;
 
 PYBIND11_MODULE(_lmflow, m) {
   m.doc() = "Python bindings for the lmflow engine (pybind11)";
@@ -810,10 +809,10 @@ PYBIND11_MODULE(_lmflow, m) {
   m.attr("CLOSE_CANCELLED") = static_cast<int>(LMFLOW_CLOSE_CANCELLED);
 
   m.def("abi_version", &lmflow_abi_version);
-  m.def("register_builtin_kernels", &lmflow_register_builtin_kernels,
+  m.def("register_builtin_kernels", [] { lmflow_register_builtin_kernels(); },
         "Register the C++ builtin kernels (idempotent; call before building a graph)");
 #ifdef LMFLOW_WITH_CV_TEST
-  m.def("register_cv_test_kernels", &lmflow_register_cv_test_kernels,
+  m.def("register_cv_test_kernels", [] { lmflow_register_cv_test_kernels(); },
         "Test-only: register the CV kernel (CvInvertTest); present only when the extension is built with --with-cv-test");
 #endif
   m.def("register_kernel", &register_python_kernel, py::arg("name"), py::arg("cls"),
