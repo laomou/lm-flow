@@ -61,6 +61,10 @@ lm-flow/
 | `Contract` | Port type contract, declared by the kernel in `GetContract` |
 | `Poller/Observer` | Two ways to take graph output: pull (blocking/timeout/non-blocking) and push (callback) |
 
+Concrete port contracts are checked across edges while the graph is built, so a known
+`I64 → F64` connection fails before execution. An `any` endpoint keeps runtime packet checks,
+and a kernel's emitted packets must also satisfy its own output contract.
+
 ## Quick start
 
 Rust — from crates.io, **no C++ toolchain needed**:

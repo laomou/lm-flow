@@ -43,6 +43,25 @@ pub mod dtype {
 
 pub const MAX_DIMS: usize = 8;
 
+/// A Rust type with an explicitly declared cross-language representation.
+///
+/// Implementing this trait promises that values of `Self` have the ABI layout expected by the
+/// foreign code that uses [`Self::TYPE_NAME`]. [`Packet::from_interop`] hashes that stable name
+/// and stores the value behind a foreign-readable pointer.
+///
+/// # Safety
+///
+/// The implementation must guarantee that:
+///
+/// * `Self` has the same size, alignment and field layout as the foreign type registered under
+///   `TYPE_NAME` (normally use `#[repr(C)]`);
+/// * foreign readers treat the pointer as immutable and do not retain it beyond the packet's
+///   lifetime;
+/// * `TYPE_NAME` is stable and uniquely identifies that layout across all participating binaries.
+pub unsafe trait InteropType: Any + Send + Sync {
+    const TYPE_NAME: &'static str;
+}
+
 /// 单个元素的字节数;未知 dtype 返回 0。
 pub fn dtype_size(dt: i32) -> usize {
     match dt {
@@ -60,9 +79,9 @@ pub fn dtype_size(dt: i32) -> usize {
 /// 参数就是**修饰名**(Itanium ABI 下 `int` 是 `"i"`、`double` 是 `"d"`、
 /// `std::string` 是 `"NSt7__cxx1112basic_string..."`)。
 ///
-/// Rust 宿主要送一个 C++ 算子能按类型读取的包时,用它算出 type_id 交给
-/// [`Packet::new_interop`];或用 `LMFLOW_DECLARE_TYPE_NAME` 在 C++ 侧改成稳定名,
-/// 两边都调用本函数即可对齐。
+/// Rust 宿主要送一个 C++ 算子能按类型读取的包时,优先让类型实现 [`InteropType`]
+/// 并用 [`Packet::from_interop`];底层 unsafe [`Packet::new_interop`] 可直接接收本函数
+/// 算出的 id。C++ 侧用 `LMFLOW_DECLARE_TYPE_NAME` 声明同一个稳定名字即可对齐。
 pub fn fnv1a_type_id(mangled_name: &str) -> u64 {
     let mut h: u64 = 14695981039346656037;
     for b in mangled_name.bytes() {
@@ -321,10 +340,9 @@ impl Packet {
     /// * a **built-in** payload → [`Packet::from_i64`], [`from_f64`](Packet::from_f64),
     ///   [`from_builtin`](Packet::from_builtin) and friends; these carry the proper `type_id`
     ///   and are what cross-language kernels exchange (see ADR #9);
-    /// * a **custom** type that a C++ kernel must read by type → [`Packet::new_interop`] with
-    ///   an id both sides agree on, normally
-    ///   [`fnv1a_type_id`] of the name declared via
-    ///   `LMFLOW_DECLARE_TYPE_NAME` on the C++ side.
+    /// * a **custom** type that a C++ kernel must read by type → implement [`InteropType`] and use
+    ///   [`Packet::from_interop`]. The low-level escape hatch is unsafe
+    ///   [`Packet::new_interop`].
     ///
     /// `Packet::new` is still the right choice for a payload that never leaves Rust, or for
     /// ports that declare no type (the default).
@@ -340,13 +358,33 @@ impl Packet {
         }
     }
 
+    /// A value whose cross-language representation is declared by [`InteropType`].
+    pub fn from_interop<T: InteropType>(value: T) -> Self {
+        let type_id = fnv1a_type_id(T::TYPE_NAME);
+        register_type_name(type_id, T::TYPE_NAME);
+        // 安全性:InteropType 的 unsafe impl 承诺布局与稳定类型名的契约。
+        unsafe { Self::new_interop(value, type_id) }
+    }
+
     /// A Rust-native value carrying an explicit cross-language `type_id`.
     ///
     /// The id must match what the other side expects — typically
     /// [`fnv1a_type_id`] of the string a C++ kernel declared
     /// with `LMFLOW_DECLARE_TYPE_NAME`. The payload is held in the `Foreign` form, which gives
     /// the C side a readable pointer plus that id.
-    pub fn new_interop<T: Any + Send + Sync>(value: T, type_id: u64) -> Self {
+    ///
+    /// Built-in ids (`0..=15`) are rejected: their layouts are owned by the engine and must be
+    /// constructed with [`Packet::from_builtin`] or the corresponding `from_*` helper.
+    ///
+    /// # Safety
+    ///
+    /// `T` must have exactly the ABI layout associated with `type_id` in every foreign reader.
+    /// In particular, do not assign an id for a different type merely to satisfy a port contract.
+    pub unsafe fn new_interop<T: Any + Send + Sync>(value: T, type_id: u64) -> Self {
+        assert!(
+            type_id >= 16,
+            "custom interop type_id must be >= 16; built-in ids 0..=15 are reserved"
+        );
         let boxed = Box::new(value);
         let ptr = Box::into_raw(boxed) as *mut c_void;
         unsafe extern "C" fn drop_boxed<T>(p: *mut c_void) {
@@ -725,11 +763,35 @@ mod tests {
     #[test]
     fn interop_packet_carries_explicit_type_id() {
         let tid = fnv1a_type_id("i");
-        let p = Packet::new_interop(7i32, tid);
+        let p = unsafe { Packet::new_interop(7i32, tid) };
         assert_eq!(p.type_id(), tid);
         // 以 Foreign 形态承载,故指针可读、C 布局兼容
         let ptr = p.foreign_ptr().expect("should get a data pointer");
         assert_eq!(unsafe { *(ptr as *const i32) }, 7);
+    }
+
+    #[test]
+    #[should_panic(expected = "built-in ids 0..=15 are reserved")]
+    fn interop_packet_rejects_builtin_type_ids() {
+        let _ = unsafe { Packet::new_interop(7i32, type_id::I64) };
+    }
+
+    #[test]
+    fn declared_interop_type_uses_stable_name() {
+        #[repr(C)]
+        struct Point {
+            x: i32,
+            y: i32,
+        }
+        unsafe impl InteropType for Point {
+            const TYPE_NAME: &'static str = "lmflow.test.Point";
+        }
+
+        let p = Packet::from_interop(Point { x: 3, y: 4 });
+        assert_eq!(p.type_id(), fnv1a_type_id(Point::TYPE_NAME));
+        assert_eq!(type_name(p.type_id()), Point::TYPE_NAME);
+        let point = unsafe { &*(p.foreign_ptr().unwrap() as *const Point) };
+        assert_eq!((point.x, point.y), (3, 4));
     }
 
     #[test]

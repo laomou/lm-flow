@@ -101,7 +101,7 @@ pub mod timestamp;
 
 pub use graph::{Graph, Input, Poller, State};
 pub use kernel_api::{register_kernel, Kernel, KernelContract, KernelCtx};
-pub use packet::{BufferData, Builtin, Packet};
+pub use packet::{BufferData, Builtin, InteropType, Packet};
 pub use status::{Error, Result};
 pub use timestamp::Timestamp;
 

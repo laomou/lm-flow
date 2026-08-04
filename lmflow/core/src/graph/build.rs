@@ -209,49 +209,44 @@ impl GraphInner {
             }
         }
 
-        // ---- 建节点 ----
-        let shared = Arc::new(GraphShared::new(cfg.clone()));
-        let mut nodes = Vec::new();
-        let mut required: Vec<(String, String)> = Vec::new();
+        // ---- 收集契约 + 静态类型检查 ----
+        //
+        // 所有节点的端口表此时都已确定,先一次性询问契约,才能沿每条边同时看到
+        // producer.output_type 与 consumer.input_type。能静态证明不兼容的连接在建图期
+        // 直接拒绝;任一侧为 ANY/NONE(0)则保留运行期逐包检查。
+        let mut contracts = Vec::with_capacity(cfg.nodes.len());
+        let mut kernels = Vec::with_capacity(cfg.nodes.len());
         for (idx, n) in cfg.nodes.iter().enumerate() {
             let name = node_label(n, idx);
             let (ins, outs) = node_port_tables[idx].clone();
-
-            // 契约:端口数与名字已知,算子只补类型 + 声明必需 side packet
-            let mut contract = Contract::new(ins.clone(), outs.clone());
-            // 安全性:contract 是本栈帧上存活的对象,回调期间无人访问它
+            let mut contract = Contract::new(ins, outs);
+            // 安全性:contract 是本栈帧上存活的对象,回调期间无人访问它。
             unsafe {
                 KernelInstance::fill_contract(
                     &n.kernel,
                     &mut contract as *mut Contract as *mut c_void,
                 )?
             };
+            reject_reserved_contract_types(&name, &contract)?;
+            contracts.push(contract);
+            // 保持历史顺序:每个节点都是 get_contract 后立刻 create,而不是先询问完
+            // 所有契约再统一创建。静态检查失败时这些实例随局部 Vec 正常析构。
+            kernels.push(KernelInstance::create(&n.kernel)?);
+        }
+        check_edge_type_compatibility(&cfg, &edges, &contracts)?;
 
-            // `HOST_OBJECT`(7)是**预留未启用**的类型(ADR #26)。此前引擎对它没有任何
-            // 校验:契约声明 7、包也带 7,类型检查按数值相等就放行了 —— 于是「未启用」
-            // 实际只靠「没有构造函数生产它」维持,一旦有人用 `new_interop(v, 7)` 或 C 侧
-            // 手填 7 绕过,就会静默进入数据流,而 ADR #9 的两条理由(两级类型系统、
-            // Py_DECREF 抢 GIL 的死锁隐患)都还成立。故在建图期明确拒掉。
-            for (which, types) in [
-                ("input", &contract.input_types),
-                ("output", &contract.output_types),
-            ] {
-                if let Some(i) = types
-                    .iter()
-                    .position(|&t| t == crate::packet::type_id::HOST_OBJECT)
-                {
-                    return Err(Error::InvalidArg(format!(
-                        "node `{name}`: {which} port {i} declares LMFLOW_TYPE_HOST_OBJECT, \
-                         which is reserved and not enabled (see ADR #26). Host-language native \
-                         objects (e.g. PyObject) would create a second type system invisible to \
-                         the YAML graph, and their refcount can drop on an engine worker thread \
-                         where releasing them needs the GIL. Use LMFLOW_TYPE_BUFFER for numeric \
-                         collections, or LMFLOW_TYPE_STR carrying JSON for arbitrary metadata"
-                    )));
-                }
-            }
-
-            let kernel = KernelInstance::create(&n.kernel)?;
+        // ---- 建节点 ----
+        let shared = Arc::new(GraphShared::new(cfg.clone()));
+        let mut nodes = Vec::new();
+        let mut required: Vec<(String, String)> = Vec::new();
+        for ((idx, n), (contract, kernel)) in cfg
+            .nodes
+            .iter()
+            .enumerate()
+            .zip(contracts.into_iter().zip(kernels))
+        {
+            let name = node_label(n, idx);
+            let (ins, outs) = node_port_tables[idx].clone();
 
             let input_edges: Vec<EdgeId> = ins.names().iter().map(|x| edge_by_name[x]).collect();
             let output_edges: Vec<EdgeId> = outs.names().iter().map(|x| edge_by_name[x]).collect();
@@ -289,6 +284,7 @@ impl GraphInner {
                 executor,
                 policy: InputPolicy::from_config(&n.input_policy, &ins)?,
                 input_types: contract.input_types.clone(),
+                output_types: contract.output_types.clone(),
                 kernel,
                 ctxs,
                 max_in_flight: mif,
@@ -354,6 +350,73 @@ impl GraphInner {
             timing,
         })
     }
+}
+
+fn reject_reserved_contract_types(name: &str, contract: &Contract) -> Result<()> {
+    // `HOST_OBJECT`(7)是预留未启用类型(ADR #26),契约声明必须建图期失败。
+    for (which, types) in [
+        ("input", &contract.input_types),
+        ("output", &contract.output_types),
+    ] {
+        if let Some(i) = types
+            .iter()
+            .position(|&t| t == crate::packet::type_id::HOST_OBJECT)
+        {
+            return Err(Error::InvalidArg(format!(
+                "node `{name}`: {which} port {i} declares LMFLOW_TYPE_HOST_OBJECT, \
+                 which is reserved and not enabled (see ADR #26). Host-language native \
+                 objects (e.g. PyObject) would create a second type system invisible to \
+                 the YAML graph, and their refcount can drop on an engine worker thread \
+                 where releasing them needs the GIL. Use LMFLOW_TYPE_BUFFER for numeric \
+                 collections, or LMFLOW_TYPE_STR carrying JSON for arbitrary metadata"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn check_edge_type_compatibility(
+    cfg: &GraphConfig,
+    edges: &[Edge],
+    contracts: &[Contract],
+) -> Result<()> {
+    for edge in edges {
+        let Some(producer) = edge.producer else {
+            continue; // 图输入的实际类型由宿主逐包决定,只能运行期检查。
+        };
+        let producer_port = contracts[producer]
+            .outputs
+            .index_by_name(&edge.name)
+            .expect("edge producer output must exist");
+        let produced = contracts[producer].output_types[producer_port];
+        if produced == crate::packet::type_id::NONE {
+            continue; // producer 声明 ANY:无法静态证明,保留运行期检查。
+        }
+        for &(consumer, consumer_port) in &edge.consumers {
+            let wanted = contracts[consumer].input_types[consumer_port];
+            if wanted == crate::packet::type_id::NONE || wanted == produced {
+                continue;
+            }
+            return Err(Error::InvalidArg(format!(
+                "type mismatch on edge `{}`: node `{}` output port `{}` declares {}, \
+                 but node `{}` input port `{}` declares {}",
+                edge.name,
+                node_label(&cfg.nodes[producer], producer),
+                contracts[producer]
+                    .outputs
+                    .name(producer_port)
+                    .unwrap_or("?"),
+                crate::packet::type_name(produced),
+                node_label(&cfg.nodes[consumer], consumer),
+                contracts[consumer]
+                    .inputs
+                    .name(consumer_port)
+                    .unwrap_or("?"),
+                crate::packet::type_name(wanted),
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn node_label(n: &crate::config::NodeConfig, idx: usize) -> String {

@@ -8,6 +8,28 @@ Three artifacts ship from one version number: the `lmflow` crate on crates.io, t
 `lm-lmflow` wheel on PyPI (imported as `lmflow`), and the per-platform native SDK attached
 to each GitHub Release.
 
+## [Unreleased]
+
+### Added
+
+- **Two-level port type checking.** When a producer output and consumer input both declare
+  concrete, different types, graph construction now fails immediately with the edge, nodes,
+  ports and type names in the diagnostic. An `any` endpoint remains dynamic and is checked
+  packet-by-packet at runtime. Kernel emissions are also validated against the kernel's own
+  output contract before dispatch, including packets emitted from `Close` or directly to a
+  graph output.
+- **`InteropType` for Rust-defined cross-language payloads.** An unsafe implementation
+  centralizes the ABI-layout and stable-type-name promise; `Packet::from_interop` derives and
+  registers the type id from that name.
+
+### Changed
+
+- **Rust API breaking change:** `Packet::new_interop` is now `unsafe`, because an arbitrary
+  `T` plus arbitrary id cannot prove that foreign readers use the same ABI layout. It also
+  rejects ids `0..=15`, which are reserved for engine-owned built-in layouts. Use
+  `Packet::from_i64` / other built-in constructors, or implement `InteropType` and call
+  `Packet::from_interop`.
+
 ## [0.2.0] — 2026-08-04
 
 ### Added

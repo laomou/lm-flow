@@ -2,7 +2,7 @@
 //!
 //! 此前引擎对它**没有任何校验**:契约声明 7、包也带 7,`check_input_types` 按数值相等
 //! 就放行了。也就是说「未启用」实际只靠「没有构造函数生产它」维持 —— 一旦有人用
-//! `new_interop(v, 7)` 或 C 侧手填 `type_id = 7` 绕过,宿主语言原生对象就静默进入了
+//! C 侧手填 `type_id = 7` 或 Rust unsafe `from_foreign` 绕过,宿主语言原生对象就静默进入了
 //! 数据流,而 ADR #9 拒绝它的两条理由都还成立:
 //!
 //!   1. 图是 YAML 描述的,看不出节点是什么语言写的 → 出现两级类型系统,某些包只能在
@@ -45,7 +45,13 @@ impl Kernel for EmitsHostObject {
 struct HostObjectSource;
 impl Kernel for HostObjectSource {
     fn process(&mut self, cc: &mut KernelCtx) -> lmflow::Result<()> {
-        cc.emit(0, Packet::new_interop(1i64, type_id::HOST_OBJECT))?;
+        let ptr = Box::into_raw(Box::new(1i64)) as *mut std::ffi::c_void;
+        unsafe extern "C" fn drop_i64(p: *mut std::ffi::c_void) {
+            drop(unsafe { Box::from_raw(p as *mut i64) });
+        }
+        cc.emit(0, unsafe {
+            Packet::from_foreign(ptr, type_id::HOST_OBJECT, Some(drop_i64))
+        })?;
         cc.source_done();
         Ok(())
     }
@@ -60,7 +66,13 @@ impl Kernel for HostObjectOnClose {
     }
 
     fn close(&mut self, cc: &mut KernelCtx) -> lmflow::Result<()> {
-        cc.emit(0, Packet::new_interop(1i64, type_id::HOST_OBJECT))
+        let ptr = Box::into_raw(Box::new(1i64)) as *mut std::ffi::c_void;
+        unsafe extern "C" fn drop_i64(p: *mut std::ffi::c_void) {
+            drop(unsafe { Box::from_raw(p as *mut i64) });
+        }
+        cc.emit(0, unsafe {
+            Packet::from_foreign(ptr, type_id::HOST_OBJECT, Some(drop_i64))
+        })
     }
 }
 
@@ -219,8 +231,14 @@ fn close_output_carrying_host_object_is_rejected_before_dispatch() {
 #[test]
 fn side_packet_carrying_host_object_is_rejected() {
     let graph = Graph::from_yaml(&one_node("PassThrough")).unwrap();
+    let ptr = Box::into_raw(Box::new(1i64)) as *mut std::ffi::c_void;
+    unsafe extern "C" fn drop_i64(p: *mut std::ffi::c_void) {
+        drop(unsafe { Box::from_raw(p as *mut i64) });
+    }
     let err = graph
-        .set_side_packet("native", Packet::new_interop(1i64, type_id::HOST_OBJECT))
+        .set_side_packet("native", unsafe {
+            Packet::from_foreign(ptr, type_id::HOST_OBJECT, Some(drop_i64))
+        })
         .unwrap_err();
     let msg = err.to_string();
     assert!(
