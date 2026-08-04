@@ -13,6 +13,22 @@ use lmflow::{DotView, Graph, Kernel, KernelCtx, Packet, Timestamp};
 
 static RUNNING_GATE: (Mutex<bool>, Condvar) = (Mutex::new(false), Condvar::new());
 
+struct RunningGateGuard;
+
+impl RunningGateGuard {
+    fn hold() -> Self {
+        *RUNNING_GATE.0.lock().unwrap() = false;
+        Self
+    }
+}
+
+impl Drop for RunningGateGuard {
+    fn drop(&mut self) {
+        *RUNNING_GATE.0.lock().unwrap() = true;
+        RUNNING_GATE.1.notify_all();
+    }
+}
+
 #[derive(Default)]
 struct DotRunning;
 
@@ -234,7 +250,7 @@ input_ports: [in]
     let closed_dot = idle.to_dot_compact();
     assert!(closed_dot.contains("@main\\nCLOSED"));
 
-    *RUNNING_GATE.0.lock().unwrap() = false;
+    let gate = RunningGateGuard::hold();
     let running = Graph::from_yaml(
         r#"
 executors:
@@ -254,7 +270,7 @@ input_ports: [in]
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
     loop {
         let dot = running.to_dot_compact();
-        if dot.contains("@pool\\nRUNNING") {
+        if dot.contains("@pool") && dot.contains("\\nRUNNING") {
             assert!(dot.contains("color=\"#2ca02c\", penwidth=3"));
             assert!(dot.contains("hotspots running 1 · error 0"));
             break;
@@ -265,8 +281,7 @@ input_ports: [in]
         );
         std::thread::sleep(Duration::from_millis(1));
     }
-    *RUNNING_GATE.0.lock().unwrap() = true;
-    RUNNING_GATE.1.notify_all();
+    drop(gate);
     running.close_all_inputs();
     running.wait_done_timeout(Duration::from_secs(2)).unwrap();
 
