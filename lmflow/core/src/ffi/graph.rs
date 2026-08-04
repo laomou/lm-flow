@@ -688,30 +688,33 @@ pub unsafe extern "C" fn lmflow_graph_dump(g: *mut LMFlowGraph) -> *const c_char
     })
 }
 
-/// 拓扑的 Graphviz DOT 导出。返回值同 `dump`:线程局部缓冲,调用方不得 free。
-///
-/// `with_stats != 0` 时在节点标签上标出运行统计并按平均延迟上热力图(见
-/// `Graph::to_dot_with_stats`);可在运行期间随时调用。
+pub const LMFLOW_DOT_TOPOLOGY: i32 = 0;
+pub const LMFLOW_DOT_COMPACT: i32 = 1;
+pub const LMFLOW_DOT_DIAGNOSTICS: i32 = 2;
+
+/// 显式选择 Graphviz DOT 的详细程度。返回值同 `dump`:线程局部缓冲,调用方不得 free。
 #[no_mangle]
-pub unsafe extern "C" fn lmflow_graph_to_dot(
-    g: *mut LMFlowGraph,
-    with_stats: bool,
-) -> *const c_char {
+pub unsafe extern "C" fn lmflow_graph_to_dot_view(g: *mut LMFlowGraph, view: i32) -> *const c_char {
     guard_val(c"".as_ptr(), || {
         thread_local! {
             static BUF: std::cell::RefCell<std::ffi::CString> =
                 std::cell::RefCell::new(std::ffi::CString::default());
         }
+        let view = match view {
+            LMFLOW_DOT_TOPOLOGY => crate::graph::DotView::Topology,
+            LMFLOW_DOT_COMPACT => crate::graph::DotView::Compact,
+            LMFLOW_DOT_DIAGNOSTICS => crate::graph::DotView::Diagnostics,
+            value => {
+                last_error::set(&format!(
+                    "invalid DOT view {value}; expected 0 (topology), 1 (compact), or 2 (diagnostics)"
+                ));
+                return c"".as_ptr();
+            }
+        };
         // 未初始化图 → 合法的空 digraph(而非文本占位符),便于直接喂 graphviz。
         let text = graph_of(g).map_or_else(
             || "digraph lmflow {\n}\n".to_string(),
-            |gr| {
-                if with_stats {
-                    gr.to_dot_with_stats()
-                } else {
-                    gr.to_dot()
-                }
-            },
+            |gr| gr.to_dot_with_view(view),
         );
         BUF.with(|b| {
             *b.borrow_mut() = std::ffi::CString::new(text).unwrap_or_default();

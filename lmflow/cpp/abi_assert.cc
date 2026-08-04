@@ -56,6 +56,9 @@ static_assert(offsetof(LMFlowInputQueueStats, struct_size) == 0,
 
 /* 状态码 / 时间戳哨兵的取值约定 */
 static_assert(LMFLOW_OK == 0, "LMFLOW_OK must be 0");
+static_assert(LMFLOW_DOT_TOPOLOGY == 0, "LMFLOW_DOT_TOPOLOGY must be 0");
+static_assert(LMFLOW_DOT_COMPACT == 1, "LMFLOW_DOT_COMPACT must be 1");
+static_assert(LMFLOW_DOT_DIAGNOSTICS == 2, "LMFLOW_DOT_DIAGNOSTICS must be 2");
 static_assert(LMFLOW_TS_UNSET < LMFLOW_TS_UNSTARTED, "timestamp sentinel ordering is wrong");
 static_assert(LMFLOW_TS_UNSTARTED < LMFLOW_TS_PRE_STREAM, "timestamp sentinel ordering is wrong");
 static_assert(LMFLOW_TS_PRE_STREAM < LMFLOW_TS_MIN, "timestamp sentinel ordering is wrong");

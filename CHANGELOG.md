@@ -12,6 +12,11 @@ to each GitHub Release.
 
 ### Added
 
+- **Layered Graphviz views and live node states.** Rust, C, and Python hosts can select topology,
+  compact, or full diagnostics output. Compact mode keeps node state and core throughput/latency
+  statistics while hiding per-port and Poller detail. Statistics-enabled views show
+  `CREATED`/`IDLE`/`RUNNING`/`CLOSED`/`ERROR` with border colors, leaving node fill available for
+  the latency heat map.
 - **Native Windows/MSVC CI coverage.** Windows now builds and runs the Rust engine with the
   bundled C++ kernels, compiles the public C/C++ headers and header-only tests with MSVC, validates
   Debug and Release Visual Studio CMake builds, installs and consumes the native SDK through
@@ -61,6 +66,8 @@ to each GitHub Release.
 
 ### Changed
 
+- **C ABI version 2.** The boolean `lmflow_graph_to_dot` entry point is removed; callers must use
+  `lmflow_graph_to_dot_view` with an explicit topology, compact, or diagnostics view.
 - **Consistent and render-tested Graphviz snapshots.** One statistics-enabled DOT export now uses
   a single timestamp for the title, nodes, input queues, graph inputs, and Pollers. CI also renders
   representative plain and diagnostic DOT through Graphviz to catch invalid SVG output.

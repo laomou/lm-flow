@@ -1,7 +1,7 @@
 use std::io::Write;
 use std::process::{Command, Stdio};
 
-use lmflow::{Graph, PollerOptions, PollerOverflow};
+use lmflow::{DotView, Graph, PollerOptions, PollerOverflow};
 
 fn render_svg(dot: &str) -> Option<String> {
     let available = Command::new("dot").arg("-V").output().is_ok();
@@ -61,6 +61,13 @@ output_ports: [result]
     };
     assert!(plain_svg.contains("<svg"));
     assert!(plain_svg.contains("cluster_"));
+
+    let compact_svg =
+        render_svg(&graph.to_dot_with_view(DotView::Compact)).expect("Graphviz remains available");
+    assert!(compact_svg.contains("<svg"));
+    assert!(compact_svg.contains("node state (border)"));
+    assert!(compact_svg.contains("CREATED"));
+    assert!(!compact_svg.contains("diagnostics"));
 
     let stats_svg = render_svg(&graph.to_dot_with_stats()).expect("Graphviz remains available");
     assert!(stats_svg.contains("<svg"));

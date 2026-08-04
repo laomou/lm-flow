@@ -296,7 +296,7 @@ bool       lmflow_ctx_has_side_packet(const LMFlowContext*, const char* name);
 | 全局水位 | `lmflow_graph_total_queued` `…_total_queued_bytes`;YAML `max_queued_packets/bytes` |
 | 统计 | `lmflow_graph_node_stats`(`LMFlowNodeStats`,**全原子无锁**采集)、`lmflow_graph_counter_value`;YAML `watchdog_ms` |
 | 状态 / 拓扑 | `lmflow_graph_state` `…_num_input_ports/output_ports/num_nodes` `lmflow_registered_kernel_*` |
-| 内省 | `lmflow_graph_dump` `lmflow_graph_to_dot`(Graphviz DOT) `lmflow_graph_queue_depth` `lmflow_graph_dropped_count` `lmflow_graph_last_error` `lmflow_packet_debug_string` |
+| 内省 | `lmflow_graph_dump` `lmflow_graph_to_dot_view`(Graphviz DOT) `lmflow_graph_queue_depth` `lmflow_graph_dropped_count` `lmflow_graph_last_error` `lmflow_packet_debug_string` |
 
 **接口设计要点**
 
@@ -307,8 +307,9 @@ bool       lmflow_ctx_has_side_packet(const LMFlowContext*, const char* name);
 - `lmflow_last_error()` 是**线程局部**的:算子在工作线程失败时,其文本不会出现在宿主线程。
   要拿那条信息用 `lmflow_graph_last_error(graph)`。
 - `lmflow_graph_dump` 返回**线程局部**缓冲,多线程同时调用不会互相踩踏。
-- `lmflow_graph_to_dot(g, with_stats)` 导出 Graphviz DOT(`dot -Tsvg` 可渲染):子图命名空间还原成嵌套 cluster,节点填色 = 所在执行器,图例列各线程池的线程数 / 绑定核(亲和力)/ 实时优先级。返回值同 dump(线程局部,不得 free)。
-  `with_stats = true` 时节点标签额外标出运行统计(处理数 · 平均延迟 · 收/发包数 · 队列峰值 · 错误数),填色改为**按平均延迟的热力图**(绿=快 → 红=慢)—— 一眼定位瓶颈节点;此时执行器仅以标签里的 `@name` 标出。可在运行期间随时调用(读原子快照)。
+- `lmflow_graph_to_dot_view(g, view)` 导出 Graphviz DOT(`dot -Tsvg` 可渲染),支持
+  `TOPOLOGY` / `COMPACT` / `DIAGNOSTICS` 三档。返回值同 dump(线程局部,不得 free)。
+  统计视图可在图运行期间随时调用(读原子快照)。
 - 日志回调:引擎保证调用时**不持有任何内部锁**,故回调里可安全抢 GIL / 加锁。
 
 ---
@@ -750,7 +751,8 @@ emit 的批量若自身大于有效包数容量会明确报错,避免永远无�
 `Poller::backpressure_stats()` 同时提供策略、容量、积压、丢包与 Block 等待统计。
 `graph.dump()` 会输出 `watermark` 与 `poller` 行。Poller 有损策略的 WARN 统一包含输出口、
 策略、容量、当前积压和累计丢包数。reset 会把这些运行期统计全部清零。
-`graph.to_dot_with_stats()` / `lmflow_graph_to_dot(g, true)` 会把相同信息直接画进拓扑:
+`graph.to_dot_with_stats()` /
+`lmflow_graph_to_dot_view(g, LMFLOW_DOT_DIAGNOSTICS)` 会把相同信息直接画进拓扑:
 图标题显示唯一的全局 queued/limit;图输入口只显示该句柄的等待次数/时长,避免把全局
 水位误读成每端口容量。消费者输入边显示 queue/capacity/reservation,输出端用
 Poller 虚拟节点显示策略、容量、积压与丢包。当前阻塞用红色粗线,历史阻塞或丢包用橙色。
@@ -761,6 +763,11 @@ Poller 虚拟节点显示策略、容量、积压与丢包。当前阻塞用红�
 红/黄/橙和 Poller 虚线,SVG 的 `tooltip` 保留节点、输入边和 Poller 的完整快照,使默认
 标签保持紧凑而悬停仍能查看详细数据。同一次统计图导出只取一个时间点,标题、节点、
 输入队列、图输入和 Poller 的持续时间不会因格式化先后产生漂移。
+
+DOT 视图分三档:`Topology` 只画静态拓扑,`Compact` 加节点状态和核心吞吐/延迟统计,
+`Diagnostics` 再加逐端口队列、背压、Poller 和诊断图例。旧的 `to_dot()` 与
+`to_dot_with_stats()` 分别映射到 `Topology` / `Diagnostics`。统计视图中节点边框表示
+`CREATED` / `IDLE` / `RUNNING` / `CLOSED` / `ERROR`,填充色继续专用于延迟热力图。
 
 线程池任务的全局在飞计数必须在**认领仍持节点调度锁时**递增,不能等到提交执行器时才加。
 否则两步之间存在「节点已有 ready 调用、全局计数仍为 0」的假空闲窗口,并发关流时

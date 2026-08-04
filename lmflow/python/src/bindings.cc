@@ -665,9 +665,10 @@ class Graph {
     const char* s = lmflow_graph_dump(g_);
     return s ? s : "";
   }
-  std::string to_dot(bool with_stats) const {
-    const char* s = lmflow_graph_to_dot(g_, with_stats);
-    return s ? s : "";
+  std::string to_dot_view(int view) const {
+    const char* s = lmflow_graph_to_dot_view(g_, static_cast<LMFlowDotView>(view));
+    if (!s || s[0] == '\0') check(LMFLOW_ERR_INVALID_ARG, "to_dot_view");
+    return s;
   }
   std::string last_error() const {
     const char* s = lmflow_graph_last_error(g_);
@@ -984,7 +985,7 @@ PYBIND11_MODULE(_lmflow, m) {
       .def("new_buffer", &Graph::new_buffer, py::arg("shape"), py::arg("dtype"))
       .def_property_readonly("state", &Graph::state)
       .def("dump", &Graph::dump)
-      .def("to_dot", &Graph::to_dot, py::arg("with_stats") = false)
+      .def("to_dot_view", &Graph::to_dot_view, py::arg("view"))
       .def("last_error", &Graph::last_error)
       .def("queue_depth", &Graph::queue_depth)
       .def("dropped_count", &Graph::dropped_count)

@@ -28,7 +28,7 @@ extern "C" {
  * 动态链接时 header 与 .so 版本不一致会导致结构体布局错乱。
  * 宿主启动时应校验 lmflow_abi_version() == LMFLOW_ABI_VERSION;
  * lmflow_graph_new 内部亦会校验,不匹配返回 NULL 并置错误。 */
-#define LMFLOW_ABI_VERSION 1u
+#define LMFLOW_ABI_VERSION 2u
 uint32_t lmflow_abi_version(void);
 
 /* ---------- 状态码 ---------- */
@@ -777,15 +777,15 @@ const char* lmflow_graph_counter_name(LMFlowGraph*, size_t idx);
  * 返回值存放于**线程局部**缓冲,生命周期至本线程下次调用本函数 ——
  * 故多线程同时调用不会互相踩踏。 */
 const char* lmflow_graph_dump(LMFlowGraph*);
-/* 拓扑的 Graphviz DOT 导出(`dot -Tsvg` 可渲染):子图命名空间还原成 cluster,
- * 节点填色 = 所在执行器(线程池),图例列线程数 / 绑定核 / 实时优先级。
- *
- * with_stats = true:节点标签额外标出运行统计(处理数 · 平均延迟 · 收/发包数 ·
- * 队列峰值 · 错误数),且填色改为**按平均延迟的热力图**(绿=快 → 红=慢),一眼看出
- * 瓶颈节点;此时执行器仅以标签里的 @name 标出。可在图运行期间随时调用(读的是原子快照)。
- *
- * 返回值同 dump:存放于线程局部缓冲,生命周期至本线程下次调用本函数,调用方不得 free。 */
-const char* lmflow_graph_to_dot(LMFlowGraph*, bool with_stats);
+typedef enum {
+  LMFLOW_DOT_TOPOLOGY = 0,
+  LMFLOW_DOT_COMPACT = 1,
+  LMFLOW_DOT_DIAGNOSTICS = 2,
+} LMFlowDotView;
+/* Graphviz DOT 导出(`dot -Tsvg` 可渲染),显式选择 topology / compact / diagnostics。
+ * 返回值同 dump:存放于线程局部缓冲,生命周期至本线程下次调用本函数,调用方不得 free。
+ * 非法 view 返回空串并设置 last_error。 */
+const char* lmflow_graph_to_dot_view(LMFlowGraph*, LMFlowDotView view);
 /* 指定边的当前积压包数;端口不存在返回 LMFLOW_INVALID_ID。 */
 size_t lmflow_graph_queue_depth(LMFlowGraph*, const char* port);
 

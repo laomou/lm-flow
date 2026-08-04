@@ -678,6 +678,14 @@ output_ports: [out]
             self.assertIn("digraph lmflow", dot)
             self.assertIn("subgraph cluster_", dot)
             self.assertIn("@main", dot)
+            compact = g.to_dot(view=lmflow.DotView.COMPACT)
+            self.assertIn("CREATED · 0 pkts", compact)
+            self.assertIn("cluster_node_state_legend", compact)
+            self.assertNotIn("ports:", compact)
+            diagnostics = g.to_dot(view=lmflow.DotView.DIAGNOSTICS)
+            self.assertIn("ports:", diagnostics)
+            with self.assertRaises(ValueError):
+                g.to_dot(view="verbose")
 
     def test_fixed_size_policy_drops_and_reports(self):
         with graph(
