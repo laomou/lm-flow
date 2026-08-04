@@ -58,6 +58,7 @@ impl GraphInner {
     ///
     /// DOT id 用 `n{下标}` / `pin{边}` / `pout{边}`(纯下标,绝不撞名;人名一律进 label)。
     pub(super) fn to_dot(&self, with_stats: bool) -> String {
+        let snapshot_us = with_stats.then(|| self.epoch_us());
         // 执行器配色板(浅色填充);按执行器序号取模。
         const COLORS: &[&str] = &[
             "#cde4ff", "#d7f0d0", "#ffe4c7", "#f0d0e8", "#d0eeee", "#efe6b0", "#e0d4f0", "#ffd6d6",
@@ -116,8 +117,8 @@ impl GraphInner {
             let snapshot = if started == 0 {
                 "not started".to_string()
             } else {
-                let elapsed = self
-                    .epoch_us()
+                let elapsed = snapshot_us
+                    .expect("statistics snapshot timestamp exists")
                     .saturating_sub(started.saturating_sub(1))
                     .max(0) as u64;
                 format!("snapshot +{}", duration_us(elapsed))
@@ -190,9 +191,9 @@ impl GraphInner {
                     let since = queue.blocked_since_us.load(Ordering::Relaxed);
                     if since != 0 {
                         blocked_ports += 1;
-                        let now = self.epoch.elapsed().as_micros().min(i64::MAX as u128) as i64;
+                        let now_us = snapshot_us.expect("statistics snapshot timestamp exists");
                         total_blocked_us = total_blocked_us.saturating_add(
-                            now.saturating_sub(since.saturating_sub(1)).max(0) as u64,
+                            now_us.saturating_sub(since.saturating_sub(1)).max(0) as u64,
                         );
                     }
                 }
@@ -225,7 +226,11 @@ impl GraphInner {
                     extra.push_str("\\nports:");
                     for port in 0..n.input_queues.len() {
                         let queue = self
-                            .input_queue_stats(i, port)
+                            .input_queue_stats_at(
+                                i,
+                                port,
+                                snapshot_us.expect("statistics snapshot timestamp exists"),
+                            )
                             .expect("node input port exists");
                         let capacity = queue
                             .packet_capacity
@@ -286,7 +291,7 @@ impl GraphInner {
             let stats = with_stats.then(|| {
                 self.edges[e]
                     .watermark_backpressure
-                    .snapshot(self.epoch_us())
+                    .snapshot(snapshot_us.expect("statistics snapshot timestamp exists"))
             });
             if let Some(stats) = &stats {
                 label.push_str(&format!(
@@ -339,12 +344,12 @@ impl GraphInner {
             let label = esc(&e.name);
             if e.is_graph_input {
                 for &(c, port) in &e.consumers {
-                    let attrs = self.dot_edge_stats_attrs(c, port, &label, with_stats);
+                    let attrs = self.dot_edge_stats_attrs(c, port, &label, snapshot_us);
                     out.push_str(&format!("  pin{ei} -> n{c} [{attrs}];\n"));
                 }
             } else if let Some(p) = e.producer {
                 for &(c, port) in &e.consumers {
-                    let attrs = self.dot_edge_stats_attrs(c, port, &label, with_stats);
+                    let attrs = self.dot_edge_stats_attrs(c, port, &label, snapshot_us);
                     out.push_str(&format!("  n{p} -> n{c} [{attrs}];\n"));
                 }
             }
@@ -361,7 +366,9 @@ impl GraphInner {
                     .iter()
                     .enumerate()
                 {
-                    let stats = poller.block_backpressure.snapshot(self.epoch_us());
+                    let stats = poller
+                        .block_backpressure
+                        .snapshot(snapshot_us.expect("statistics snapshot timestamp exists"));
                     let queued = poller.queue.lock().expect("poller lock poisoned").len();
                     let dropped = poller.dropped.load(Ordering::Relaxed);
                     let capacity = poller
@@ -479,13 +486,13 @@ impl GraphInner {
         node: usize,
         port: usize,
         edge_label: &str,
-        with_stats: bool,
+        snapshot_us: Option<i64>,
     ) -> String {
-        if !with_stats {
+        let Some(snapshot_us) = snapshot_us else {
             return format!("label=\"{edge_label}\"");
-        }
+        };
         let stats = self
-            .input_queue_stats(node, port)
+            .input_queue_stats_at(node, port, snapshot_us)
             .expect("consumer input port exists");
         let waiting = self.dot_waiting_ports(node).contains(&port);
         let capacity = stats

@@ -61,6 +61,9 @@ to each GitHub Release.
 
 ### Changed
 
+- **Consistent and render-tested Graphviz snapshots.** One statistics-enabled DOT export now uses
+  a single timestamp for the title, nodes, input queues, graph inputs, and Pollers. CI also renders
+  representative plain and diagnostic DOT through Graphviz to catch invalid SVG output.
 - **Rust API breaking change:** `Packet::new_interop` is now `unsafe`, because an arbitrary
   `T` plus arbitrary id cannot prove that foreign readers use the same ABI layout. It also
   rejects ids `0..=15`, which are reserved for engine-owned built-in layouts. Use
