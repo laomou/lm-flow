@@ -125,32 +125,6 @@ output_ports: [out]
         assert_eq!(lmflow_graph_wait_until_idle(graph), 0);
         assert_eq!(lmflow_graph_total_queued(graph), 1);
         assert_eq!(lmflow_poller_dropped_count(poller), 1);
-        let mut poller_stats = LMFlowPollerBackpressureStats {
-            struct_size: std::mem::size_of::<LMFlowPollerBackpressureStats>() as u32,
-            reserved0: 0,
-            port_name: std::ptr::null(),
-            capacity: 0,
-            overflow_policy: 0,
-            reserved1: 0,
-            queued_packets: 0,
-            dropped_packets: 0,
-            blocked: false,
-            reserved2: [0; 7],
-            active_waiters: 0,
-            blocked_for_us: 0,
-            block_events: 0,
-            total_blocked_us: 0,
-        };
-        assert!(lmflow_poller_backpressure_stats(poller, &mut poller_stats));
-        assert_eq!(
-            CStr::from_ptr(poller_stats.port_name).to_str().unwrap(),
-            "out"
-        );
-        assert_eq!(poller_stats.capacity, 1);
-        assert_eq!(poller_stats.overflow_policy, LMFLOW_POLLER_DROP_OLDEST);
-        assert_eq!(poller_stats.queued_packets, 1);
-        assert_eq!(poller_stats.dropped_packets, 1);
-
         let mut packet = LMFlowPacket::default();
         assert!(lmflow_poller_next(poller, &mut packet));
         assert_eq!(*(packet.payload as *const i32), 2);
@@ -161,47 +135,6 @@ output_ports: [out]
         assert_eq!(lmflow_graph_wait_done(graph), 0);
         lmflow_input_free(input);
         lmflow_poller_free(poller);
-        lmflow_graph_free(graph);
-    }
-}
-
-#[test]
-fn input_watermark_stats_are_available_through_c_abi() {
-    lmflow::register_builtin_kernels();
-    unsafe {
-        let graph = lmflow_graph_new();
-        let yaml = cs(r#"
-nodes:
-  - { name: pass, kernel: PassThroughKernel, input_ports: [in], output_ports: [out] }
-input_ports: [in]
-output_ports: [out]
-max_queued_packets: 4
-"#);
-        assert_eq!(lmflow_graph_init_from_yaml(graph, yaml.as_ptr()), 0);
-        let input_name = cs("in");
-        let input = lmflow_graph_input(graph, input_name.as_ptr());
-        assert!(!input.is_null());
-
-        let mut stats = LMFlowWatermarkBackpressureStats {
-            struct_size: std::mem::size_of::<LMFlowWatermarkBackpressureStats>() as u32,
-            reserved0: 0,
-            port_name: std::ptr::null(),
-            packet_limit: 0,
-            total_queued_packets: 0,
-            blocked: false,
-            reserved1: [0; 7],
-            active_waiters: 0,
-            blocked_for_us: 0,
-            block_events: 0,
-            total_blocked_us: 0,
-        };
-        assert!(lmflow_input_backpressure_stats(input, &mut stats));
-        assert_eq!(CStr::from_ptr(stats.port_name).to_str().unwrap(), "in");
-        assert_eq!(stats.packet_limit, 4);
-        assert_eq!(stats.total_queued_packets, 0);
-        assert!(!stats.blocked);
-
-        lmflow_input_free(input);
         lmflow_graph_free(graph);
     }
 }

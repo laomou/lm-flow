@@ -750,9 +750,16 @@ emit 的批量若自身大于有效包数容量会明确报错,避免永远无�
 `Poller::backpressure_stats()` 同时提供策略、容量、积压、丢包与 Block 等待统计。
 `graph.dump()` 会输出 `watermark` 与 `poller` 行。Poller 有损策略的 WARN 统一包含输出口、
 策略、容量、当前积压和累计丢包数。reset 会把这些运行期统计全部清零。
-C ABI 对应 `lmflow_input_backpressure_stats` / `lmflow_poller_backpressure_stats`,两者都用
-`struct_size` 防止版本不一致时越界写;Python 的 Input / Poller 句柄提供同名
-`backpressure_stats()` 字典接口。
+`graph.to_dot_with_stats()` / `lmflow_graph_to_dot(g, true)` 会把相同信息直接画进拓扑:
+图标题显示唯一的全局 queued/limit;图输入口只显示该句柄的等待次数/时长,避免把全局
+水位误读成每端口容量。消费者输入边显示 queue/capacity/reservation,输出端用
+Poller 虚拟节点显示策略、容量、积压与丢包。当前阻塞用红色粗线,历史阻塞或丢包用橙色。
+多输入节点在节点框内列紧凑端口表(`queued/capacity`,reservation,state);同步/批处理
+策略中,若一个口正在背压而同组另一个口为空且仍开放,后者以黄色 `WAITING` 标成疑似根因。
+`immediate` 不做这种推断。正常边只保留端口名,避免大图被零值统计淹没。持续时间按
+`µs` / `ms` / `s` 自动换算;标题同时显示本轮 `start` 后的快照时长。图内诊断图例解释
+红/黄/橙和 Poller 虚线,SVG 的 `tooltip` 保留节点、输入边和 Poller 的完整快照,使默认
+标签保持紧凑而悬停仍能查看详细数据。
 
 线程池任务的全局在飞计数必须在**认领仍持节点调度锁时**递增,不能等到提交执行器时才加。
 否则两步之间存在「节点已有 ready 调用、全局计数仍为 0」的假空闲窗口,并发关流时

@@ -575,21 +575,6 @@ LMFlowInput* lmflow_graph_input(LMFlowGraph*, const char* port);
 LMFlowStatus lmflow_input_send(LMFlowInput*, LMFlowPacket pkt);
 LMFlowStatus lmflow_input_try_send(LMFlowInput*, LMFlowPacket pkt);
 void lmflow_input_close(LMFlowInput*);
-typedef struct {
-  uint32_t struct_size;
-  uint32_t reserved0;
-  const char* port_name;
-  size_t packet_limit;          /* 0 = 不限 */
-  size_t total_queued_packets;  /* 整图当前在途包数 */
-  bool blocked;
-  uint8_t reserved1[7];
-  size_t active_waiters;
-  uint64_t blocked_for_us;
-  uint64_t block_events;
-  uint64_t total_blocked_us;
-} LMFlowWatermarkBackpressureStats;
-bool lmflow_input_backpressure_stats(
-    LMFlowInput*, LMFlowWatermarkBackpressureStats* out);
 /* 归还输入句柄。句柄由调用方拥有,持有一份对引擎的引用 —— 即使先 lmflow_graph_free
  * 了图,句柄仍安全(之后再用只会返回「图已结束」错误,不会 use-after-free)。
  * 不释放会泄漏引擎(句柄的引用一直撑着)。可传 NULL。 */
@@ -625,24 +610,6 @@ bool lmflow_poller_try_next(LMFlowPoller*, LMFlowPacket* out);
 /* 带超时:LMFLOW_OK / LMFLOW_ERR_TIMEOUT / LMFLOW_ERR_CLOSED */
 LMFlowStatus lmflow_poller_next_timeout(LMFlowPoller*, LMFlowPacket* out, int64_t timeout_ms);
 uint64_t lmflow_poller_dropped_count(LMFlowPoller*);
-typedef struct {
-  uint32_t struct_size;
-  uint32_t reserved0;
-  const char* port_name;
-  size_t capacity;       /* 0 = 无界 */
-  int32_t overflow_policy;
-  uint32_t reserved1;
-  size_t queued_packets;
-  uint64_t dropped_packets;
-  bool blocked;
-  uint8_t reserved2[7];
-  size_t active_waiters;
-  uint64_t blocked_for_us;
-  uint64_t block_events;
-  uint64_t total_blocked_us;
-} LMFlowPollerBackpressureStats;
-bool lmflow_poller_backpressure_stats(
-    LMFlowPoller*, LMFlowPollerBackpressureStats* out);
 /* 归还 poller 句柄。与 lmflow_input_free 同理:调用方拥有,持一份对引擎的引用,
  * 图 free 后仍安全。释放会注销该订阅、丢弃并扣减其剩余队列,并唤醒可能阻塞在
  * bounded BLOCK poller 上的生产者。不释放会泄漏引擎。可传 NULL。 */

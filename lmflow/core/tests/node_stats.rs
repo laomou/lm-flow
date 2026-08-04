@@ -96,6 +96,25 @@ fn dot_with_stats_annotates_and_keeps_structure() {
     assert!(stats.contains("peakQ"), "应标出队列峰值");
     assert!(stats.contains("peakQ 1 / 8B"), "应标出队列字节峰值");
     assert!(stats.contains("in 3 / out 3"), "应标出收发包数");
+    assert!(stats.contains("ports:"), "节点内应包含端口摘要");
+    assert!(stats.contains("snapshot +"), "标题应标出本轮快照时长");
+    assert!(
+        stats.contains("cluster_diagnostics_legend"),
+        "统计图应包含诊断图例"
+    );
+    assert!(
+        stats.contains("producer currently stalled"),
+        "图例应解释 BLOCKED"
+    );
+    assert!(
+        stats.contains("likely missing aligned input"),
+        "图例应解释 WAITING"
+    );
+    assert!(stats.contains("tooltip="), "SVG 应包含悬停详情");
+    assert!(
+        !stats.contains("queue 0/unbounded · reserved 0"),
+        "正常边应折叠详细统计"
+    );
 
     // 结构不被破坏:两版节点数、边数一致,且都是合法 digraph
     assert!(stats.starts_with("digraph"));

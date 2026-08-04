@@ -813,23 +813,18 @@ waiters, block events, current/cumulative blocked time, and the relevant capacit
 `graph.dump()` includes matching `watermark` and `poller` diagnostic lines. The same information is
 reported through exponentially rate-limited WARN messages and matching recovery INFO messages.
 
-C and C++ hosts can query the same handle-local snapshots:
-
-```c
-LMFlowWatermarkBackpressureStats input_stats = {
-    .struct_size = sizeof(input_stats),
-};
-lmflow_input_backpressure_stats(input, &input_stats);
-
-LMFlowPollerBackpressureStats poller_stats = {
-    .struct_size = sizeof(poller_stats),
-};
-lmflow_poller_backpressure_stats(poller, &poller_stats);
-```
-
-The C++ header also provides overloaded `lmflow::GetBackpressureStats(handle, &stats)` helpers that
-initialize `struct_size`. Python exposes `input.backpressure_stats()` and
-`poller.backpressure_stats()`, returning dictionaries with the corresponding fields.
+No additional host-side query API is required for visualization:
+`lmflow_graph_to_dot(g, true)` includes the global watermark once in the graph title. Graph input
+ports show only their own wait count/duration, avoiding the impression that the graph-wide limit is
+per-port. Consumer edges show queue capacity/occupancy/reservations and block history; each Poller
+is a cylinder with its policy, capacity, occupancy, drops, and block history. Active stalls are red
+and thick; recovered stalls or drops remain amber so transient incidents stay visible. Multi-input
+nodes contain a compact port summary. For sync-style policies, an empty open port that is preventing
+an already-full sibling from draining is highlighted yellow as `WAITING`; immediate-policy inputs
+are not inferred this way. Healthy edges retain only their port name. Durations automatically use
+microseconds, milliseconds, or seconds; the title shows elapsed time since the current `start`.
+A diagnostics legend explains red/yellow/amber states and dashed Poller subscriptions. SVG output
+also carries hover tooltips with the full node, input-edge, and Poller snapshot.
 
 ```c
 int64_t      lmflow_graph_counter_value(LMFlowGraph*, const char* name);

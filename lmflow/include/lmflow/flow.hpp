@@ -22,22 +22,6 @@
 
 namespace lmflow {
 
-inline bool GetBackpressureStats(LMFlowInput* input,
-                                 LMFlowWatermarkBackpressureStats* out) {
-  if (out == nullptr) return false;
-  *out = {};
-  out->struct_size = sizeof(*out);
-  return lmflow_input_backpressure_stats(input, out);
-}
-
-inline bool GetBackpressureStats(LMFlowPoller* poller,
-                                 LMFlowPollerBackpressureStats* out) {
-  if (out == nullptr) return false;
-  *out = {};
-  out->struct_size = sizeof(*out);
-  return lmflow_poller_backpressure_stats(poller, out);
-}
-
 /* ---------- 类型标识 ----------
  * 用 FNV-1a 哈希 typeid(T).name()(修饰名),**而不是** typeid(T).hash_code()。
  * 原因:hash_code 是实现定义的,不保证跨动态库/跨编译单元一致;而修饰名在同一
