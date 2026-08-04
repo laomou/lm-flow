@@ -780,6 +780,13 @@ nodesep/ranksep;不启用 `concentrate`,避免 Graphviz 把语义不同的多端
 对齐输入缺失、下游排水慢、全局 packet 水位或 Poller 消费慢/丢包。该基线只服务 DOT,
 不新增宿主查询 API。
 
+`Diagnostics` 在同一快照上再做 Top 5 综合排序:节点按错误、当前背压/等待、区间丢包、
+区间平均耗时与积压排序;输入口按当前阻塞、对齐等待、区间丢包、区间背压和积压排序。
+当前 queue-full / aligned-input 根因会触发一次只读反向遍历,把其生产者以及所有上游输入边
+标成紫色 `PRESSURE PATH`;直接根因仍保留红/黄,避免传播链盖掉原因。该遍历只读既有拓扑,
+不进入调度路径。`examples/python/live_diagnostics` 展示宿主每 100ms 导出 DOT、可选调用
+Graphviz 生成 SVG 的完整循环。
+
 线程池任务的全局在飞计数必须在**认领仍持节点调度锁时**递增,不能等到提交执行器时才加。
 否则两步之间存在「节点已有 ready 调用、全局计数仍为 0」的假空闲窗口,并发关流时
 `wait_done` 可能误报 nodes not closed。回归测试

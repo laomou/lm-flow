@@ -849,6 +849,14 @@ Port annotations name the likely bottleneck directly: a full consumer queue, a m
 input, a slowly draining downstream consumer, the global packet limit, or a slow/dropping Poller.
 Compact and diagnostics views keep independent baselines, and `reset` clears both.
 
+Diagnostics also ranks the five most actionable nodes and input ports as `HOT #1` through
+`HOT #5`. Active queue-full or aligned-input stalls seed an upstream traversal: the affected
+producer chain is drawn in purple as `PRESSURE PATH`, while the direct cause keeps its stronger
+red or yellow styling. This separates the place where pressure is observed from the upstream
+operators whose output is currently unable to advance. See
+`lmflow/examples/python/live_diagnostics/` for a host loop that writes periodic DOT snapshots and
+renders SVG files when Graphviz is available.
+
 ```c
 int64_t      lmflow_graph_counter_value(LMFlowGraph*, const char* name);
 size_t       lmflow_graph_counter_count(LMFlowGraph*);

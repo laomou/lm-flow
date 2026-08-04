@@ -29,6 +29,10 @@ to each GitHub Release.
   red, likely missing aligned inputs are yellow, and historical stalls or drops are amber. Healthy
   edges stay compact. Durations use adaptive units, a diagnostics legend explains the styling,
   SVG tooltips retain detailed snapshots, and the title includes the current run's elapsed time.
+- **Ranked hotspot and pressure-path visualization.** Diagnostics ranks the five most actionable
+  nodes and input ports, then traces active queue/alignment stalls backward through their producer
+  chain. Direct causes retain red/yellow styling while upstream propagation is purple. A new Python
+  example periodically exports DOT and optionally renders live SVG snapshots with Graphviz.
 - **Global-watermark and Poller backpressure diagnostics.** Rust input and Poller handles expose
   active waiters, event counts, and blocked durations. Exponentially rate-limited WARN/INFO logs
   and graph dumps include port, policy, capacity, occupancy, timeout, and drop context; reset clears
