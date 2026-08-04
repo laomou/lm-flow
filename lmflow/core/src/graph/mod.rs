@@ -1973,6 +1973,20 @@ impl GraphInner {
                 .is_empty()
     }
 
+    /// `workers_idle + blocked staging` 只是一个瞬时快照,不能直接等同于死锁:
+    /// 下游队列里可能已有可消费数据,但对应节点的调度通知恰好与上游进入 blocked
+    /// staging 交错,此刻任务队列暂时为空。先全图重扫就绪性并重试刷新;若活动代数
+    /// 仍不变且 worker 仍空闲,才算稳定地没有进展。
+    fn retry_backpressure_progress(&self) -> bool {
+        let before = self.activity_gen();
+        for node in 0..self.nodes.len() {
+            self.schedule_node(node);
+        }
+        self.resume_blocked_flushes();
+        while self.pump_step() {}
+        !self.workers_idle() || self.activity_gen() != before
+    }
+
     /// 任何进展都要通知:取到输出、节点关闭、出错、任务入队/完成。
     /// 否则阻塞中的宿主线程会白等到超时。
     fn notify_activity(&self) {
@@ -3083,6 +3097,9 @@ impl GraphInner {
                     .copied()
                     .collect();
                 if !blocked.is_empty() {
+                    if self.retry_backpressure_progress() {
+                        continue;
+                    }
                     let details = self.backpressure_stall_details(&blocked);
                     return Err(Error::Kernel(format!(
                         "wait_done: internal backpressure cannot make progress; blocked queues: [{}]. \
@@ -3170,6 +3187,9 @@ impl GraphInner {
                     .iter()
                     .copied()
                     .collect();
+                if !blocked.is_empty() && self.retry_backpressure_progress() {
+                    continue;
+                }
                 let details = self.backpressure_stall_details(&blocked);
                 return Err(Error::Kernel(format!(
                     "wait_until_idle: internal backpressure cannot make progress; blocked queues: [{}]",
