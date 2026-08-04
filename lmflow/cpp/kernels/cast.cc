@@ -15,7 +15,7 @@ class CastKernel : public lmflow::Kernel {
   lmflow::Status Open(lmflow::Context& cc) override {
     out_dt_ = lmflow_bufutil::dtype_from_name(cc.OptionStr("dtype", "f32"));
     LMFLOW_RET_CHECK_MSG(cc, out_dt_ >= 0,
-                         "options.dtype unknown/unsupported (u8/i8/u16/i16/i32/i64/f32/f64)");
+                         "options.dtype unknown/unsupported (u8/i8/u16/i16/i32/i64/f16/f32/f64)");
     return lmflow::Status::Ok();
   }
   lmflow::Status Process(lmflow::Context& cc) override {
@@ -23,7 +23,7 @@ class CastKernel : public lmflow::Kernel {
     // 用 LMFLOW_RET_CHECK_MSG:失败时自动带上表达式与 file:line,定位不靠猜。
     LMFLOW_RET_CHECK_MSG(cc, cc.Input(0).AsBuffer(&in), "input is not a buffer");
     LMFLOW_RET_CHECK_MSG(cc, lmflow_bufutil::is_math_dtype(in.dtype),
-                         "input dtype unsupported (F16 needs half conversion)");
+                         "input dtype is not a supported numeric dtype");
     LMFLOW_RET_CHECK_MSG(cc, lmflow_bufutil::is_contiguous(in), "input buffer must be contiguous");
 
     LMFlowBuffer out{};

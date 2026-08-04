@@ -2,7 +2,7 @@
 
 > 状态:**成品**。Rust 引擎、C ABI、C++ 糖层(含 OpenCV 互转)、18 个内置算子、
 > Python 绑定(pybind11)、原生 SDK 发布(各平台头文件+库)、三端文档站全部就位;
-> **277 个测试**(Rust 236 + doctest 3 + Python 38)全绿,TSan 硬门禁 0 竞态。Rust / C++ / Python 三种宿主的
+> **281 个测试**(Rust 240 + doctest 3 + Python 38)全绿,TSan 硬门禁 0 竞态。Rust / C++ / Python 三种宿主的
 > hello_world 都输出正确;支持线程池绑核 + 实时优先级(Linux/Android),可交叉编到
 > Android / iOS / 鸿蒙。
 > 定位:一个数据流图计算框架 —— 把计算描述成**有向图**,节点是**算子(Kernel)**,
@@ -81,6 +81,7 @@
 | 37 | **节点级 `on_error: abort\|skip`**,默认 `abort` | 长跑实时管线里一帧坏数据不该杀掉整条流水线,而原先任何一次算子失败都终止全图。`skip` 只丢那一个包并**推进下游边界**(不推进就把一帧错误升级成整图卡死);复用「无产出也要推进边界」那条既有路径,不新写机制。有损行为绝不静默:计入 `errors` + WARN(指数退避)。**只有两个值**——不设单独的 `log`,因为 `skip` 本身一定计数并打日志。定位:能在算子内处理的就在算子内处理(返回成功不产出),`skip` 专治**管不到**的失败(契约校验、panic / C++ 异常、第三方算子)。**只管逐包失败**:`Open` / `Close` 的一次性生命周期失败不受此策略影响(打不开就该让 `start()` 失败,而非空转着每帧报错) |
 | 38 | **声明式源定速 `rate: N`(Hz)** | 源本要么内核自己写 sleep、要么灌爆下游。`rate` 让定速变成一行 YAML。实现走**路 A**(源的池线程里 sleep 到点)而非路 B(不占线程的定时唤醒):source 本就必须挂线程池、有专属线程,路 B「不占线程」的收益对它有限,却要新造一整套延迟调度设施并碰调度核心。节流在 `call_kernel` 调算子前、**不持任何引擎锁**(R1 未破),按实际放行时刻记基准防漂移 |
 | 39 | **`reset` 保留算子实例的复位重跑** | 每会话重建图 + 重跑 `open`(重载模型)是实打实的开销。reset 复用已 open 的算子跑下一轮。安全靠「静止相」:要求 `Terminated + is_idle`(与 Drop/start 同依据),故 `&self` + 内部可变即可无并发复位 —— **不用 `Arc::get_mut`**(Poller 也持 `Arc<GraphInner>`,宿主留着 poller 时拿不到独占)。不碰线程池(worker 随图存活、park 着复用)。`epoch` 不 reset(只是诊断基准)。最易漏:`Edge::last_sent`(单调性)、`GraphShared` 的 error(无现成清除路径)、`input_bounds` 回 `pre_stream` 而非 `done` |
+| 40 | **F16 用自写的软件转换**,不用 `_Float16`、不用 F16C / NEON 内建 | F16 是移动端推理的标准张量 dtype,而张量前处理组此前遇 F16 直接报错 —— 在最相关的场景里用不了。选软件转换的理由:`_Float16` 不是所有目标编译器都有(**MSVC 没有可移植的 half 类型**,而 Windows 是待补平台),内建指令要按架构分派 + 运行期探测;而前处理不在最内层推理热路径上,这点成本换来「任意编译器 / 架构上逐位一致」是值得的 —— 且正因不依赖编译器,舍入行为才**能被测试钉死**。舍入取 IEEE 默认(就近、平局取偶);`double → half` **直接从 double 位模式做、不经 float 中转**,否则会双重舍入(极少数入参偏 1 ulp)。见 §5.3 |
 | 22 | **`type_id` = FNV-1a(修饰名)**,而非 `typeid().hash_code()` | 后者实现定义、不保证跨动态库一致;而本项目 C++ 算子在 core、Python 绑定在另一 `.so`,天然跨产物。事后再改需全量重编,故一开始就用稳定方案 + `LMFLOW_DECLARE_TYPE_NAME` 逃生口 |
 | 23 | **时间戳单调性:图输入口强制校验,内部边仅 debug 构建校验** | 外部数据进入的唯一门校验一次即可挡住绝大多数乱序;内部边逐包校验是热路径开销,且算子产出乱序属算子 bug,用 `debug_assertions` 捕获即可 |
 | 24 | **不做 stream header**,用 side packet 覆盖 | header 会引入「流上的第二种数据」及其生命周期问题;side packet 已能表达「整条流不变的属性」。少一个概念优于多一个 |
@@ -356,8 +357,30 @@ LMFLOW_REGISTER_KERNEL(PassThroughKernel)    // 或 LMFLOW_REGISTER_KERNEL_AS(T,
   扇出也不需要算子 —— **一条边可直接挂多个消费者**是原生能力(见 §7.5),故不放 `Split`。
 - 内置算子清单见 `cpp/kernels/register.cc` 表头。其中**张量前处理组**(纯数值 BUFFER):
   `Cast`(dtype 转换)、`Affine`(`x*scale+shift`)、`Clamp`、`Reduce`(→F64 标量)——
-  统一走 double 做 dtype 分派,连续缓冲、暂不支持 F16。示例见
+  统一走 double 做 dtype 分派,要求连续缓冲。**含 F16**:`buffer_util.hpp` 自带
+  binary16 ↔ double 的软件转换(见 §5.3),故 `dtype: f16` 可直接作输入或输出。示例见
   `examples/python/preprocess/preprocess.py`(u8 图 → f32 → 归一化 → clamp)。
+
+### 5.3 F16(binary16)转换
+
+张量前处理组支持 `LMFLOW_DTYPE_F16`,转换由 `cpp/kernels/buffer_util.hpp` 里**自己实现的**
+`half_to_float` / `f64_to_half` 承担。**刻意不用 `_Float16`,也不用 F16C / NEON 内建**:
+
+- `_Float16` 不是所有目标编译器都有(MSVC 就没有可移植的 half 类型,而 Windows 是待补平台);
+- 内建指令要按架构分派 + 运行期探测;
+- 张量前处理不在最内层推理热路径上,这点转换成本换来「任意编译器 / 架构上行为**逐位一致**」
+  是值得的 —— 而且正因为不依赖编译器,舍入行为才能被测试钉死。
+
+舍入是**就近取整、平局取偶**(IEEE 默认),`double → half` 直接从 double 位模式做而
+**不经 float 中转** —— 否则会双重舍入(两次各取整一次,极少数入参偏一个 ulp)。
+上溢到 ±inf、下溢到非规格数 / ±0(保号)、inf/NaN 均按 IEEE 处理。
+
+验证:`cpp/tests/buffer_util_test.cc` —— 期望值全是**硬编码的 IEEE 位模式**(不与任何编译器
+内建类型对照,故在 MSVC / arm64 上同样有效),含全部 65536 个位模式的 `half → double → half`
+往返、上溢/下溢临界点(65519 → 最大有限值 vs 65520 → inf)、以及相邻 half 的**精确中点**
+(平局取偶最容易写错的地方)。CI 在 `-O0` 与 `-O2` 两档都跑(浮点位操作对优化敏感)。
+开发时另用 GCC 的 `_Float16` 作 oracle 穷举对照过一次(65536 个 half→float + 46 万个
+double→half,含全部相邻 half 中点),逐位一致 —— 但**该对照不进仓库**,因为它不可移植。
 
 ### 5.2 Python 算子(pybind11,已实现)
 
@@ -1179,7 +1202,7 @@ lm-flow/                          仓库根
 
 ---
 
-## 13. 测试策略(已落地 277 个:Rust 236 + doctest 3 + Python 38)
+## 13. 测试策略(已落地 281 个:Rust 240 + doctest 3 + Python 38;另有 3 个独立 C++ 测试)
 
 | 测试文件 | 数量 | 覆盖 |
 |---|---|---|
@@ -1188,6 +1211,8 @@ lm-flow/                          仓库根
 | `tests/c_abi.rs` | 12 | **完全以 C 调用方的方式**驱动引擎:全流程、内建类型往返、缓冲分配与 CoW、空指针不崩、错误可读、observer、日志回调 |
 | `tests/e2e.rs` | 28 | 真实建图 + 真实调 C++ 算子:直通/扇出/多 poller、7 项图校验、状态机、时间戳单调性、跨语言按类型传值、兜底关流、side packet |
 | `tests/memory.rs` | 7 | 所有权守恒记账(正常/积压/失败/取消路径)、**CoW 零拷贝不变量**(三级管线)、扇出复制不污染兄弟分支 |
+| `tests/buffer_ops.rs` | 11 | 张量前处理组端到端:Cast / Affine / Clamp / Reduce、真实前处理链、**F16 输入与输出**(含 u8→f32→归一化→f16 的移动端链路)、非连续缓冲与未知 dtype 被拒 |
+| `cpp/tests/` (C++) | 3 | `flow_hpp_test`(异常不穿越 FFI + 构造失败安全)· `buffer_util_test`(**F16 软件转换**:65536 个位模式往返 + 平局取偶 + 上下溢临界,`-O0`/`-O2` 双档)· `flow_cv_test`(装了 OpenCV 才编) |
 
 ### 13.1 原始策略与补充
 
@@ -1287,12 +1312,10 @@ lm-flow/                          仓库根
 **引擎语义上的边界**
 
 - **`batch` 输入策略 v1 仅单输入口**:多口批对齐留后续(§7.10)。
-- **无引擎级 timer / 限速**:source 由**内核自定速**(`process` 里自行阻塞),故源节点必须挂
-  线程池执行器(config 强制校验)。非自定速的源会灌爆下游 —— 内部边不背压(§7.5)。
+- **无通用引擎级 timer**:源的**定速**已有声明式支持(`rate: N` Hz,ADR #38 / §7.4),
+  但没有更一般的定时设施(如「每 N 毫秒给某个非源节点发一次 tick」)。源仍必须挂线程池
+  执行器(config 强制校验);**未**设 `rate` 且自身不阻塞的源会灌爆下游 —— 内部边不背压(§7.5)。
 - **`LMFLOW_TYPE_HOST_OBJECT` 未启用**(ADR #26):跨语言算子只收发内建类型。
-- **张量前处理组不支持 F16**:`dtype::F16` 常量与 `dtype_size` 存在(跨界描述符能表达它),
-  但 `Cast`/`Affine`/`Clamp`/`Reduce` 统一走 double 分派,遇 F16 **明确报错而非静默**
-  (`is_math_dtype` 拦下)。需要 half 转换才能支持。
 - `Packet::new`(Rust 原生值)的 `type_id` 是 `NONE`,**不参与跨语言类型校验**;
   要让 C++/Python 算子按类型读取,须用 `Packet::new_interop` + `fnv1a_type_id`,或内建类型。
 

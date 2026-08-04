@@ -33,7 +33,7 @@ class ReduceKernel : public lmflow::Kernel {
     LMFlowBuffer in{};
     LMFLOW_RET_CHECK_MSG(cc, cc.Input(0).AsBuffer(&in), "input is not a buffer");
     LMFLOW_RET_CHECK_MSG(cc, lmflow_bufutil::is_math_dtype(in.dtype),
-                         "input dtype unsupported (F16 needs half conversion)");
+                         "input dtype is not a supported numeric dtype");
     LMFLOW_RET_CHECK_MSG(cc, lmflow_bufutil::is_contiguous(in), "input buffer must be contiguous");
 
     const int64_t n = lmflow_bufutil::elem_count(in);
