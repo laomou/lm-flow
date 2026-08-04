@@ -269,3 +269,90 @@ fn dropping_poller_releases_accounting_and_unblocks_producer() {
     assert_eq!(graph.shared_for_inspection().total_queued(), 0);
     finish(&graph);
 }
+
+/// **回归:顺序式宿主写法不得永久挂死。**
+///
+/// 仓库里其它测试与示例用的都是这种写法:先把包送完、`close_all_inputs()`、`wait_done()`,
+/// **最后**才排 poller。而 `Block` 是在 `dispatch` 内部原地等宿主腾位的 —— 主线程执行器下
+/// 派发就跑在宿主自己的线程上,于是宿主既是生产者又是唯一消费者:它卡在 `push` 里,
+/// 永远走不到 `poller.next()`,`wait_done()` 也就永不返回。
+///
+/// 修复前实测:capacity=2、送 5 个包 → `wait_done()` **永久挂死**(6s 看门狗超时)。
+/// 现在应当在 `block_timeout` 到点后记录图错误并让 `wait_done()` 返回 Err,
+/// 且报错要说清前置条件与替代方案。
+#[test]
+fn block_does_not_hang_a_sequential_host() {
+    let graph = graph();
+    let poller = graph
+        .add_poller_with_options(
+            "out",
+            PollerOptions::new(2, PollerOverflow::Block)
+                .with_block_timeout(Some(std::time::Duration::from_millis(300))),
+        )
+        .unwrap();
+    graph.start().unwrap();
+
+    // 容量 2,却要送 5 个 —— 必然撞满,而宿主此刻不可能排水。
+    for value in 0..5i64 {
+        let _ = graph
+            .input("in")
+            .unwrap()
+            .send(Packet::from_i64(value).at(Timestamp(value)));
+    }
+    graph.close_all_inputs();
+
+    // 关键:必须**返回**(不论 Ok/Err),不能挂住。给足余量,真挂死会在这里超时。
+    let done = graph.wait_done_timeout(std::time::Duration::from_secs(20));
+    let err = done.expect_err("Block 撞上顺序式宿主应报错,而不是静默成功");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("Block") && msg.contains("concurrently"),
+        "报错必须点明 Block 需要并发排水的宿主: {msg}"
+    );
+    assert!(
+        msg.contains("Latest") || msg.contains("DropOldest"),
+        "报错必须给出替代方案: {msg}"
+    );
+    // 已入队的那些仍可取走 —— 失败的是「等不到位」,不是把队列弄坏了。
+    assert!(poller.try_next().is_some(), "已入队的包应仍可取出");
+}
+
+/// 无上界(`with_block_timeout(None)`)保留原语义:确有并发排水者时一直等。
+/// 这条与 `block_waits_until_the_host_drains_a_slot` 配对,证明上界是**可选**的,
+/// 不是把 Block 改成了有损策略。
+#[test]
+fn block_without_timeout_still_waits_for_a_concurrent_drainer() {
+    let graph = graph();
+    let poller = graph
+        .add_poller_with_options(
+            "out",
+            PollerOptions::new(1, PollerOverflow::Block).with_block_timeout(None),
+        )
+        .unwrap();
+    graph.start().unwrap();
+    send(&graph, 0);
+
+    std::thread::scope(|scope| {
+        let worker = scope.spawn(|| {
+            graph
+                .input("in")
+                .unwrap()
+                .send(Packet::from_i64(1).at(Timestamp(1)))
+                .unwrap();
+            graph.wait_until_idle().unwrap();
+        });
+        // 比任何默认上界都久 —— 若上界仍在生效,这里就会失败。
+        std::thread::sleep(std::time::Duration::from_millis(600));
+        assert_eq!(
+            poller.try_next().and_then(|packet| packet.as_i64()),
+            Some(0)
+        );
+        worker.join().unwrap();
+    });
+
+    assert_eq!(
+        poller.try_next().and_then(|packet| packet.as_i64()),
+        Some(1)
+    );
+    finish(&graph);
+}

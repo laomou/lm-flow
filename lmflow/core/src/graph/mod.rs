@@ -209,12 +209,16 @@ pub struct PollerInner {
     closed: AtomicBool,
     capacity: Option<usize>,
     overflow: PollerOverflow,
+    /// `Block` 等宿主腾位的上界;`None` = 无上界(见 `PollerOptions::block_timeout`)。
+    block_timeout: Option<std::time::Duration>,
     dropped: AtomicU64,
     active: AtomicBool,
 }
 
 impl PollerInner {
     fn push(&self, graph: &GraphInner, p: Packet) -> bool {
+        // 仅 `Block` 用:首次撞满时才起算,故「排水正常但偶尔撞满」不会累积成超时。
+        let mut deadline: Option<std::time::Instant> = None;
         loop {
             if !self.active.load(Ordering::SeqCst) {
                 return false;
@@ -240,6 +244,38 @@ impl PollerInner {
                         || graph.shared.has_error()
                     {
                         return false;
+                    }
+                    // 有上界的等待:`Block` 是在 dispatch 内部原地等的,而 dispatch 可能
+                    // 就跑在宿主线程上(主线程执行器 / `send` 直接派发)。那时宿主既是
+                    // 生产者又是唯一消费者 —— 卡在这里就永远走不到 `poller.next()`,
+                    // `wait_done()` 随之永不返回。故必须有上界:宁可响亮失败,不可静默挂死。
+                    //
+                    // 不在这里做死锁推断:多线程宿主下「是否还有人能排水」不可判定
+                    // (可能另有线程正要排水),任何「宿主正阻塞即判死」的判据都会误杀
+                    // 合法的并发排水写法。
+                    if let Some(limit) = self.block_timeout {
+                        if deadline.is_none() {
+                            deadline = Some(std::time::Instant::now() + limit);
+                        }
+                        if let Some(at) = deadline {
+                            if std::time::Instant::now() >= at {
+                                graph.shared.record_error(Error::Kernel(format!(
+                                    "poller on output port `{}`: blocked for {:?} waiting for the \
+                                     host to free a slot (capacity {}). `PollerOverflow::Block` \
+                                     requires a host that drains the poller *concurrently*; a host \
+                                     that sends/waits first and drains afterwards will deadlock, \
+                                     because the producer parks inside dispatch and never reaches \
+                                     `poller.next()`. Use `Latest`/`DropOldest`/`DropNewest`, raise \
+                                     the capacity, drain from another thread, or set \
+                                     `PollerOptions::with_block_timeout(None)` if you are certain a \
+                                     concurrent drainer exists.",
+                                    self.edge_name,
+                                    limit,
+                                    self.capacity.unwrap_or(0),
+                                )));
+                                return false;
+                            }
+                        }
                     }
                     graph.wait_activity_since(before, std::time::Duration::from_millis(100));
                 }
@@ -321,11 +357,36 @@ pub enum PollerOverflow {
 pub struct PollerOptions {
     pub capacity: usize,
     pub overflow: PollerOverflow,
+    /// `Block` 溢出策略下,等宿主腾出一个槽位的**上界**。到点仍无进展 → 记录图错误
+    /// 并放弃该包(而不是永久阻塞)。`None` = 无上界(**只有确定宿主会并发排水时才可用**)。
+    ///
+    /// 为什么必须有这个上界:`Block` 是在 `dispatch` 内部原地等的,而 `dispatch` 可能
+    /// 跑在宿主自己的线程上(主线程执行器,或 `send` 直接派发)。这时宿主既是生产者
+    /// 又是唯一的消费者 —— 它卡在 `push` 里,永远走不到 `poller.next()`,于是
+    /// `wait_done()` 也永不返回。**这不是假想**:capacity=2、送 5 个包、然后
+    /// `close_all_inputs(); wait_done()` 的顺序式写法(仓库里其它测试与示例的通用写法)
+    /// 实测会永久挂死。
+    ///
+    /// 而「宿主还能不能排水」在多线程宿主下是**不可判定**的(可能另有一个线程正要排水),
+    /// 所以这里不做死锁推断,只给一个可配置的上界 + 明确的报错。
+    pub block_timeout: Option<std::time::Duration>,
 }
 
 impl PollerOptions {
+    /// `Block` 默认带 5 秒上界;有损策略下该字段无意义。
     pub fn new(capacity: usize, overflow: PollerOverflow) -> Self {
-        Self { capacity, overflow }
+        Self {
+            capacity,
+            overflow,
+            block_timeout: Some(std::time::Duration::from_secs(5)),
+        }
+    }
+
+    /// 覆盖 `Block` 的等待上界。`None` = 无上界 —— 仅当宿主**确定**会在另一个线程里
+    /// 持续排水时才这么用,否则顺序式写法会永久挂死。
+    pub fn with_block_timeout(mut self, timeout: Option<std::time::Duration>) -> Self {
+        self.block_timeout = timeout;
+        self
     }
 }
 
@@ -978,6 +1039,7 @@ impl Graph {
             closed: AtomicBool::new(false),
             capacity: options.map(|options| options.capacity),
             overflow: options.map_or(PollerOverflow::Block, |options| options.overflow),
+            block_timeout: options.and_then(|options| options.block_timeout),
             dropped: AtomicU64::new(0),
             active: AtomicBool::new(true),
         });
