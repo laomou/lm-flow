@@ -71,7 +71,8 @@ pub struct NodeConfig {
     pub output_ports: Vec<String>,
     #[serde(default)]
     pub executor: String,
-    /// 本版本仅支持 0/1;>1 会在校验阶段报 UNSUPPORTED。
+    /// 该节点允许的并发 `process` 数。`0`/`1` = 串行(默认);`>1` 需同时配 `executor`
+    /// (默认执行器是宿主主线程,单线程下并行度恒为 1,故校验阶段会报错)。
     #[serde(default)]
     pub max_in_flight: usize,
     #[serde(default)]

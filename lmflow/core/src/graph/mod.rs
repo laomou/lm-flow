@@ -1,10 +1,12 @@
-//! 图:拓扑、校验、执行、关流。
+//! The graph: topology, validation, execution and stream shutdown.
 //!
-//! 结构上用**索引 arena**:实体存在 `Vec` 里,互相引用用 `usize` id
-//! (docs/design.md §6.1),避免自引用指针图。
+//! Structurally this is an **index arena**: entities live in `Vec`s and refer to each other by
+//! `usize` id (see `docs/design.md` §6.1), which avoids a graph of self-referential pointers.
 //!
-//! 队列**属于消费者的输入口**而不是边:一条边可以有多个消费者,各自必须收到每个包,
-//! 共用一个队列会互相抢包。因此边只保存拓扑与关闭状态,包按消费者数分发(仅克隆引用)。
+//! Queues belong to a **consumer's input port**, not to an edge: one edge may feed several
+//! consumers and each of them must receive every packet, so a shared queue would make them steal
+//! packets from one another. An edge therefore only carries topology and closed-state, and packets
+//! are dispatched per consumer — cloning a reference, never the payload.
 
 use std::cell::UnsafeCell;
 use std::collections::{BTreeMap, VecDeque};
@@ -618,7 +620,18 @@ pub struct GraphInner {
     timing: bool,
 }
 
-/// 图句柄。
+/// A handle to a computation graph.
+///
+/// Build one with [`from_yaml`](Graph::from_yaml), attach output sinks with
+/// [`add_poller`](Graph::add_poller) (pull) or [`observe`](Graph::observe) (push), then
+/// [`start`](Graph::start). Feed packets in through [`input`](Graph::input); terminate by closing
+/// the inputs ([`close_all_inputs`](Graph::close_all_inputs)) and waiting for the pipeline to
+/// drain ([`wait_done`](Graph::wait_done)).
+///
+/// Every method takes `&self` — the handle is shared, not cloned. Dropping it shuts the graph down
+/// and joins the worker threads. After termination, [`reset`](Graph::reset) puts the graph back to
+/// a startable state while keeping already-opened kernel instances alive, so an expensive one-off
+/// such as loading a model is not repeated.
 pub struct Graph {
     inner: Arc<GraphInner>,
 }

@@ -2,10 +2,16 @@
 
 [English](README.md) | **简体中文**
 
-一个数据流图计算框架:把计算描述成**有向图**,节点是**算子(Kernel)**,边上流动**带时间戳的数据包(Packet)**。
-引擎用 Rust 实现(调度、线程、队列、拓扑),对外只暴露一层稳定的 **C ABI**;算子可以用 **C++** 或 **Python** 编写。
+[![crates.io](https://img.shields.io/crates/v/lmflow.svg?logo=rust)](https://crates.io/crates/lmflow)
+[![PyPI](https://img.shields.io/pypi/v/lm-lmflow.svg?logo=pypi&logoColor=white)](https://pypi.org/project/lm-lmflow/)
+[![docs](https://img.shields.io/badge/docs-lm--flow-blue)](https://laomou.github.io/lm-flow/)
+[![ci](https://github.com/laomou/lm-flow/actions/workflows/ci.yml/badge.svg)](https://github.com/laomou/lm-flow/actions/workflows/ci.yml)
+[![license](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-📖 **Python API 文档**:<https://laomou.github.io/lm-flow/> —— 由 docstring 自动生成。
+一个数据流图计算框架:把计算描述成**有向图**,节点是**算子(Kernel)**,边上流动**带时间戳的数据包(Packet)**。
+引擎用 Rust 实现(调度、线程、队列、拓扑),对外只暴露一层稳定的 **C ABI**;算子可以用 **Rust**、**C++** 或 **Python** 编写。
+
+📖 **文档**:<https://laomou.github.io/lm-flow/> —— [Rust](https://laomou.github.io/lm-flow/rust/) · [C / C++](https://laomou.github.io/lm-flow/cpp/) · [Python](https://laomou.github.io/lm-flow/python/)
 
 ```text
   宿主(Rust / C++ / Python) ── 驱动图
@@ -14,7 +20,7 @@
   引擎(Rust):调度器 · 执行器 · 边队列 · 拓扑 · YAML
         │  C ABI  (回调)
         ▼
-  算子:C++(flow.hpp 糖层) / Python
+  算子:Rust(trait Kernel) / C++(flow.hpp 糖层) / Python
 ```
 
 ## 目录结构
@@ -33,12 +39,13 @@ lm-flow/
 │   ├── cpp/                   C++ 侧(非引擎)—— kernels/(18 个内置算子)· abi_assert.cc · tests/
 │   ├── python/                pybind11 绑定(src/)+ lmflow 包 + CMakeLists
 │   └── examples/              每个示例是独立工程:examples/<lang>/<name>/
-│       ├── cpp/hello_world/    独立 C++ 工程(find_package 或从源码构建)
-│       ├── python/             hello_world/、realtime_pipeline/、opencv_pipeline/
+│       ├── cpp/               hello_world/、custom_type/(find_package 或从源码构建)
+│       ├── rust/              hello_world/(独立 cargo 工程)
+│       ├── python/            hello_world/、realtime_pipeline/、opencv_pipeline/
 │       └── {android,ios,harmonyos}/hello_world/   移动端集成示例
 ├── third_party/pybind11/      vendored git 子模块(仅用于构建 Python wheel)
 ├── cmake/                     engine.cmake · install-sdk.cmake · find_package 配置
-├── docs/design.md             设计方案(权威文档)
+├── docs/                      design.md(设计方案,权威文档,中文)· web/(文档站源码)
 ├── CMakeLists.txt             顶层构建(驱动 cargo;C/C++ SDK + Python 扩展)
 └── pyproject.toml             Python wheel(scikit-build-core → 同一份 CMake)
 ```
@@ -208,3 +215,26 @@ target_link_libraries(my_app PRIVATE lmflow::core)   # 头 + liblmflow.a + 系�
 C ABI 是唯一稳定接口(`lmflow/flow.h`);`flow.hpp` 是可选的 C++ 算子糖层,`flow_cv.hpp` 是 OpenCV 互转,`flow_platform_log.hpp` 一行把引擎日志接到平台日志系统(logcat / os_log / HiLog)—— `lmflow::InstallPlatformLogSink()`。
 
 移动端集成示例:[`lmflow/examples/android/hello_world`](lmflow/examples/android/hello_world)(JNI)、[`lmflow/examples/ios/hello_world`](lmflow/examples/ios/hello_world)(Swift)、[`lmflow/examples/harmonyos/hello_world`](lmflow/examples/harmonyos/hello_world)(NAPI)。
+
+## 文档
+
+<https://laomou.github.io/lm-flow/> —— 一个站点,三端 API:
+
+| 端 | 文档 | 来源 |
+|---|---|---|
+| Rust | [`/rust/`](https://laomou.github.io/lm-flow/rust/)(跟 `main`)· [docs.rs/lmflow](https://docs.rs/lmflow)(已发布版本) | `lmflow/core/src/` 的 doc 注释 |
+| C / C++ | [`/cpp/`](https://laomou.github.io/lm-flow/cpp/) —— 手写指南 | `lmflow/include/lmflow/flow.h`,ABI 的权威定义 |
+| Python | [`/python/`](https://laomou.github.io/lm-flow/python/) | `lmflow/python/lmflow/__init__.py` 的 docstring |
+
+设计方案 —— 调度模型、时间戳与终止语义、锁序规则、决策记录 —— 是 [`docs/design.md`](docs/design.md)(中文,权威),同时渲染在 [`/design/`](https://laomou.github.io/lm-flow/design/)。
+
+站点由 [`.github/workflows/docs.yml`](.github/workflows/docs.yml) 在每次推 `main` 时构建部署;手写页面的源码在 [`docs/web/`](docs/web)。本地预览:
+
+```bash
+pip install pdoc                                    # 顺带带来 markdown2 + pygments
+cargo doc --no-deps --manifest-path lmflow/core/Cargo.toml
+python docs/web/build.py site
+cp -R lmflow/core/target/doc/. site/rust/ && rm -f site/rust/.lock
+python -m pdoc lmflow -o site/python                # 需先 `pip install .`
+python -m http.server -d site 8000
+```

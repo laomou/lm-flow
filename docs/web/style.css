@@ -1,0 +1,236 @@
+/* lmflow 文档站样式:单文件、无外部依赖(不引 CDN 字体/框架)。
+   浅色为主,跟随系统偏好提供暗色。改动只影响手写页面(首页 / C++ 指南 / 设计文档);
+   rustdoc 与 pdoc 自带样式,不受这里影响。 */
+
+:root {
+  --bg: #ffffff;
+  --fg: #1f2328;
+  --fg-muted: #59636e;
+  --link: #0a5cc4;
+  --border: #d8dee4;
+  --code-bg: #f4f6f8;
+  --topbar-bg: #1f2328;
+  --topbar-fg: #e6edf3;
+  --accent: #b45309;
+  --max-width: 52rem;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0d1117;
+    --fg: #e6edf3;
+    --fg-muted: #9198a1;
+    --link: #6cb0ff;
+    --border: #30363d;
+    --code-bg: #161b22;
+    --topbar-bg: #010409;
+    --topbar-fg: #e6edf3;
+    --accent: #e3a008;
+  }
+}
+
+* { box-sizing: border-box; }
+
+html { -webkit-text-size-adjust: 100%; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font: 16px/1.65 -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans",
+        "Helvetica Neue", Arial, "PingFang SC", "Hiragino Sans GB",
+        "Microsoft YaHei", sans-serif;
+}
+
+/* ---------- 顶栏 ---------- */
+
+.topbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 1.25rem;
+  padding: 0.7rem 1.25rem;
+  background: var(--topbar-bg);
+  color: var(--topbar-fg);
+}
+
+.topbar .brand {
+  font-weight: 700;
+  font-size: 1.05rem;
+  letter-spacing: 0.01em;
+  color: var(--topbar-fg);
+  text-decoration: none;
+}
+
+.topbar nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 1rem;
+  font-size: 0.92rem;
+}
+
+.topbar nav a {
+  color: var(--topbar-fg);
+  opacity: 0.75;
+  text-decoration: none;
+  padding: 0.1rem 0;
+  border-bottom: 2px solid transparent;
+}
+
+.topbar nav a:hover { opacity: 1; }
+
+.topbar nav a.active {
+  opacity: 1;
+  font-weight: 600;
+  border-bottom-color: var(--accent);
+}
+
+/* ---------- 正文 ---------- */
+
+main {
+  max-width: var(--max-width);
+  margin: 0 auto;
+  padding: 2rem 1.25rem 4rem;
+}
+
+h1, h2, h3, h4 {
+  line-height: 1.3;
+  margin: 2rem 0 0.75rem;
+  font-weight: 650;
+}
+
+h1 { font-size: 2rem; margin-top: 0.5rem; }
+h2 { font-size: 1.45rem; padding-bottom: 0.3rem; border-bottom: 1px solid var(--border); }
+h3 { font-size: 1.15rem; }
+h4 { font-size: 1rem; }
+
+p, ul, ol, table, pre, blockquote { margin: 0 0 1rem; }
+
+a { color: var(--link); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+ul, ol { padding-left: 1.5rem; }
+li { margin: 0.2rem 0; }
+
+strong { font-weight: 650; }
+
+hr { border: 0; border-top: 1px solid var(--border); margin: 2rem 0; }
+
+/* ---------- 代码 ---------- */
+
+code, pre, kbd, samp {
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+               "Liberation Mono", monospace;
+}
+
+code {
+  background: var(--code-bg);
+  border-radius: 4px;
+  padding: 0.15em 0.35em;
+  font-size: 0.88em;
+}
+
+pre {
+  background: var(--code-bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.85rem 1rem;
+  overflow-x: auto;
+  line-height: 1.5;
+}
+
+pre code {
+  background: none;
+  padding: 0;
+  font-size: 0.85rem;
+}
+
+/* markdown2 的 fenced-code-blocks 用 pygments,产出 div.codehilite > pre */
+.codehilite { margin: 0 0 1rem; }
+.codehilite pre { margin: 0; }
+
+/* ---------- 表格 ---------- */
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.94rem;
+  display: block;
+  overflow-x: auto;
+}
+
+th, td {
+  border: 1px solid var(--border);
+  padding: 0.45rem 0.7rem;
+  text-align: left;
+  vertical-align: top;
+}
+
+th { background: var(--code-bg); font-weight: 650; }
+
+/* ---------- 引用 ---------- */
+
+blockquote {
+  margin-left: 0;
+  padding: 0.1rem 0 0.1rem 1rem;
+  border-left: 3px solid var(--border);
+  color: var(--fg-muted);
+}
+
+blockquote > :last-child { margin-bottom: 0; }
+
+/* ---------- 目录(长页面顶部的可折叠 TOC) ---------- */
+
+.toc {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.6rem 1rem;
+  margin: 0 0 2rem;
+  background: var(--code-bg);
+  font-size: 0.93rem;
+}
+
+.toc > summary {
+  cursor: pointer;
+  font-weight: 650;
+  margin: 0 -0.25rem;
+  padding: 0 0.25rem;
+}
+
+.toc ul { padding-left: 1.2rem; margin: 0.5rem 0 0; }
+.toc > ul { margin-top: 0.75rem; }
+.toc li { margin: 0.1rem 0; }
+
+/* ---------- 首页的语言卡片 ---------- */
+
+.cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr));
+  gap: 1rem;
+  margin: 0 0 1.5rem;
+}
+
+.cards > a {
+  display: block;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.9rem 1rem;
+  color: inherit;
+  text-decoration: none;
+}
+
+.cards > a:hover { border-color: var(--link); text-decoration: none; }
+.cards strong { display: block; color: var(--link); margin-bottom: 0.2rem; }
+.cards span { font-size: 0.9rem; color: var(--fg-muted); }
+
+/* ---------- 页脚 ---------- */
+
+footer {
+  border-top: 1px solid var(--border);
+  color: var(--fg-muted);
+  font-size: 0.88rem;
+  padding: 1.25rem;
+  text-align: center;
+}
+
+footer p { margin: 0; }

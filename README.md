@@ -2,9 +2,15 @@
 
 **English** | [简体中文](README.zh-CN.md)
 
-A dataflow-graph engine: computation is described as a **directed graph** — nodes are **kernels**, and **timestamped packets** flow along the edges. The engine is written in Rust (scheduling, threads, queues, topology) and exposes a single stable **C ABI**; kernels can be written in **C++** or **Python**.
+[![crates.io](https://img.shields.io/crates/v/lmflow.svg?logo=rust)](https://crates.io/crates/lmflow)
+[![PyPI](https://img.shields.io/pypi/v/lm-lmflow.svg?logo=pypi&logoColor=white)](https://pypi.org/project/lm-lmflow/)
+[![docs](https://img.shields.io/badge/docs-lm--flow-blue)](https://laomou.github.io/lm-flow/)
+[![ci](https://github.com/laomou/lm-flow/actions/workflows/ci.yml/badge.svg)](https://github.com/laomou/lm-flow/actions/workflows/ci.yml)
+[![license](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-📖 **API reference (Python)**: <https://laomou.github.io/lm-flow/> — auto-generated from docstrings.
+A dataflow-graph engine: computation is described as a **directed graph** — nodes are **kernels**, and **timestamped packets** flow along the edges. The engine is written in Rust (scheduling, threads, queues, topology) and exposes a single stable **C ABI**; kernels can be written in **Rust**, **C++** or **Python**.
+
+📖 **Documentation**: <https://laomou.github.io/lm-flow/> — [Rust](https://laomou.github.io/lm-flow/rust/) · [C / C++](https://laomou.github.io/lm-flow/cpp/) · [Python](https://laomou.github.io/lm-flow/python/)
 
 ```text
   Host (Rust / C++ / Python) ── drives the graph
@@ -13,7 +19,7 @@ A dataflow-graph engine: computation is described as a **directed graph** — no
   Engine (Rust): scheduler · executors · edge queues · topology · YAML
         │  C ABI  (callbacks)
         ▼
-  Kernels: C++ (flow.hpp sugar)  /  Python
+  Kernels: Rust (trait Kernel)  /  C++ (flow.hpp sugar)  /  Python
 ```
 
 ## Layout
@@ -31,12 +37,13 @@ lm-flow/
 │   ├── cpp/                   C++ side (not the engine) — kernels/ (18 built-ins) · abi_assert.cc · tests/
 │   ├── python/                pybind11 bindings (src/) + the lmflow package + CMakeLists
 │   └── examples/              each example is self-contained: examples/<lang>/<name>/
-│       ├── cpp/hello_world/    standalone C++ project (find_package or build-from-source)
-│       ├── python/             hello_world/, realtime_pipeline/, opencv_pipeline/
+│       ├── cpp/               hello_world/, custom_type/  (find_package or build-from-source)
+│       ├── rust/              hello_world/  (a standalone cargo project)
+│       ├── python/            hello_world/, realtime_pipeline/, opencv_pipeline/
 │       └── {android,ios,harmonyos}/hello_world/   mobile integration examples
 ├── third_party/pybind11/      vendored git submodule (only used to build the Python wheel)
 ├── cmake/                     engine.cmake · install-sdk.cmake · find_package config
-├── docs/design.md             Design document (authoritative)
+├── docs/                      design.md (authoritative design doc, Chinese) · web/ (doc-site sources)
 ├── CMakeLists.txt             Top-level build (drives cargo; C/C++ SDK + Python extension)
 └── pyproject.toml             Python wheel (scikit-build-core → the same CMake)
 ```
@@ -203,3 +210,26 @@ target_link_libraries(my_app PRIVATE lmflow::core)   # headers + liblmflow.a + s
 The C ABI is the only stable interface (`lmflow/flow.h`); `flow.hpp` is the optional C++ kernel sugar, `flow_cv.hpp` is OpenCV interop, and `flow_platform_log.hpp` bridges engine logs to the platform logger (logcat / os_log / HiLog) in one call — `lmflow::InstallPlatformLogSink()`.
 
 Mobile integration examples: [`lmflow/examples/android/hello_world`](lmflow/examples/android/hello_world) (JNI), [`lmflow/examples/ios/hello_world`](lmflow/examples/ios/hello_world) (Swift), [`lmflow/examples/harmonyos/hello_world`](lmflow/examples/harmonyos/hello_world) (NAPI).
+
+## Documentation
+
+<https://laomou.github.io/lm-flow/> — one site, three API surfaces:
+
+| Surface | Reference | Generated from |
+|---|---|---|
+| Rust | [`/rust/`](https://laomou.github.io/lm-flow/rust/) (tracks `main`) · [docs.rs/lmflow](https://docs.rs/lmflow) (released version) | doc comments in `lmflow/core/src/` |
+| C / C++ | [`/cpp/`](https://laomou.github.io/lm-flow/cpp/) — hand-written guide | `lmflow/include/lmflow/flow.h`, the authoritative ABI definition |
+| Python | [`/python/`](https://laomou.github.io/lm-flow/python/) | docstrings in `lmflow/python/lmflow/__init__.py` |
+
+The design document — scheduling model, timestamp and termination semantics, lock ordering rules and the decision log — is [`docs/design.md`](docs/design.md) (Chinese, authoritative), also rendered at [`/design/`](https://laomou.github.io/lm-flow/design/).
+
+The site is built and deployed by [`.github/workflows/docs.yml`](.github/workflows/docs.yml) on every push to `main`; the hand-written pages live in [`docs/web/`](docs/web). To preview it locally:
+
+```bash
+pip install pdoc                                    # also brings markdown2 + pygments
+cargo doc --no-deps --manifest-path lmflow/core/Cargo.toml
+python docs/web/build.py site
+cp -R lmflow/core/target/doc/. site/rust/ && rm -f site/rust/.lock
+python -m pdoc lmflow -o site/python                # needs `pip install .` first
+python -m http.server -d site 8000
+```

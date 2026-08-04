@@ -1,6 +1,12 @@
-# 生成 Python API 文档(pdoc)并发到 GitHub Pages。
+# 生成三端 API 文档并发到 GitHub Pages。
 # 前提(仓库管理员一次性):Settings → Pages → Source 选 "GitHub Actions"。
-# 文档站:https://laomou.github.io/lm-flow/
+#
+# 文档站 https://laomou.github.io/lm-flow/ 的构成:
+#   /          手写英文首页            docs/web/index.md   → build.py
+#   /rust/     Rust API(跟 main)     cargo doc --no-deps
+#   /cpp/      手写英文 C/C++ 指南     docs/web/cpp.md     → build.py
+#   /python/   Python API             pdoc(内省已安装的包)
+#   /design/   设计方案(中文)         docs/design.md      → build.py
 name: docs
 
 on:
@@ -34,9 +40,33 @@ jobs:
       - name: 装 lmflow(带扩展)+ pdoc
         run: |
           python -m pip install .          # scikit-build-core:cargo 引擎 + pybind11 扩展
-          python -m pip install pdoc
-      - name: pdoc 生成 API 文档(内省已装的 lmflow 包)
-        run: python -m pdoc lmflow -o site
+          python -m pip install pdoc       # 顺带带来 markdown2 / pygments,供 build.py 用
+      - name: rustdoc 生成 Rust API 文档
+        # 用默认(纯 Rust)feature:builtin-kernels 只在本仓库内可用,给 crates.io
+        # 用户展示他们调不到的函数属于误导。-D warnings 让失效的 intra-doc 链接直接失败。
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --no-deps --manifest-path lmflow/core/Cargo.toml
+      - name: build.py 生成首页 / C++ 指南 / 设计文档
+        run: python docs/web/build.py site
+      - name: 合入 rustdoc 产出
+        # `/.` 只合并内容,不会删掉 build.py 写的 site/rust/index.html 重定向壳
+        # (cargo doc 的产出根目录本身没有 index.html,真入口是 lmflow/index.html)。
+        run: |
+          cp -R lmflow/core/target/doc/. site/rust/
+          rm -f site/rust/.lock          # cargo 的锁文件,不该发布
+      - name: pdoc 生成 Python API 文档(内省已装的 lmflow 包)
+        run: python -m pdoc lmflow -o site/python
+      - name: 校验站点产物齐全
+        # 宁可构建失败,也不要把半成品站点静默发布出去。
+        run: |
+          for f in index.html style.css highlight.css \
+                   cpp/index.html design/index.html \
+                   rust/index.html rust/lmflow/index.html \
+                   python/index.html python/lmflow.html; do
+            [ -f "site/$f" ] || { echo "缺少产物:site/$f"; exit 1; }
+          done
+          echo "站点产物齐全"
       - uses: actions/configure-pages@v5
         with: { enablement: true }   # 未手动开 Pages 时尝试自动开(需 pages: write)
       - uses: actions/upload-pages-artifact@v3

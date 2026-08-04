@@ -262,8 +262,10 @@ impl PortTable {
     }
 }
 
-/// 算子契约:端口类型约束 + 必需的 side packet。
-/// 端口数量与名字来自 YAML(建 Contract 时已知),算子只负责补类型。
+/// A kernel's port contract: payload-type constraints plus required side packets.
+///
+/// Port counts and names come from YAML and are already known when the contract is built; the
+/// kernel only fills in the types.
 #[derive(Debug)]
 pub struct Contract {
     pub inputs: std::sync::Arc<PortTable>,

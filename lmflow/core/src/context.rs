@@ -36,7 +36,7 @@ impl Options {
         }
     }
 
-    /// 按点号路径取值:`"roi.x"` → root["roi"]["x"]。
+    /// 按点号路径取值:`"roi.x"` → `root["roi"]["x"]`。
     pub fn get(&self, path: &str) -> Option<&serde_yaml::Value> {
         let mut cur = &self.root;
         for seg in path.split('.') {

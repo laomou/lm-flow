@@ -1,24 +1,25 @@
-//! 时间戳:整条数据流的排序与生命周期标记。
+//! Timestamps: the ordering and lifetime markers carried by every packet in the stream.
 //!
-//! 数值空间(i64)划分为若干哨兵值 + 中间的合法区间:
+//! The `i64` value space is partitioned into sentinel values around a legal data range:
 //! ```text
 //!  MIN      MIN+1       MIN+2      MIN+3  ...  MAX-3       MAX-2        MAX-1              MAX
 //!  Unset  Unstarted   PreStream    Min          Max     PostStream  OneOverPostStream    Done
-//!         └────────── 不允许出现在流中 ──────────┘         └────── 不允许出现在流中 ──────┘
-//!                                 └── 合法数据区间 ──┘
+//!         └────────── never appears in a stream ─────────┘         └─── never in a stream ───┘
+//!                                 └─── legal data range ──┘
 //! ```
-//! - `PreStream` / `PostStream`:流首 / 流尾的特殊单包位置。
-//! - `Done`:端口已关闭且不会再有数据。
-//! - `Unset`:未赋值(默认值)。
+//! - `PreStream` / `PostStream` — the special single-packet slots at the head and tail of a stream.
+//! - `Done` — the port is closed and no further data will arrive.
+//! - `Unset` — no value assigned (the default).
 
 use std::fmt;
 
-/// 带哨兵语义的时间戳。内层 `i64` 公开,便于与 C ABI 直接互转。
+/// A timestamp with sentinel semantics. The inner `i64` is public so it converts directly to and
+/// from the C ABI representation.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct Timestamp(pub i64);
 
 impl Default for Timestamp {
-    /// 默认为 `Unset`(与 C ABI 的 `LMFLOW_TS_UNSET` 一致)。
+    /// Defaults to `Unset`, matching the C ABI's `LMFLOW_TS_UNSET`.
     fn default() -> Self {
         Self::unset()
     }
@@ -50,19 +51,20 @@ impl Timestamp {
         Timestamp(i64::MAX)
     }
 
-    /// 是否落在普通数据区间 `[Min, Max]`。
+    /// Whether this falls inside the ordinary data range `[Min, Max]`.
     pub fn is_range_value(self) -> bool {
         self >= Self::min() && self <= Self::max()
     }
 
-    /// 是否允许作为流中数据包的时间戳(含 PreStream / PostStream)。
+    /// Whether this is allowed as the timestamp of a packet in a stream — which includes
+    /// `PreStream` and `PostStream`.
     pub fn is_allowed_in_stream(self) -> bool {
         self >= Self::pre_stream() && self <= Self::post_stream()
     }
 
-    /// 本时间戳之后、下一个允许出现在流中的时间戳。
+    /// The next timestamp after this one that may legally appear in a stream.
     ///
-    /// `PreStream` 之后不允许再有包,故返回 `OneOverPostStream`。
+    /// Nothing may follow `PreStream`, so that case returns `OneOverPostStream`.
     pub fn next_allowed_in_stream(self) -> Self {
         if self >= Self::max() || self == Self::pre_stream() {
             Self::one_over_post_stream()
@@ -88,7 +90,8 @@ impl Timestamp {
     }
 }
 
-/// 加减用饱和运算:哨兵值附近不会因溢出而 panic 或回绕。
+/// Addition and subtraction saturate: arithmetic near the sentinel values neither panics on
+/// overflow nor wraps around.
 impl std::ops::Add<i64> for Timestamp {
     type Output = Timestamp;
     fn add(self, rhs: i64) -> Timestamp {

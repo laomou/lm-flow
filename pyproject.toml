@@ -34,7 +34,7 @@ classifiers = [
 [project.urls]
 Homepage = "https://github.com/laomou/lm-flow"
 Repository = "https://github.com/laomou/lm-flow"
-Documentation = "https://laomou.github.io/lm-flow/"
+Documentation = "https://laomou.github.io/lm-flow/python/"
 
 # ---- scikit-build-core:调根 CMake 出 pybind11 扩展 _lmflow(pip install / wheel 同一条路)----
 # 引擎(cargo)+ C++ 算子 + 绑定都由 CMake 编;third_party/pybind11 子模块在仓库根(即项目根),
