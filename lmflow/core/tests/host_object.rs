@@ -39,6 +39,31 @@ impl Kernel for EmitsHostObject {
     }
 }
 
+/// 契约声明 any、但实际产出 HOST_OBJECT 的源 —— 用来钉住「无下游节点、直接到图输出」
+/// 这条路径。输入类型校验看不到源产出,必须在 flush 前检查暂存输出。
+#[derive(Default)]
+struct HostObjectSource;
+impl Kernel for HostObjectSource {
+    fn process(&mut self, cc: &mut KernelCtx) -> lmflow::Result<()> {
+        cc.emit(0, Packet::new_interop(1i64, type_id::HOST_OBJECT))?;
+        cc.source_done();
+        Ok(())
+    }
+}
+
+/// 在 close 阶段产出 HOST_OBJECT,用来覆盖独立于 process 的刷新分支。
+#[derive(Default)]
+struct HostObjectOnClose;
+impl Kernel for HostObjectOnClose {
+    fn process(&mut self, _cc: &mut KernelCtx) -> lmflow::Result<()> {
+        Ok(())
+    }
+
+    fn close(&mut self, cc: &mut KernelCtx) -> lmflow::Result<()> {
+        cc.emit(0, Packet::new_interop(1i64, type_id::HOST_OBJECT))
+    }
+}
+
 fn one_node(kernel: &str) -> String {
     format!(
         r#"
@@ -133,4 +158,73 @@ fn any_port_still_accepts_normal_packets() {
     graph.close_all_inputs();
     graph.wait_done().unwrap();
     assert_eq!(poller.next().and_then(|p| p.as_i64()), Some(9));
+}
+
+/// 入口三:**算子输出**自己带 HOST_OBJECT,且边直接连图输出 → 必须在交给
+/// poller / observer 前拒绝。否则源节点没有输入可检查,包会完整绕过运行期门禁。
+#[test]
+fn source_output_carrying_host_object_is_rejected_before_dispatch() {
+    let _ = register_kernel::<HostObjectSource>("HostObjectSource");
+    let graph = Graph::from_yaml(
+        r#"
+executors:
+  - { name: pool, type: ThreadPoolExecutor, num_threads: 1 }
+nodes:
+  - { name: source, kernel: HostObjectSource, input_ports: [], output_ports: [out], executor: pool }
+output_ports: [out]
+"#,
+    )
+    .unwrap();
+    let poller = graph.add_poller("out").unwrap();
+    graph.start().unwrap();
+
+    let msg = graph.wait_done().unwrap_err().to_string();
+    assert!(
+        msg.contains("HOST_OBJECT") && msg.contains("output port `out`"),
+        "应在输出派发前指出非法类型和端口: {msg}"
+    );
+    assert!(
+        poller.try_next().is_none(),
+        "非法 HOST_OBJECT 不得到达图输出"
+    );
+}
+
+/// close 有独立的调用与刷新路径,同样不得把 HOST_OBJECT 交给图输出。
+#[test]
+fn close_output_carrying_host_object_is_rejected_before_dispatch() {
+    let _ = register_kernel::<HostObjectOnClose>("HostObjectOnClose");
+    let graph = Graph::from_yaml(&one_node("HostObjectOnClose")).unwrap();
+    let poller = graph.add_poller("out").unwrap();
+    graph.start().unwrap();
+    graph
+        .input("in")
+        .unwrap()
+        .send(Packet::from_i64(1).at(Timestamp(0)))
+        .unwrap();
+    graph.close_all_inputs();
+
+    let msg = graph.wait_done().unwrap_err().to_string();
+    assert!(
+        msg.contains("HOST_OBJECT") && msg.contains("output port `out`"),
+        "close 产出也应在派发前被拒: {msg}"
+    );
+    assert!(
+        poller.try_next().is_none(),
+        "close 产出的非法 HOST_OBJECT 不得到达图输出"
+    );
+}
+
+/// 入口四:side packet 不走普通输入队列,也必须在注入时拒绝,否则算子能从 Context
+/// 直接取得这个未启用类型。
+#[test]
+fn side_packet_carrying_host_object_is_rejected() {
+    let graph = Graph::from_yaml(&one_node("PassThrough")).unwrap();
+    let err = graph
+        .set_side_packet("native", Packet::new_interop(1i64, type_id::HOST_OBJECT))
+        .unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("side packet `native`") && msg.contains("HOST_OBJECT"),
+        "应指出非法 side packet: {msg}"
+    );
 }
