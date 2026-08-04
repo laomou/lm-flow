@@ -12,6 +12,7 @@ const NODE_LABEL_CHARS: usize = 24;
 const KERNEL_LABEL_CHARS: usize = 28;
 const PORT_LABEL_CHARS: usize = 28;
 const CLUSTER_LABEL_CHARS: usize = 24;
+const HOTSPOT_TOP_N: usize = 5;
 
 #[derive(Debug, Clone, Copy, Default)]
 struct DotNodeCounters {
@@ -151,6 +152,32 @@ struct DotHotspots {
     dropped: u64,
 }
 
+#[derive(Debug, Default)]
+struct DotAnalysis {
+    node_ranks: Vec<Option<usize>>,
+    port_ranks: std::collections::BTreeMap<(usize, usize), usize>,
+    pressure_nodes: std::collections::BTreeSet<usize>,
+    pressure_edges: std::collections::BTreeSet<usize>,
+    top_nodes: Vec<String>,
+    top_ports: Vec<String>,
+}
+
+impl DotAnalysis {
+    fn summary(&self) -> String {
+        let nodes = if self.top_nodes.is_empty() {
+            "none".to_string()
+        } else {
+            self.top_nodes.join(", ")
+        };
+        let ports = if self.top_ports.is_empty() {
+            "none".to_string()
+        } else {
+            self.top_ports.join(", ")
+        };
+        format!("top nodes {nodes}\\ntop ports {ports}")
+    }
+}
+
 impl DotHotspots {
     fn label(&self) -> String {
         format!(
@@ -227,6 +254,173 @@ fn heat_color(v: f64, max: f64) -> String {
 }
 
 impl GraphInner {
+    fn dot_analysis(&self, now_us: i64, interval: &DotInterval) -> DotAnalysis {
+        let waiting = self
+            .nodes
+            .iter()
+            .enumerate()
+            .map(|(node, _)| self.dot_waiting_ports(node))
+            .collect::<Vec<_>>();
+        let mut port_candidates = Vec::new();
+        for (node_id, node) in self.nodes.iter().enumerate() {
+            for port in 0..node.input_queues.len() {
+                let stats = self
+                    .input_queue_stats_at(node_id, port, now_us)
+                    .expect("node input port exists");
+                let delta = interval.port(node_id, port);
+                let edge_delta = interval.edge(node.inputs[port]);
+                let severity = if stats.blocked {
+                    5
+                } else if waiting[node_id].contains(&port) {
+                    4
+                } else if edge_delta.dropped > 0 {
+                    3
+                } else if delta.block_events > 0 {
+                    2
+                } else if stats.queued_packets > 0 {
+                    1
+                } else {
+                    0
+                };
+                if severity == 0 {
+                    continue;
+                }
+                port_candidates.push((
+                    (
+                        severity,
+                        delta.total_blocked_us,
+                        edge_delta.dropped,
+                        stats.queued_packets as u64,
+                    ),
+                    node_id,
+                    port,
+                ));
+            }
+        }
+        port_candidates.sort_by(|left, right| {
+            right
+                .0
+                .cmp(&left.0)
+                .then_with(|| left.1.cmp(&right.1))
+                .then_with(|| left.2.cmp(&right.2))
+        });
+
+        let mut analysis = DotAnalysis {
+            node_ranks: vec![None; self.nodes.len()],
+            ..DotAnalysis::default()
+        };
+        for (index, (_, node, port)) in port_candidates.iter().take(HOTSPOT_TOP_N).enumerate() {
+            let rank = index + 1;
+            analysis.port_ranks.insert((*node, *port), rank);
+            analysis.top_ports.push(format!(
+                "#{rank} {}.{}",
+                truncate_label(&self.nodes[*node].name, NODE_LABEL_CHARS),
+                truncate_label(
+                    self.nodes[*node].in_ports.name(*port).unwrap_or("?"),
+                    PORT_LABEL_CHARS
+                ),
+            ));
+        }
+
+        let mut node_candidates = self
+            .nodes
+            .iter()
+            .enumerate()
+            .filter_map(|(node_id, node)| {
+                let delta = interval.node(node_id);
+                let avg_us = if delta.processed == 0 {
+                    avg_process_us(&node.stats).round() as u64
+                } else {
+                    (delta.total_us.max(0) as u64)
+                        .checked_div(delta.processed)
+                        .unwrap_or(0)
+                };
+                let blocked_ports = node
+                    .input_queue_stats
+                    .iter()
+                    .filter(|stats| stats.blocked_since_us.load(Ordering::Relaxed) != 0)
+                    .count() as u64;
+                let waiting_ports = waiting[node_id].len() as u64;
+                let queued = (0..node.input_queues.len())
+                    .map(|port| node.queue_len(port))
+                    .sum::<usize>() as u64;
+                let outgoing_drops = node
+                    .outputs
+                    .iter()
+                    .map(|edge| interval.edge(*edge).dropped)
+                    .sum::<u64>();
+                let severity = if delta.errors > 0 || node.stats.errors.load(Ordering::Relaxed) > 0
+                {
+                    5
+                } else if blocked_ports > 0 {
+                    4
+                } else if waiting_ports > 0 || outgoing_drops > 0 {
+                    3
+                } else if avg_us > 0 && delta.processed > 0 {
+                    2
+                } else if queued > 0 {
+                    1
+                } else {
+                    0
+                };
+                (severity > 0).then_some((
+                    (
+                        severity,
+                        blocked_ports,
+                        waiting_ports,
+                        outgoing_drops,
+                        avg_us,
+                        queued,
+                    ),
+                    node_id,
+                ))
+            })
+            .collect::<Vec<_>>();
+        node_candidates
+            .sort_by(|left, right| right.0.cmp(&left.0).then_with(|| left.1.cmp(&right.1)));
+        for (index, (_, node)) in node_candidates.iter().take(HOTSPOT_TOP_N).enumerate() {
+            let rank = index + 1;
+            analysis.node_ranks[*node] = Some(rank);
+            analysis.top_nodes.push(format!(
+                "#{rank} {}",
+                truncate_label(&self.nodes[*node].name, NODE_LABEL_CHARS)
+            ));
+        }
+
+        let active_roots = port_candidates
+            .iter()
+            .filter(|((severity, _, _, _), _, _)| *severity >= 4)
+            .map(|(_, node, port)| (*node, *port))
+            .collect::<Vec<_>>();
+        let mut stack = active_roots
+            .iter()
+            .filter_map(|(node, port)| self.edges[self.nodes[*node].inputs[*port]].producer)
+            .collect::<Vec<_>>();
+        for (node, port) in active_roots {
+            analysis
+                .pressure_edges
+                .insert(self.nodes[node].inputs[port]);
+            analysis.pressure_nodes.insert(node);
+        }
+        while let Some(node) = stack.pop() {
+            if !analysis.pressure_nodes.insert(node) {
+                continue;
+            }
+            for &edge in &self.nodes[node].inputs {
+                if self.edges[edge].is_graph_input {
+                    analysis.pressure_edges.insert(edge);
+                    continue;
+                }
+                if analysis.pressure_edges.insert(edge) {
+                    if let Some(producer) = self.edges[edge].producer {
+                        stack.push(producer);
+                    }
+                }
+            }
+        }
+        analysis
+    }
+
     fn dot_interval(&self, now_us: i64, view: DotView) -> DotInterval {
         let nodes = self
             .nodes
@@ -407,6 +601,12 @@ impl GraphInner {
         let diagnostics = view == DotView::Diagnostics;
         let snapshot_us = with_stats.then(|| self.epoch_us());
         let interval = snapshot_us.map(|snapshot_us| self.dot_interval(snapshot_us, view));
+        let analysis = snapshot_us.map(|snapshot_us| {
+            self.dot_analysis(
+                snapshot_us,
+                interval.as_ref().expect("statistics interval exists"),
+            )
+        });
         // 执行器配色板(浅色填充);按执行器序号取模。
         const COLORS: &[&str] = &[
             "#cde4ff", "#d7f0d0", "#ffe4c7", "#f0d0e8", "#d0eeee", "#efe6b0", "#e0d4f0", "#ffd6d6",
@@ -494,13 +694,17 @@ impl GraphInner {
                 },
             );
             out.push_str(&format!(
-                "  graph [labelloc=t, label=\"state {:?} · {} · {} · queued {}/{} packets\\n{}\"];\n",
+                "  graph [labelloc=t, label=\"state {:?} · {} · {} · queued {}/{} packets\\n{}\\n{}\"];\n",
                 self.state(),
                 snapshot,
                 interval_label,
                 self.shared.total_queued(),
                 limit,
                 hotspots.label(),
+                analysis
+                    .as_ref()
+                    .expect("statistics analysis exists")
+                    .summary(),
             ));
         }
 
@@ -601,6 +805,21 @@ impl GraphInner {
                     }
                 }
                 let errs = st.errors.load(Ordering::Relaxed);
+                if let Some(rank) = analysis
+                    .as_ref()
+                    .expect("statistics analysis exists")
+                    .node_ranks[i]
+                {
+                    extra.push_str(&format!("\\nHOT #{rank}"));
+                }
+                if analysis
+                    .as_ref()
+                    .expect("statistics analysis exists")
+                    .pressure_nodes
+                    .contains(&i)
+                {
+                    extra.push_str(" · PRESSURE PATH");
+                }
                 let active_or_abnormal =
                     matches!(node_state, NodeRunState::Running | NodeRunState::Error)
                         || queued_bytes > 0
@@ -667,12 +886,19 @@ impl GraphInner {
                         } else {
                             ""
                         };
+                        let rank = analysis
+                            .as_ref()
+                            .expect("statistics analysis exists")
+                            .port_ranks
+                            .get(&(i, port))
+                            .map_or_else(String::new, |rank| format!(" HOT #{rank}"));
                         extra.push_str(&format!(
-                            "\\n  {} {}/{} r{}{}",
+                            "\\n  {} {}/{} r{}{}{}",
                             escape_dot(&truncate_label(&queue.port_name, PORT_LABEL_CHARS)),
                             queue.queued_packets,
                             capacity,
                             queue.reserved_packets,
+                            rank,
                             state,
                         ));
                     }
@@ -680,13 +906,23 @@ impl GraphInner {
                 // 按平均延迟上色:绿(快)→ 红(慢)。执行器配色让位给热力图。
                 fill = heat_color(avg, max_avg_us);
             }
-            let state_color = if with_stats {
+            let pressure_path = with_stats
+                && analysis
+                    .as_ref()
+                    .expect("statistics analysis exists")
+                    .pressure_nodes
+                    .contains(&i);
+            let state_color = if pressure_path
+                && !matches!(node_state, NodeRunState::Running | NodeRunState::Error)
+            {
+                "#6f42c1"
+            } else if with_stats {
                 node_state.color()
             } else {
                 "#333333"
             };
-            let state_penwidth = if with_stats
-                && matches!(node_state, NodeRunState::Running | NodeRunState::Error)
+            let state_penwidth = if pressure_path
+                || (with_stats && matches!(node_state, NodeRunState::Running | NodeRunState::Error))
             {
                 3
             } else {
@@ -703,7 +939,7 @@ impl GraphInner {
                 state_penwidth,
                 executor_group,
                 escape_dot(&format!(
-                    "{} ({}) on {}: state {}, processed {}, avg {}, in {}, out {}, errors {}",
+                    "{} ({}) on {}: state {}, processed {}, avg {}, in {}, out {}, errors {}, hotspot rank {}, pressure path {}",
                     n.name,
                     n.kernel_name,
                     exec,
@@ -713,6 +949,13 @@ impl GraphInner {
                     n.stats.packets_in.load(Ordering::Relaxed),
                     n.stats.packets_out.load(Ordering::Relaxed),
                     n.stats.errors.load(Ordering::Relaxed),
+                    analysis
+                        .as_ref()
+                        .and_then(|analysis| analysis.node_ranks[i])
+                        .map_or_else(|| "none".to_string(), |rank| format!("#{rank}")),
+                    analysis
+                        .as_ref()
+                        .is_some_and(|analysis| analysis.pressure_nodes.contains(&i)),
                 )),
             );
             let path: Vec<&str> = n.name.split('/').collect();
@@ -795,11 +1038,10 @@ impl GraphInner {
                     let attrs = self.dot_edge_stats_attrs(
                         c,
                         port,
-                        &label,
-                        &e.name,
                         diagnostics
                             .then(|| snapshot_us.expect("statistics snapshot timestamp exists")),
                         interval.as_ref(),
+                        analysis.as_ref(),
                     );
                     out.push_str(&format!("  pin{ei} -> n{c} [{attrs}];\n"));
                 }
@@ -808,11 +1050,10 @@ impl GraphInner {
                     let attrs = self.dot_edge_stats_attrs(
                         c,
                         port,
-                        &label,
-                        &e.name,
                         diagnostics
                             .then(|| snapshot_us.expect("statistics snapshot timestamp exists")),
                         interval.as_ref(),
+                        analysis.as_ref(),
                     );
                     out.push_str(&format!("  n{p} -> n{c} [{attrs}];\n"));
                 }
@@ -979,6 +1220,12 @@ impl GraphInner {
             out.push_str(
                 "    legend_subscription [shape=box, style=\"rounded,filled\", fillcolor=\"#e8f1fb\", color=\"#4c78a8\", label=\"dashed edge\\npoller subscription\"];\n",
             );
+            out.push_str(
+                "    legend_hot [shape=box, style=filled, fillcolor=white, color=\"#333333\", penwidth=2, label=\"HOT #1..#5\\ncombined node / port rank\"];\n",
+            );
+            out.push_str(
+                "    legend_pressure [shape=box, style=filled, fillcolor=white, color=\"#6f42c1\", fontcolor=\"#553096\", penwidth=3, label=\"PRESSURE PATH\\nupstream propagation to active stall\"];\n",
+            );
             out.push_str("  }\n");
         }
 
@@ -990,11 +1237,13 @@ impl GraphInner {
         &self,
         node: usize,
         port: usize,
-        edge_label: &str,
-        edge_name: &str,
         snapshot_us: Option<i64>,
         interval: Option<&DotInterval>,
+        analysis: Option<&DotAnalysis>,
     ) -> String {
+        let edge = self.nodes[node].inputs[port];
+        let edge_name = &self.edges[edge].name;
+        let edge_label = escape_dot(&truncate_label(edge_name, PORT_LABEL_CHARS));
         let Some(snapshot_us) = snapshot_us else {
             return format!(
                 "label=\"{edge_label}\", tooltip=\"edge {}\"",
@@ -1005,13 +1254,21 @@ impl GraphInner {
             .input_queue_stats_at(node, port, snapshot_us)
             .expect("consumer input port exists");
         let waiting = self.dot_waiting_ports(node).contains(&port);
-        let edge = self.nodes[node].inputs[port];
         let delta = interval
             .expect("diagnostic edge has statistics interval")
             .port(node, port);
         let edge_delta = interval
             .expect("diagnostic edge has statistics interval")
             .edge(edge);
+        let hotspot_rank = analysis
+            .expect("diagnostic edge has analysis")
+            .port_ranks
+            .get(&(node, port))
+            .copied();
+        let pressure_path = analysis
+            .expect("diagnostic edge has analysis")
+            .pressure_edges
+            .contains(&edge);
         let capacity = stats
             .packet_capacity
             .map_or_else(|| "unbounded".to_string(), |value| value.to_string());
@@ -1027,6 +1284,9 @@ impl GraphInner {
         );
         if edge_delta.dropped > 0 {
             label.push_str(&format!("\\ndropped +{} in window", edge_delta.dropped));
+        }
+        if let Some(rank) = hotspot_rank {
+            label.push_str(&format!("\\nHOT #{rank}"));
         }
         let reason = if stats.blocked {
             "consumer queue full"
@@ -1073,6 +1333,9 @@ impl GraphInner {
         } else if stats.block_events > 0 {
             label.push_str("\\nRECOVERED: downstream drained slowly");
             format!("label=\"{label}\", color=\"#d98c00\", fontcolor=\"#9a6200\", penwidth=2, tooltip=\"{tooltip}\"")
+        } else if pressure_path {
+            label.push_str("\\nPRESSURE PATH: upstream propagation");
+            format!("label=\"{label}\", color=\"#6f42c1\", fontcolor=\"#553096\", penwidth=3, tooltip=\"{tooltip}\"")
         } else {
             format!("label=\"{edge_label}\", tooltip=\"{tooltip}\"")
         }

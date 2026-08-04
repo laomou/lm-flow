@@ -361,8 +361,11 @@ input_ports: [in, gate]
     let blocked_dot = graph.to_dot_with_stats();
     assert!(blocked_dot.contains("ports:"));
     assert!(blocked_dot.contains("mid 1/1 r"));
-    assert!(blocked_dot.contains("mid 1/1 r0 BLOCKED: queue full"));
-    assert!(blocked_dot.contains("gate 0/∞ r0 WAITING: aligned input"));
+    assert!(blocked_dot.contains("mid 1/1 r0"));
+    assert!(blocked_dot.contains("HOT #"));
+    assert!(blocked_dot.contains("BLOCKED: queue full"));
+    assert!(blocked_dot.contains("gate 0/∞ r0"));
+    assert!(blocked_dot.contains("WAITING: aligned input"));
     assert!(blocked_dot.contains("queue 1/1 · reserved"));
     assert!(blocked_dot.contains("bp 1×"));
     assert!(blocked_dot.contains("color=\"#d62728\""));
@@ -434,6 +437,57 @@ input_ports: [in, gate]
     assert_eq!(recoveries.len(), 1, "warned block should emit one recovery");
     assert!(recoveries[0].contains("producer `diagnostics_producer` resumed"));
     assert!(recoveries[0].contains("consumer `diagnostics_join` input `mid` drained"));
+}
+
+#[test]
+fn dot_ranks_hotspots_and_traces_upstream_pressure_path() {
+    register_test_kernels();
+    let graph = Graph::from_yaml(
+        r#"
+executors:
+  - { name: pool, num_threads: 1 }
+nodes:
+  - { name: source_pass, kernel: PassThrough, input_ports: [in], output_ports: [stage1], executor: pool }
+  - { name: middle_pass, kernel: PassThrough, input_ports: [stage1], output_ports: [stage2], executor: pool }
+  - name: blocked_join
+    kernel: InternalBpPortJoinCount
+    input_ports: [stage2, gate]
+    output_ports: []
+    executor: pool
+    input_queues:
+      packets: 1
+      ports: { gate: { packets: 0 } }
+input_ports: [in, gate]
+"#,
+    )
+    .unwrap();
+    graph.start().unwrap();
+    let input = graph.input("in").unwrap();
+    input.send(Packet::from_i64(0).at(Timestamp(0))).unwrap();
+    input.send(Packet::from_i64(1).at(Timestamp(1))).unwrap();
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    let dot = loop {
+        let dot = graph.to_dot_with_stats();
+        if dot.contains("stage2 1/1 r0 HOT #1 BLOCKED: queue full") {
+            break dot;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "diagnostic graph never observed the blocked chain"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    };
+    assert!(dot.contains("top nodes #1 blocked_join"));
+    assert!(dot.contains("top ports #1 blocked_join.stage2"));
+    assert!(dot.contains("HOT #1"));
+    assert!(dot.matches("PRESSURE PATH: upstream propagation").count() >= 2);
+    assert!(dot.contains("color=\"#6f42c1\""));
+    assert!(dot.contains("PRESSURE PATH\\nupstream propagation to active stall"));
+
+    graph.cancel();
+    graph.close_all_inputs();
+    let _ = graph.wait_done_timeout(Duration::from_secs(2));
 }
 
 #[test]

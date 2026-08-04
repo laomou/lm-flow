@@ -290,7 +290,8 @@ input_ports: [in]
         .unwrap_err();
     assert!(error.to_string().contains("intentional DOT state error"));
     let error_dot = failed.to_dot_compact();
-    assert!(error_dot.contains("@main\\nERROR"));
+    assert!(error_dot.contains("@main"));
+    assert!(error_dot.contains("\\nERROR"));
     assert!(error_dot.contains("hotspots running 0 · error 1"));
     assert!(error_dot.contains("color=\"#d62728\", penwidth=3"));
 }
