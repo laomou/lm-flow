@@ -10,6 +10,7 @@
 //! `Foreign` 只有 `drop_fn`、无从复制;`Native` 是类型擦除的 `Box<dyn Any>`,同理。
 
 use std::any::Any;
+use std::collections::BTreeMap;
 use std::ffi::{c_void, CString};
 use std::sync::Arc;
 
@@ -62,6 +63,14 @@ pub unsafe trait InteropType: Any + Send + Sync {
     const TYPE_NAME: &'static str;
 }
 
+/// A registered custom type's cross-language identity and fixed payload layout.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TypeDescriptor {
+    pub name: String,
+    pub size: usize,
+    pub align: usize,
+}
+
 /// 单个元素的字节数;未知 dtype 返回 0。
 pub fn dtype_size(dt: i32) -> usize {
     match dt {
@@ -96,16 +105,110 @@ pub fn fnv1a_type_id(mangled_name: &str) -> u64 {
     }
 }
 
-/// 用户注册的自定义类型名(用于诊断输出)。
-static TYPE_NAMES: std::sync::LazyLock<std::sync::Mutex<std::collections::BTreeMap<u64, String>>> =
-    std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::BTreeMap::new()));
+#[derive(Default)]
+struct TypeRegistry {
+    by_id: BTreeMap<u64, TypeDescriptor>,
+    by_name: BTreeMap<String, u64>,
+}
 
-/// 为某个 `type_id` 登记可读名字。同 id 重复登记以最后一次为准。
+static TYPE_REGISTRY: std::sync::LazyLock<std::sync::Mutex<TypeRegistry>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(TypeRegistry::default()));
+
+/// 为某个 `type_id` 登记可读名字。保留一期 API；只登记诊断名，不声明布局。
+///
+/// 已存在严格描述符时不会降级或改名。新代码应优先使用
+/// [`register_type_descriptor`]。
 pub fn register_type_name(id: u64, name: &str) {
-    TYPE_NAMES
+    let mut registry = TYPE_REGISTRY.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(existing_id) = registry.by_name.get(name).copied() {
+        if existing_id != id
+            && registry
+                .by_id
+                .get(&existing_id)
+                .is_some_and(|descriptor| descriptor.size != 0 || descriptor.align != 0)
+        {
+            return;
+        }
+    }
+    if let Some(existing) = registry.by_id.get(&id).cloned() {
+        if existing.size != 0 || existing.align != 0 {
+            return;
+        }
+        registry.by_name.remove(&existing.name);
+    }
+    registry.by_name.insert(name.to_string(), id);
+    registry.by_id.insert(
+        id,
+        TypeDescriptor {
+            name: name.to_string(),
+            size: 0,
+            align: 0,
+        },
+    );
+}
+
+/// Strictly register a custom type's stable name and ABI layout.
+///
+/// Re-registering the exact same descriptor is idempotent. Reusing an id or name for a different
+/// layout is rejected so a hash collision or inconsistent declaration cannot silently pass the
+/// port contract's numeric `type_id` check.
+pub fn register_type_descriptor(id: u64, name: &str, size: usize, align: usize) -> Result<()> {
+    if id < 16 {
+        return Err(Error::InvalidArg(format!(
+            "custom type id {id} is reserved; custom ids must be >= 16"
+        )));
+    }
+    if name.is_empty() {
+        return Err(Error::InvalidArg(
+            "custom type name must not be empty".into(),
+        ));
+    }
+    if size == 0 || align == 0 || !align.is_power_of_two() {
+        return Err(Error::InvalidArg(format!(
+            "custom type `{name}` has invalid layout: size={size}, align={align}"
+        )));
+    }
+
+    let descriptor = TypeDescriptor {
+        name: name.to_string(),
+        size,
+        align,
+    };
+    let mut registry = TYPE_REGISTRY.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(existing_id) = registry.by_name.get(name) {
+        if *existing_id != id {
+            return Err(Error::InvalidArg(format!(
+                "custom type name `{name}` is already registered with id {existing_id}, \
+                 cannot reuse it with id {id}"
+            )));
+        }
+    }
+    if let Some(existing) = registry.by_id.get(&id) {
+        if existing == &descriptor {
+            return Ok(());
+        }
+        if existing.name == name && existing.size == 0 && existing.align == 0 {
+            registry.by_id.insert(id, descriptor);
+            return Ok(());
+        }
+        return Err(Error::InvalidArg(format!(
+            "custom type id {id} is already registered as `{}` (size={}, align={}), \
+             cannot register `{name}` (size={size}, align={align})",
+            existing.name, existing.size, existing.align
+        )));
+    }
+    registry.by_name.insert(name.to_string(), id);
+    registry.by_id.insert(id, descriptor);
+    Ok(())
+}
+
+pub fn type_descriptor(id: u64) -> Option<TypeDescriptor> {
+    TYPE_REGISTRY
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .insert(id, name.to_string());
+        .by_id
+        .get(&id)
+        .cloned()
 }
 
 /// 类型标识的可读名字 —— 让「类型不符」的报错能指出是什么类型,而不是两个数字。
@@ -119,11 +222,12 @@ pub fn type_name(id: u64) -> String {
         type_id::STR => "Str".to_string(),
         type_id::BUFFER => "Buffer".to_string(),
         type_id::HOST_OBJECT => "HostObject".to_string(),
-        other => TYPE_NAMES
+        other => TYPE_REGISTRY
             .lock()
             .unwrap_or_else(|e| e.into_inner())
+            .by_id
             .get(&other)
-            .cloned()
+            .map(|descriptor| descriptor.name.clone())
             .unwrap_or_else(|| format!("type#{other}")),
     }
 }
@@ -238,6 +342,7 @@ pub struct Foreign {
     pub ptr: *mut c_void,
     pub drop_fn: Option<unsafe extern "C" fn(*mut c_void)>,
     pub type_id: u64,
+    pub byte_size: u64,
 }
 
 impl Drop for Foreign {
@@ -282,8 +387,8 @@ impl Payload {
 
     pub fn byte_size(&self) -> u64 {
         match self {
-            // 引擎不知道这两种的尺寸,计 0(见 flow.h 全局水位说明)
-            Payload::Native(_) | Payload::Foreign(_) => 0,
+            Payload::Native(_) => 0,
+            Payload::Foreign(f) => f.byte_size,
             Payload::Builtin(b) => b.byte_size(),
         }
     }
@@ -361,7 +466,13 @@ impl Packet {
     /// A value whose cross-language representation is declared by [`InteropType`].
     pub fn from_interop<T: InteropType>(value: T) -> Self {
         let type_id = fnv1a_type_id(T::TYPE_NAME);
-        register_type_name(type_id, T::TYPE_NAME);
+        register_type_descriptor(
+            type_id,
+            T::TYPE_NAME,
+            std::mem::size_of::<T>(),
+            std::mem::align_of::<T>(),
+        )
+        .expect("conflicting InteropType declaration");
         // 安全性:InteropType 的 unsafe impl 承诺布局与稳定类型名的契约。
         unsafe { Self::new_interop(value, type_id) }
     }
@@ -396,6 +507,7 @@ impl Packet {
                 ptr,
                 drop_fn: Some(drop_boxed::<T>),
                 type_id,
+                byte_size: type_descriptor(type_id).map_or(0, |descriptor| descriptor.size as u64),
             }))),
             ts: Timestamp::unset(),
         }
@@ -460,6 +572,7 @@ impl Packet {
                 ptr,
                 drop_fn,
                 type_id,
+                byte_size: type_descriptor(type_id).map_or(0, |descriptor| descriptor.size as u64),
             }))),
             ts: Timestamp::unset(),
         }
@@ -790,8 +903,63 @@ mod tests {
         let p = Packet::from_interop(Point { x: 3, y: 4 });
         assert_eq!(p.type_id(), fnv1a_type_id(Point::TYPE_NAME));
         assert_eq!(type_name(p.type_id()), Point::TYPE_NAME);
+        assert_eq!(p.byte_size(), std::mem::size_of::<Point>() as u64);
         let point = unsafe { &*(p.foreign_ptr().unwrap() as *const Point) };
         assert_eq!((point.x, point.y), (3, 4));
+    }
+
+    #[test]
+    fn strict_type_registration_rejects_identity_and_layout_conflicts() {
+        let id = fnv1a_type_id("lmflow.test.StrictRegistration");
+        register_type_descriptor(id, "lmflow.test.StrictRegistration", 8, 4).unwrap();
+        register_type_descriptor(id, "lmflow.test.StrictRegistration", 8, 4).unwrap();
+
+        let layout_error =
+            register_type_descriptor(id, "lmflow.test.StrictRegistration", 16, 8).unwrap_err();
+        assert!(layout_error.to_string().contains("already registered"));
+
+        let name_error =
+            register_type_descriptor(id, "lmflow.test.OtherRegistration", 8, 4).unwrap_err();
+        assert!(name_error.to_string().contains("already registered"));
+    }
+
+    #[test]
+    fn name_only_registration_can_upgrade_to_strict_descriptor() {
+        let name = "lmflow.test.RegistryUpgrade";
+        let id = fnv1a_type_id(name);
+        register_type_name(id, name);
+        register_type_descriptor(id, name, 24, 8).unwrap();
+        assert_eq!(
+            type_descriptor(id),
+            Some(TypeDescriptor {
+                name: name.to_string(),
+                size: 24,
+                align: 8,
+            })
+        );
+    }
+
+    #[test]
+    fn strict_descriptor_cannot_be_shadowed_by_legacy_name_registration() {
+        let name = "lmflow.test.ProtectedDescriptor";
+        let id = fnv1a_type_id(name);
+        register_type_descriptor(id, name, 8, 8).unwrap();
+        register_type_name(id + 1, name);
+        assert!(register_type_descriptor(id + 1, name, 8, 8).is_err());
+        assert_eq!(type_descriptor(id).unwrap().name, name);
+    }
+
+    #[test]
+    fn registered_foreign_payload_uses_descriptor_size() {
+        unsafe extern "C" fn drop_u64(p: *mut c_void) {
+            drop(unsafe { Box::from_raw(p as *mut u64) });
+        }
+        let name = "lmflow.test.ForeignSize";
+        let id = fnv1a_type_id(name);
+        register_type_descriptor(id, name, 8, 8).unwrap();
+        let ptr = Box::into_raw(Box::new(42u64)) as *mut c_void;
+        let packet = unsafe { Packet::from_foreign(ptr, id, Some(drop_u64)) };
+        assert_eq!(packet.byte_size(), 8);
     }
 
     #[test]
@@ -801,7 +969,7 @@ mod tests {
             Packet::from_builtin(Builtin::Bytes(vec![0; 100])).byte_size(),
             100
         );
-        // 自定义 payload 引擎不知尺寸,计 0
+        // 未声明布局的 Rust-native payload 仍无法计量。
         assert_eq!(Packet::new(0u64).byte_size(), 0);
     }
 

@@ -134,7 +134,7 @@ pub struct GraphConfig {
     /// 全局水位:全图在途包数上限(0 = 不限)
     #[serde(default)]
     pub max_queued_packets: usize,
-    /// 全局水位:全图在途字节上限(0 = 不限;仅内建 payload 可计)
+    /// 全局水位:全图在途字节上限(0 = 不限;内建 payload 与已注册布局的自定义类型可计)
     #[serde(default)]
     pub max_queued_bytes: u64,
     /// 单次算子回调超过该时长即打 WARN(0 = 关闭)

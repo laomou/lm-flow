@@ -29,6 +29,11 @@ to each GitHub Release.
   rejects ids `0..=15`, which are reserved for engine-owned built-in layouts. Use
   `Packet::from_i64` / other built-in constructors, or implement `InteropType` and call
   `Packet::from_interop`.
+- **Strict custom type descriptors.** Custom identities can now register the stable name,
+  `size`, and `align` behind a `type_id`. Exact repeats are idempotent, while id/name/layout
+  conflicts fail instead of silently passing a numeric hash comparison. C++ typed packets and
+  contracts register automatically; Rust `InteropType` does the same. Registered fixed-size
+  foreign payloads now contribute their shallow object size to byte-watermark accounting.
 
 ## [0.2.0] — 2026-08-04
 
@@ -102,9 +107,9 @@ to each GitHub Release.
 
 ### Notes
 
-- `LMFLOW_ABI_VERSION` stays at **1**. The only ABI change is the added
-  `lmflow_graph_reset` function; no cross-boundary struct layout changed, which is the
-  documented trigger for bumping it.
+- `LMFLOW_ABI_VERSION` stays at **1**. This release only adds functions
+  (`lmflow_graph_reset` and the type-descriptor queries/registration); no cross-boundary struct
+  layout changed, which is the documented trigger for bumping it.
 - Both F16 and multi-port `batch` *widen* what is accepted — configurations that previously
   failed at graph-build time now work. Nothing that used to work behaves differently.
 
