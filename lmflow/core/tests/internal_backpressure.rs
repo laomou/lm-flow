@@ -93,6 +93,15 @@ impl Kernel for CloseJoinCount {
     }
 }
 
+#[derive(Default)]
+struct PortJoinCount;
+
+impl Kernel for PortJoinCount {
+    fn process(&mut self, _context: &mut KernelCtx) -> lmflow::Result<()> {
+        Ok(())
+    }
+}
+
 fn register_test_kernels() {
     let _ = register_kernel::<SlowPass>("InternalBpSlowPass");
     let _ = register_kernel::<CountingSource>("InternalBpCountingSource");
@@ -101,6 +110,7 @@ fn register_test_kernels() {
     let _ = register_kernel::<EmitOnClose>("InternalBpEmitOnClose");
     let _ = register_kernel::<JoinCount>("InternalBpJoinCount");
     let _ = register_kernel::<CloseJoinCount>("InternalBpCloseJoinCount");
+    let _ = register_kernel::<PortJoinCount>("InternalBpPortJoinCount");
 }
 
 #[test]
@@ -231,6 +241,137 @@ input_ports: [in]
 }
 
 #[test]
+fn per_port_capacities_override_node_defaults() {
+    register_test_kernels();
+    let graph = Graph::from_yaml(
+        r#"
+nodes:
+  - { name: burst, kernel: InternalBpBurst, input_ports: [in], output_ports: [wide] }
+  - name: join
+    kernel: InternalBpPortJoinCount
+    input_ports: [wide, gate]
+    output_ports: []
+    input_queue_capacity: 1
+    input_queue_capacities: { wide: 2, gate: 0 }
+    input_queue_byte_capacity: 8
+    input_queue_byte_capacities: { wide: 16, gate: 0 }
+input_ports: [in, gate]
+"#,
+    )
+    .unwrap();
+    graph.start().unwrap();
+    graph
+        .input("in")
+        .unwrap()
+        .send(Packet::from_i64(1).at(Timestamp(0)))
+        .unwrap();
+    graph.close_all_inputs();
+    graph.wait_done().unwrap();
+}
+
+#[test]
+fn byte_capacity_preserves_packets_and_bounds_queue_depth() {
+    register_test_kernels();
+    let graph = Graph::from_yaml(
+        r#"
+executors:
+  - { name: pool, num_threads: 1 }
+nodes:
+  - { name: producer, kernel: PassThrough, input_ports: [in], output_ports: [mid] }
+  - name: consumer
+    kernel: InternalBpSlowPass
+    input_ports: [mid]
+    output_ports: [out]
+    executor: pool
+    input_queue_byte_capacity: 20
+input_ports: [in]
+output_ports: [out]
+"#,
+    )
+    .unwrap();
+    let output = graph.add_poller("out").unwrap();
+    graph.start().unwrap();
+    let input = graph.input("in").unwrap();
+    for timestamp in 0..20 {
+        input
+            .send(Packet::from_bytes(vec![timestamp as u8; 10]).at(Timestamp(timestamp)))
+            .unwrap();
+    }
+    graph.close_all_inputs();
+    graph.wait_done_timeout(Duration::from_secs(5)).unwrap();
+    assert_eq!(std::iter::from_fn(|| output.next()).count(), 20);
+    assert!(graph.node_stats(1).unwrap().peak_queue_depth <= 2);
+}
+
+#[test]
+fn emitted_batch_larger_than_byte_capacity_fails_loudly() {
+    register_test_kernels();
+    let graph = Graph::from_yaml(
+        r#"
+nodes:
+  - { name: producer, kernel: PassThrough, input_ports: [in], output_ports: [mid] }
+  - { name: sink, kernel: Sink, input_ports: [mid], output_ports: [], input_queue_byte_capacity: 8 }
+input_ports: [in]
+"#,
+    )
+    .unwrap();
+    graph.start().unwrap();
+    graph
+        .input("in")
+        .unwrap()
+        .send(Packet::from_bytes(vec![0; 9]).at(Timestamp(0)))
+        .unwrap();
+    graph.close_all_inputs();
+    let error = graph.wait_done().unwrap_err();
+    assert!(error.to_string().contains("batch of 9 bytes"));
+}
+
+#[test]
+fn byte_capacity_rejects_unmeasurable_payloads() {
+    register_test_kernels();
+    let graph = Graph::from_yaml(
+        r#"
+nodes:
+  - { name: producer, kernel: PassThrough, input_ports: [in], output_ports: [mid] }
+  - { name: sink, kernel: Sink, input_ports: [mid], output_ports: [], input_queue_byte_capacity: 8 }
+input_ports: [in]
+"#,
+    )
+    .unwrap();
+    graph.start().unwrap();
+    graph
+        .input("in")
+        .unwrap()
+        .send(Packet::new(1u32).at(Timestamp(0)))
+        .unwrap();
+    graph.close_all_inputs();
+    let error = graph.wait_done().unwrap_err();
+    assert!(error.to_string().contains("unmeasurable payload"));
+}
+
+#[test]
+fn byte_capacity_accepts_measurable_zero_length_payloads() {
+    register_test_kernels();
+    let graph = Graph::from_yaml(
+        r#"
+nodes:
+  - { name: producer, kernel: PassThrough, input_ports: [in], output_ports: [mid] }
+  - { name: sink, kernel: Sink, input_ports: [mid], output_ports: [], input_queue_byte_capacity: 1 }
+input_ports: [in]
+"#,
+    )
+    .unwrap();
+    graph.start().unwrap();
+    graph
+        .input("in")
+        .unwrap()
+        .send(Packet::from_bytes(Vec::new()).at(Timestamp(0)))
+        .unwrap();
+    graph.close_all_inputs();
+    graph.wait_done().unwrap();
+}
+
+#[test]
 fn lossless_capacity_cannot_be_combined_with_fixed_size() {
     register_test_kernels();
     let error = Graph::from_yaml(
@@ -247,6 +388,43 @@ input_ports: [in]
     )
     .unwrap_err();
     assert!(error.to_string().contains("cannot be combined"));
+}
+
+#[test]
+fn capacity_override_rejects_unknown_port() {
+    register_test_kernels();
+    let error = Graph::from_yaml(
+        r#"
+nodes:
+  - name: sink
+    kernel: Sink
+    input_ports: [in]
+    output_ports: []
+    input_queue_capacities: { typo: 2 }
+input_ports: [in]
+"#,
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("unknown input port `typo`"));
+}
+
+#[test]
+fn capacity_override_rejects_back_edge_port() {
+    register_test_kernels();
+    let error = Graph::from_yaml(
+        r#"
+nodes:
+  - name: join
+    kernel: InternalBpJoinCount
+    input_ports: [in, feedback]
+    output_ports: []
+    back_edges: [feedback]
+    input_queue_byte_capacities: { feedback: 8 }
+input_ports: [in, feedback]
+"#,
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("back-edge input `feedback`"));
 }
 
 #[test]

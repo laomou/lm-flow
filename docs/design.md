@@ -660,7 +660,8 @@ B 规则:**每个输入口都有 ≥1 包** → 取各口队首组成一次 `Pro
 | `max_queued_packets` / `max_queued_bytes`(全局水位,**默认 0 = 不限**) | 全图硬预算,但只在图输入口施压 | `send` 等排水,`try_send` 返回 `LMFLOW_ERR_WOULD_BLOCK` |
 | `fixed_size` 输入策略(**按节点输入口**,非按边) | 有界 + **有意有损** | 丢最旧;计数 + 首次 WARN。不阻塞上游 |
 | 有界 Poller(`capacity` + overflow policy) | 图输出订阅队列的局部上界 | `block` 无损等待宿主排水;`drop_oldest` / `drop_newest` / `latest` 有损并计数告警 |
-| `input_queue_capacity`(**按节点正向输入口**) | 内部边无损硬上界 | 满时生产者保留 staging、释放 worker;下游出队后协作式恢复 |
+| `input_queue_capacity` / `input_queue_capacities` | 内部输入口无损包数硬上界 | 满时生产者保留 staging、释放 worker;下游出队后协作式恢复 |
+| `input_queue_byte_capacity` / `input_queue_byte_capacities` | 内部输入口可计量 payload 浅字节硬上界 | 队列字节 + pending staging reservation 一起判定;不可计量 payload 明确拒绝 |
 
 > ⚠ **本表曾经是错的**,而且错在一条安全属性上:它写着「图输入口有界(`max_queue_size`),
 > 满时 `send` 阻塞至有空位」。实际上 `max_queue_size` 在全引擎**只被 `warn_if_over_soft_limit`
@@ -697,11 +698,21 @@ C 迅速填满 D 的输入队列而阻塞;D 却要等 B 那一路才能消费;B 
 新输入。任一下游从输入队列弹包后重试 pending flush。限制的是**节点继续产出**,
 不是占住线程等待,diamond 不形成线程循环等待。
 
-容量按节点配置,每个正向输入口使用同一上限;`0` 表示不限(历史行为)。它与
-`fixed_size` 互斥:前者无损暂停,后者有损丢最旧。一次调用向同一输出口 emit 的批量若
-自身大于容量会明确报错,避免永远无法满足的等待。若时间戳对齐导致下游永远不能消费、
-所有 worker 又已空闲,等待接口会报告 `internal backpressure cannot make progress`,
-而不是永久挂起。
+`input_queue_capacity` 是节点所有正向输入口的默认包数上限;
+`input_queue_capacities: {video: 2, metadata: 32}` 按端口名覆盖,覆盖值 `0` 表示该口不限。
+字节限制同理:`input_queue_byte_capacity` 是默认值,
+`input_queue_byte_capacities` 按端口覆盖。四个字段都以 `0` 表示不限(历史行为)。
+
+字节计量使用 `Packet::byte_size()` 的 payload **浅尺寸**。队列内已有字节和并发生产者
+已经预留、仍留在 staging 的字节一起参与容量判定,因此不会因 flush 尚未真正入队而超限。
+内建 payload 与已注册固定布局 descriptor 的 Foreign payload 可计量;Rust `Packet::new`
+等不可计量的非空 payload 在字节硬限端口上会明确报错,不能按 0 字节绕过限制。它仍不包含
+`std::vector` 等自定义对象内部另行分配的堆内存,也不试图按共享 `Arc` 的唯一物理内存去重。
+
+这些无损容量与 `fixed_size` 互斥:前者暂停生产者,后者有损丢最旧。一次调用向同一输出口
+emit 的批量若自身大于包数或字节容量会明确报错,避免永远无法满足的等待。若时间戳对齐
+导致下游永远不能消费、所有 worker 又已空闲,等待接口会报告
+`internal backpressure cannot make progress`,而不是永久挂起。
 
 **阻塞 `send` 命中全局水位时怎么等** —— 分两种执行模型:
 

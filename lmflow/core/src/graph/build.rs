@@ -11,7 +11,7 @@
 use std::cell::UnsafeCell;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicBool, AtomicUsize};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Instant;
 
@@ -293,9 +293,31 @@ impl GraphInner {
                 input_queues: (0..ins.len())
                     .map(|_| Mutex::new(VecDeque::new()))
                     .collect(),
-                input_queue_capacity: (n.input_queue_capacity != 0)
-                    .then_some(n.input_queue_capacity),
+                input_queue_capacity: ins
+                    .names()
+                    .iter()
+                    .map(|port| {
+                        n.input_queue_capacities
+                            .get(port)
+                            .copied()
+                            .unwrap_or(n.input_queue_capacity)
+                    })
+                    .map(|capacity| (capacity != 0).then_some(capacity))
+                    .collect(),
+                input_queue_byte_capacity: ins
+                    .names()
+                    .iter()
+                    .map(|port| {
+                        n.input_queue_byte_capacities
+                            .get(port)
+                            .copied()
+                            .unwrap_or(n.input_queue_byte_capacity)
+                    })
+                    .map(|capacity| (capacity != 0).then_some(capacity))
+                    .collect(),
                 input_queue_reserved: (0..ins.len()).map(|_| AtomicUsize::new(0)).collect(),
+                input_queue_reserved_bytes: (0..ins.len()).map(|_| AtomicU64::new(0)).collect(),
+                input_queue_bytes: (0..ins.len()).map(|_| AtomicU64::new(0)).collect(),
                 input_closed: (0..ins.len()).map(|_| AtomicBool::new(false)).collect(),
                 on_error: OnError::from_config(&n.on_error),
                 min_period: if n.rate > 0.0 {

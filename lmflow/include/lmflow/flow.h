@@ -657,6 +657,12 @@ const char* lmflow_graph_last_error(LMFlowGraph*);
  * 它限制每个正向输入口;满时生产者保留已完成输出并让出 worker,下游出队后恢复,
  * 因此不会用「阻塞 worker」的方式把 diamond 图锁死。0 = 不限;不可与有损
  * input_policy: fixed_size 同时使用。
+ * 可按端口覆盖:
+ *     input_queue_capacities: { video: 2, metadata: 32, control: 0 }
+ * 字节硬限使用 payload 浅尺寸,并计入仍在 staging 的预留:
+ *     input_queue_byte_capacity: 67108864
+ *     input_queue_byte_capacities: { video: 16777216, metadata: 1048576 }
+ * 不可计量的非空 payload 在字节硬限端口上会报错,不会按 0 字节绕过限制。
  *
  * 因此给整张图一个总预算(YAML 顶层):
  *     max_queued_packets: 500          # 全图在途包数上限(0 = 不限)

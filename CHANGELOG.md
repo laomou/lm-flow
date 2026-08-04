@@ -12,6 +12,11 @@ to each GitHub Release.
 
 ### Added
 
+- **Per-port packet and byte capacities for internal inputs.** Nodes can override the default
+  `input_queue_capacity` with `input_queue_capacities`, and can bound measurable payload bytes with
+  `input_queue_byte_capacity` / `input_queue_byte_capacities`. Byte limits include pending staging
+  reservations, reject oversized batches, and reject unmeasurable payloads rather than silently
+  treating them as zero bytes.
 - **Cooperative lossless backpressure for internal edges.** A node can set
   `input_queue_capacity` to bound each forward input queue without blocking executor threads.
   Producers retain completed staging and yield; dequeue resumes the pending flush. Source nodes,

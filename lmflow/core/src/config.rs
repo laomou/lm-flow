@@ -85,6 +85,18 @@ pub struct NodeConfig {
     /// 等下游弹包后协作式恢复刷新。与有损 `fixed_size` 互斥。
     #[serde(default)]
     pub input_queue_capacity: usize,
+    /// 按输入口名覆盖 `input_queue_capacity`。值 0 表示该口不限包数。
+    #[serde(default)]
+    pub input_queue_capacities: std::collections::BTreeMap<String, usize>,
+    /// 每个正向输入口的无损字节容量。0 = 不限。
+    ///
+    /// 计量使用 `Packet::byte_size()` 的 payload 浅尺寸。启用后，不可计量的非空 payload
+    /// 会明确报错，而不是按 0 字节绕过硬限制。
+    #[serde(default)]
+    pub input_queue_byte_capacity: u64,
+    /// 按输入口名覆盖 `input_queue_byte_capacity`。值 0 表示该口不限字节数。
+    #[serde(default)]
+    pub input_queue_byte_capacities: std::collections::BTreeMap<String, u64>,
     /// 子图名(ADR #27):非空 = 本节点是该子图的实例,建图期展开内联;与 `kernel` 二选一。
     #[serde(default)]
     pub r#type: String,
@@ -198,6 +210,9 @@ impl Default for NodeConfig {
             options: serde_yaml::Value::default(),
             input_policy: InputPolicyConfig::default(),
             input_queue_capacity: 0,
+            input_queue_capacities: std::collections::BTreeMap::new(),
+            input_queue_byte_capacity: 0,
+            input_queue_byte_capacities: std::collections::BTreeMap::new(),
             r#type: String::new(),
             back_edges: Vec::new(),
             on_error: String::new(),
@@ -330,9 +345,49 @@ impl GraphConfig {
                 )))
                 }
             }
-            if n.input_queue_capacity != 0 && n.input_policy.r#type == "fixed_size" {
+            let port_names: Vec<String> = n
+                .input_ports
+                .iter()
+                .map(|d| parse_port_spec(d).map(|s| s.name))
+                .collect::<Result<_>>()?;
+            for port in n
+                .input_queue_capacities
+                .keys()
+                .chain(n.input_queue_byte_capacities.keys())
+            {
+                if !port_names.contains(port) {
+                    return Err(Error::InvalidArg(format!(
+                        "node `{who}`: input queue capacity override references unknown input port `{port}`"
+                    )));
+                }
+            }
+            for (port, capacity) in &n.input_queue_capacities {
+                if *capacity != 0 && n.back_edges.contains(port) {
+                    return Err(Error::InvalidArg(format!(
+                        "node `{who}`: packet capacity override for back-edge input `{port}` is not supported; \
+                         back-edges always use their capacity-1 latest-value register"
+                    )));
+                }
+            }
+            for (port, capacity) in &n.input_queue_byte_capacities {
+                if *capacity != 0 && n.back_edges.contains(port) {
+                    return Err(Error::InvalidArg(format!(
+                        "node `{who}`: byte capacity override for back-edge input `{port}` is not supported; \
+                         back-edges always use their capacity-1 latest-value register"
+                    )));
+                }
+            }
+            let has_lossless_capacity = n.input_queue_capacity != 0
+                || n.input_queue_byte_capacity != 0
+                || n.input_queue_capacities
+                    .values()
+                    .any(|&capacity| capacity != 0)
+                || n.input_queue_byte_capacities
+                    .values()
+                    .any(|&capacity| capacity != 0);
+            if has_lossless_capacity && n.input_policy.r#type == "fixed_size" {
                 return Err(Error::InvalidArg(format!(
-                    "node `{who}`: input_queue_capacity (lossless block) cannot be combined with \
+                    "node `{who}`: lossless input queue capacities cannot be combined with \
                      input_policy=fixed_size (lossy drop-oldest)"
                 )));
             }
@@ -347,11 +402,6 @@ impl GraphConfig {
 
             // 反馈环:back_edges 名字须是本节点输入口;须留至少一个正向输入口驱动;不得与 sync_set 冲突。
             if !n.back_edges.is_empty() {
-                let port_names: Vec<String> = n
-                    .input_ports
-                    .iter()
-                    .map(|d| parse_port_spec(d).map(|s| s.name))
-                    .collect::<Result<_>>()?;
                 for be in &n.back_edges {
                     if !port_names.contains(be) {
                         return Err(Error::InvalidArg(format!(
