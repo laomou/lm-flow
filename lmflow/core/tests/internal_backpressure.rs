@@ -361,13 +361,14 @@ input_ports: [in, gate]
     let blocked_dot = graph.to_dot_with_stats();
     assert!(blocked_dot.contains("ports:"));
     assert!(blocked_dot.contains("mid 1/1 r"));
-    assert!(blocked_dot.contains("mid 1/1 r0 BLOCKED"));
-    assert!(blocked_dot.contains("gate 0/∞ r0 WAITING"));
+    assert!(blocked_dot.contains("mid 1/1 r0 BLOCKED: queue full"));
+    assert!(blocked_dot.contains("gate 0/∞ r0 WAITING: aligned input"));
     assert!(blocked_dot.contains("queue 1/1 · reserved"));
     assert!(blocked_dot.contains("bp 1×"));
     assert!(blocked_dot.contains("color=\"#d62728\""));
     assert!(blocked_dot.contains("BLOCKED"));
-    assert!(blocked_dot.contains("WAITING for aligned input"));
+    assert!(blocked_dot.contains("WAITING: missing aligned input"));
+    assert!(blocked_dot.contains("reason consumer queue full"));
     assert!(blocked_dot.contains("color=\"#d6a700\""));
     assert!(blocked_dot.contains("blocked 1 · waiting 1"));
     let blocked_durations = blocked_dot

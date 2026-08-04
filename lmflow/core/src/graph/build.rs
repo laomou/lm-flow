@@ -365,6 +365,7 @@ impl GraphInner {
             required_side_packets: required,
             epoch: Instant::now(),
             run_started_us: AtomicI64::new(0),
+            dot_intervals: Mutex::new(super::dot::DotIntervalBaselines::default()),
             timing,
         })
     }

@@ -74,6 +74,15 @@ to each GitHub Release.
   details from inactive nodes. Long node, kernel, cluster, executor, and port labels are truncated
   while SVG tooltips retain full names. Stable executor/state ordering, executor groups, and tuned
   rank spacing reduce crossings without merging distinct multi-port edges.
+- **Interval Graphviz diagnostics and bottleneck reasons.** Statistics views retain cumulative
+  totals while showing deltas and throughput since the previous export of the same view (or since
+  `start` for the first export). Edges and Pollers include interval backpressure/drop changes and
+  identify likely causes such as a full consumer queue, missing aligned input, slow downstream
+  drain, global packet watermark, or slow/dropping subscriber. Reset clears the private baselines.
+- **Portable Python binding type identities.** Binding-only wrapper classes now live outside the
+  public C++ `lmflow` namespace, eliminating LTO ODR conflicts with `flow.hpp`. MSVC registration
+  bindings use unambiguous lambdas, and the Windows wheel step stops immediately if installation
+  fails instead of running tests against a missing package.
 - **C ABI version 2.** The boolean `lmflow_graph_to_dot` entry point is removed; callers must use
   `lmflow_graph_to_dot_view` with an explicit topology, compact, or diagnostics view.
 - **Consistent and render-tested Graphviz snapshots.** One statistics-enabled DOT export now uses

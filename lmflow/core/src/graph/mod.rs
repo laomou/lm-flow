@@ -1100,6 +1100,8 @@ pub struct GraphInner {
     epoch: Instant,
     /// 本轮 `start` 的时刻(相对 `epoch` 的微秒 + 1);0 表示尚未开始。
     run_started_us: AtomicI64,
+    /// Compact / Diagnostics 各自相邻两次导出之间的私有基线；不作为宿主查询 API 暴露。
+    dot_intervals: Mutex<dot::DotIntervalBaselines>,
     /// 是否为每次算子回调计时。建图时由 `config.stats_timing` 与 `watchdog_ms` 定下,
     /// 之后不变(故是普通 bool,不必原子)。见 `GraphConfig::stats_timing`。
     timing: bool,
@@ -1621,6 +1623,10 @@ impl GraphInner {
         self.set_state(State::Running);
         self.run_started_us
             .store(self.epoch_us().saturating_add(1), Ordering::Relaxed);
+        *self
+            .dot_intervals
+            .lock()
+            .expect("DOT interval lock poisoned") = dot::DotIntervalBaselines::default();
 
         // 拉起线程池。必须在 Arc 存在之后:工作线程持 Weak,避免 Arc 环。
         let weak = Arc::downgrade(self);
@@ -3014,6 +3020,10 @@ impl GraphInner {
         }
         self.paused.store(false, Ordering::SeqCst);
         self.run_started_us.store(0, Ordering::Relaxed);
+        *self
+            .dot_intervals
+            .lock()
+            .expect("DOT interval lock poisoned") = dot::DotIntervalBaselines::default();
 
         // 6. 最后置 state —— 前面的清理对「下一次 start」全部可见后,才对外表现为可 start。
         *self.state.lock().expect("state lock poisoned") = State::Initialized;
