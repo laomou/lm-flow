@@ -660,8 +660,8 @@ B 规则:**每个输入口都有 ≥1 包** → 取各口队首组成一次 `Pro
 | `max_queued_packets` / `max_queued_bytes`(全局水位,**默认 0 = 不限**) | 全图硬预算,但只在图输入口施压 | `send` 等排水,`try_send` 返回 `LMFLOW_ERR_WOULD_BLOCK` |
 | `fixed_size` 输入策略(**按节点输入口**,非按边) | 有界 + **有意有损** | 丢最旧;计数 + 首次 WARN。不阻塞上游 |
 | 有界 Poller(`capacity` + overflow policy) | 图输出订阅队列的局部上界 | `block` 无损等待宿主排水;`drop_oldest` / `drop_newest` / `latest` 有损并计数告警 |
-| `input_queue_capacity` / `input_queue_capacities` | 内部输入口无损包数硬上界 | 满时生产者保留 staging、释放 worker;下游出队后协作式恢复 |
-| `input_queue_byte_capacity` / `input_queue_byte_capacities` | 内部输入口可计量 payload 浅字节硬上界 | 队列字节 + pending staging reservation 一起判定;不可计量 payload 明确拒绝 |
+| `input_queues.packets` / `input_queues.ports.*.packets` | 内部输入口无损包数硬上界 | 满时生产者保留 staging、释放 worker;下游出队后协作式恢复 |
+| `input_queues.bytes` / `input_queues.ports.*.bytes` | 内部输入口可计量 payload 浅字节硬上界 | 队列字节 + pending staging reservation 一起判定;不可计量 payload 明确拒绝 |
 
 > ⚠ **本表曾经是错的**,而且错在一条安全属性上:它写着「图输入口有界(`max_queue_size`),
 > 满时 `send` 阻塞至有空位」。实际上 `max_queue_size` 在全引擎**只被 `warn_if_over_soft_limit`
@@ -693,15 +693,15 @@ B 规则:**每个输入口都有 ≥1 包** → 取各口队首组成一次 `Pro
 C 迅速填满 D 的输入队列而阻塞;D 却要等 B 那一路才能消费;B 又在等 A 推进;
 而 A 已阻塞在 C 上 —— **循环等待,且不需要环形拓扑就会发生**。
 
-`input_queue_capacity` 因此不在 `dispatch` 里等待。当前调用完成后若下游容量不足,
+`input_queues` 因此不在 `dispatch` 里等待。当前调用完成后若下游容量不足,
 其 context 槽与 staging 保留在节点调度状态里,worker 立即返回线程池;该节点暂停认领
 新输入。任一下游从输入队列弹包后重试 pending flush。限制的是**节点继续产出**,
 不是占住线程等待,diamond 不形成线程循环等待。
 
-`input_queue_capacity` 是节点所有正向输入口的默认包数上限;
-`input_queue_capacities: {video: 2, metadata: 32}` 按端口名覆盖,覆盖值 `0` 表示该口不限。
-字节限制同理:`input_queue_byte_capacity` 是默认值,
-`input_queue_byte_capacities` 按端口覆盖。四个字段都以 `0` 表示不限(历史行为)。
+`input_queues.packets` / `bytes` 是节点所有正向输入口的默认上限;
+`input_queues.ports.video: {packets: 2, bytes: 16777216}` 按端口名覆盖。某个维度省略时
+继承节点默认值,显式 `0` 表示该端口该维度不限。配置只保留这一套统一语法,不再同时维护
+四个易混淆的拆分字段。
 
 字节计量使用 `Packet::byte_size()` 的 payload **浅尺寸**。队列内已有字节和并发生产者
 已经预留、仍留在 staging 的字节一起参与容量判定,因此不会因 flush 尚未真正入队而超限。
