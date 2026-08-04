@@ -23,7 +23,9 @@ if(LMFLOW_WITH_CV_TEST)
   list(APPEND _srcs "${LMFLOW_SRC}/cpp/tests/cv_test_register.cc")
 endif()
 
-pybind11_add_module(_lmflow ${_srcs})
+# 不启用 pybind11 默认附加的 LTO/strip。扩展主体只是薄绑定，Rust 引擎仍按自身
+# profile 优化；这里开 GCC full LTO 只会产生串行 LTRANS job 提示并拖慢 wheel 构建。
+pybind11_add_module(_lmflow NO_EXTRAS ${_srcs})
 target_include_directories(_lmflow PRIVATE "${LMFLOW_SRC}/include" "${NUMPY_INCLUDE}")
 target_link_libraries(_lmflow PRIVATE lmflow::core)
 add_dependencies(_lmflow flow_engine)  # cargo 先出库再链
