@@ -1326,8 +1326,53 @@ lm-flow/                          仓库根
 两处期望值都由**第三方实现(Python)独立算出**,不是从任一侧抄来的 —— 否则就是拿实现验证
 自己。为让编译期断言能穿透整条链,`NormalizeTypeId` 从 `inline` 改成了 `constexpr`。
 
+**上面这些都还抓不到跨编译器分歧** —— 它们钉的是**哈希函数**,在任何编译器上都同样通过。
+真正的互操作身份来自 `typeid(T).name()`,故另加一条:
+
+```cpp
+assert(lmflow::TypeId<int>() == 12638195996648667684ULL);   // 与 packet.rs 同源常量
+```
+
+`packet.rs` 断言「Rust 对字符串 `"i"` 的哈希 == 该常量」,**没有**断言「本编译器的
+`typeid(int).name()` 真的是 `"i"`」。这两件事不同,而后者才是跨语言实际比对的东西。
+
+分歧比「修饰方案不同」更彻底:Itanium ABI(GCC/Clang)下是 `"i"`,而 **MSVC 的
+`type_info::name()` 返回未修饰的可读名** —— `"int"`、`"struct Foo"`(修饰形式在
+`raw_name()`)。故 `FNV("i")` 与 `FNV("int")` 毫不相干。这条在新编译器上失败**正是想要的
+信号**:该平台自定义类型的 type_id 与其它平台不一致,跨工具链传该类型必须改用
+`LMFLOW_DECLARE_TYPE_NAME`。让它成为**被审阅的显式决定**,而不是静默上线。
+
 「证明宏真生效」那条做过负对照:把 `LMFLOW_DECLARE_TYPE_NAME` 改成 no-op,测试立即断言失败。
 只断言「id == 某常量」是不够的 —— 那条单独看,一个 no-op 宏也可能巧合通过。
+
+---
+
+### 13.6 多配置生成器下的 cargo profile(构建正确性)
+
+`CMAKE_BUILD_TYPE` **只对单配置生成器有意义**(Unix Makefiles、单配置 Ninja);多配置
+生成器(Ninja Multi-Config、Visual Studio)的配置是**构建期**由 `--config` 决定的,配置期
+读那个变量通常为空。`cmake/engine.cmake` 原先在配置期做 `if(CMAKE_BUILD_TYPE MATCHES ...)`,
+于是在多配置生成器下会**静默**退到 debug:
+
+```text
+cmake -B b -G "Ninja Multi-Config"
+cmake --build b --config Release --target flow_engine
+→ Finished `dev` profile [unoptimized + debuginfo]      # 要的是 Release
+```
+
+后果是 C++ 侧按 Release 编、却链进一个**未优化的 debug 引擎**,而且不给任何提示 ——
+正是本项目明确拒绝的静默失效。**这条在 Linux 上就能复现**,不是 Windows 专属问题
+(它是做 Windows 侦查时被发现的:windows-latest 默认生成器是多配置的 Visual Studio)。
+
+改法:用生成器表达式让 profile 跟随**实际构建的配置**;imported target 改用
+`IMPORTED_LOCATION_<CONFIG>` 并把 `RelWithDebInfo`/`MinSizeRel` 映到 release
+(cargo 只有 dev/release 两档);`COMMAND_EXPAND_LISTS` 让 Debug 下 `--release`
+展开为**无参数**而不是空字符串参数(cargo 会拒空参数)。单配置生成器行为不变。
+
+CI 守卫在 `cmake-sdk` job 里:配置一次 Ninja Multi-Config,对 Release / RelWithDebInfo /
+Debug 三个配置做 `ninja -n` 干跑,断言 profile 与 `--config` 一致,并额外确认真实的
+`--release` flag 在生成的构建文件里。只配置 + 干跑,不真编译,秒级。
+做过负对照:把 `engine.cmake` 改回原样,守卫立即失败。
 
 ---
 
@@ -1396,6 +1441,25 @@ lm-flow/                          仓库根
 **验证覆盖上的边界**
 
 - **Windows(MSVC)未验证**:CI 覆盖 linux-x86_64/aarch64、macOS、iOS、Android;无 Windows。
+  已做过一轮**只读侦查**,结论是缺口比字面看着窄,记录在此免得下次重查:
+  - **Rust 引擎与四个头文件已经是可移植的**(用构建验证过,不是读代码):
+    `cargo check --all-targets --target x86_64-pc-windows-msvc` 干净,`clippy -D warnings` 干净,
+    windows-gnu 可完整链接。`executor.rs` 的绑核/实时优先级**已有真正的 no-op 兜底分支**
+    (`cfg(not(any(linux, android, macos, ios)))`),且**零 libc crate 依赖**(在 cfg 内直接
+    声明符号)。四个头无 `__attribute__`/`typeof`/VLA/匿名联合/`#pragma`,全用定宽整型
+    → LLP64 非问题。18 个 C++ 算子亦无 POSIX 头、无 GCC 扩展。
+  - **符号导出不需要 `.def`/`dllexport`**:131 个 C ABI 符号**全部**是 Rust 侧 `#[no_mangle]`
+    定义的(零个来自 C++),`objdump -p lmflow.dll` 实测导出 130 个(差的那个是
+    feature-gated 的 `lmflow_register_builtin_kernels`,符合预期)。这一点设计时已考虑过 ——
+    若该 C ABI 符号由 C++ 定义,rustc 不会把它放进 DLL 导出表,那才是硬阻塞。
+  - **真实工作量是 CMake + CI**,约 16 处构建相关改动:库名/后缀、链接库列表里的 `m`
+    (`${CMAKE_DL_LIBS}` 在 Windows 为空、`Threads::Threads` 在 MSVC 是 no-op,这两个**无需**
+    条件化),以及需要补上 Windows 系统导入库(`kernel32/ntdll/userenv/ws2_32/dbghelp`)。
+    另需处理 MSVC 的 CRT 一致性(rustc 恒发 `/defaultlib:msvcrt`,而 CMake 在 Debug 下默认 `/MDd`)。
+  - **TSan 在 windows-msvc 上不可用**(仅 Linux/macOS)。而并发是本设计的核心风险、TSan 是硬门禁,
+    故 Windows 若接入,在安全矩阵里**必然是二等**(ASan 可部分替代,并发无等价门禁)。
+    这应作为**明示的接受限制**,不是遗漏。
+  - 暂缓的真正原因不是难度,而是**本机无 MSVC、完全无法本地验证**,只能盲写 + 跟 CI 迭代。
 - **Miri 跑不动**:FFI 里大量 `extern "C"` 与外部 C++ 符号,Miri 无法执行,故只作 advisory
   (`continue-on-error`),不是门禁。ASan 同样是 advisory(build-std + C++ 侧易误报)。
 - **`pool4` 类多线程基准在本机噪声达 ±13~25%**,不能用于归因单次改动(见

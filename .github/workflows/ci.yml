@@ -146,6 +146,27 @@ jobs:
           out=$(/tmp/ex/hello_world_host)
           expected=$(for i in $(seq 0 9); do echo "out: $i @ ts=$i"; done)
           [ "$out" = "$expected" ] || { echo "consumer 输出不符:"; echo "$out"; exit 1; }
+      - run: sudo apt-get update && sudo apt-get install -y ninja-build
+      - name: 多配置生成器下 cargo profile 必须跟随 --config
+        # 守一个**静默**的坑:`CMAKE_BUILD_TYPE` 只对单配置生成器有意义,而多配置生成器
+        # (Ninja Multi-Config / Visual Studio)的配置是**构建期**由 `--config` 定的。
+        # 曾经的写法在配置期读该变量,于是 `--config Release` 会静默建出 dev profile 的引擎、
+        # 链进 Release 宿主而**不报任何错**(实测输出 "Finished `dev` profile [unoptimized]")。
+        # 只做配置期 + 干跑检查,不真编译,秒级。
+        run: |
+          cmake -B build-mc -G "Ninja Multi-Config" > /dev/null
+          for cfg in Release RelWithDebInfo; do
+            cmake --build build-mc --config "$cfg" --target flow_engine -- -n \
+              | grep -q 'release profile' \
+              || { echo "$cfg 下 cargo 没走 release profile"; exit 1; }
+          done
+          cmake --build build-mc --config Debug --target flow_engine -- -n \
+            | grep -q 'dev profile' \
+            || { echo "Debug 下 cargo 没走 dev profile"; exit 1; }
+          # 上面查的是给人看的 COMMENT;真实传给 cargo 的 flag 也必须在场。
+          grep -rq -- 'cargo build --release --features builtin-kernels' build-mc/CMakeFiles/ \
+            || { echo "生成的构建文件里找不到带 --release 的 cargo 调用"; exit 1; }
+          echo "多配置生成器下 cargo profile 与 --config 一致"
       - name: custom_type 示例(自定义类型端到端)也用 find_package 构建 + 运行
         run: |
           cmake -S lmflow/examples/cpp/custom_type -B /tmp/ex_ct -Dlmflow_DIR=/tmp/sdk/lib/cmake/lmflow
