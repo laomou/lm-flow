@@ -1,23 +1,89 @@
-//! lmflow 引擎核心。
+//! A dataflow-graph compute engine.
 //!
-//! 一个数据流图计算框架:计算描述成有向图,节点是**算子(Kernel)**,
-//! 边上流动**带时间戳的数据包(Packet)**。
+//! Computation is described as a directed graph: nodes are **kernels**, and **timestamped
+//! packets** flow along the edges. This crate is the engine itself — scheduling, worker threads,
+//! edge queues, topology validation and YAML parsing.
 //!
-//! 对外有两套接口:
-//!  * **Rust API**(本 crate 的公开条目)—— 仓库内的 Rust 宿主与测试直接用;
-//!  * **C ABI**([`ffi`] 模块 / `include/flow.h`)—— 外部 C/C++/Python 宿主用。
+//! # Two interfaces
 //!
-//! 算子与引擎解耦:可以用 **C++** 写(`flow.hpp` 糖层)、用 **Python** 写(pybind11),
-//! 也可以用 **Rust** 写([`Kernel`] + [`register_kernel`])—— 三者都经同一套函数指针
-//! vtable 注册进同一个注册表,引擎不知道算子是什么语言写的。
+//! * **Rust API** — the public items of this crate ([`Graph`], [`Packet`], [`Kernel`], …).
+//! * **C ABI** — the [`ffi`] module, declared in `include/lmflow/flow.h`. This is the only
+//!   *stable* interface, and it is what C, C++, Python and mobile hosts use.
 //!
-//! 本 crate **默认是纯 Rust 引擎**,不编译也不捆绑任何 C++(`cargo add lmflow` 无需 C++
-//! 工具链)。引擎自带默认 Rust 算子(见 [`builtin`],如 `PassThrough`,建图时自动注册);
-//! 自己的算子用 [`Kernel`] + [`register_kernel`] 写。仓库内另有 18 个内置 C++ 算子
-//! (`../cpp/kernels/`),由 `builtin-kernels` feature 编入;**该 feature 只在 lm-flow
-//! 仓库内可用**(那些源码在 crate 目录之外,不随发布的 crate 分发)。
+//! # Kernels are decoupled from the engine
 //!
-//! 设计文档:`docs/design.md`。
+//! A kernel can be written in **Rust** ([`Kernel`] + [`register_kernel`]), in **C++** (the
+//! header-only `flow.hpp` sugar layer), or in **Python** (pybind11). All three register into one
+//! registry through the same function-pointer vtable, so the engine neither knows nor cares which
+//! language a kernel came from — and kernels written in different languages can be mixed freely
+//! in a single graph.
+//!
+//! This crate is a **pure-Rust engine by default**: it neither compiles nor bundles any C++, so
+//! `cargo add lmflow` needs no C++ toolchain. Two structural kernels ship with it and are
+//! registered automatically when a graph is built (see [`builtin`]): `PassThrough` (zero-copy
+//! forward) and `Sink` (consume only, so a branch can terminate itself). Anything that would have
+//! to assume a concrete payload type is deliberately left to you — the engine never interprets
+//! payloads.
+//!
+//! # Running a graph
+//!
+//! ```
+//! use lmflow::{Graph, Packet, Timestamp};
+//!
+//! # fn main() -> lmflow::Result<()> {
+//! let graph = Graph::from_yaml(
+//!     r#"
+//! nodes:
+//!   - { name: relay, kernel: PassThrough, input_ports: [in], output_ports: [out] }
+//! input_ports: [in]
+//! output_ports: [out]
+//! "#,
+//! )?;
+//!
+//! let out = graph.add_poller("out")?;
+//! graph.start()?;
+//! graph.input("in")?.send(Packet::from_i64(21).at(Timestamp(0)))?;
+//!
+//! assert_eq!(out.next().and_then(|p| p.as_i64()), Some(21));
+//!
+//! graph.close_all_inputs();
+//! graph.wait_done()?;
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! # Writing a kernel
+//!
+//! ```
+//! use lmflow::{register_kernel, Kernel, KernelCtx, Packet};
+//!
+//! #[derive(Default)]
+//! struct Double;
+//!
+//! impl Kernel for Double {
+//!     fn process(&mut self, cc: &mut KernelCtx) -> lmflow::Result<()> {
+//!         let v = cc.input(0).and_then(|p| p.as_i64()).unwrap_or(0);
+//!         cc.emit(0, Packet::from_i64(v * 2))
+//!     }
+//! }
+//!
+//! # fn main() -> lmflow::Result<()> {
+//! register_kernel::<Double>("Double")?; // once, before Graph::from_yaml
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! # Beyond this crate
+//!
+//! The lm-flow repository also carries 18 built-in C++ kernels (`../cpp/kernels/`), compiled in by
+//! the `builtin-kernels` feature. That feature is **off by default and only usable inside the
+//! repository**: those sources live outside the crate directory, so they are not distributed with
+//! the published crate.
+//!
+//! Full documentation, including the C/C++ and Python interfaces:
+//! <https://laomou.github.io/lm-flow/>. The authoritative design document — scheduling model,
+//! timestamp and termination semantics, lock ordering rules and the decision log — is
+//! `docs/design.md` (written in Chinese).
 
 pub mod builtin;
 pub mod config;
@@ -49,12 +115,13 @@ extern "C" {
     fn lmflow_register_builtin_kernels_impl();
 }
 
-/// 注册内置 C++ 算子。**幂等**:重复调用只在首次生效。
+/// Register the built-in C++ kernels. **Idempotent** — only the first call takes effect.
 ///
-/// 必须在 [`Graph::from_yaml`] 之前调用,否则会报「算子未注册」。
+/// Must be called before [`Graph::from_yaml`], otherwise graph construction reports an
+/// unregistered kernel.
 ///
-/// 仅在 `builtin-kernels` feature 下存在(**默认关**,且只在 lm-flow 仓库内可用);
-/// 否则请用 [`register_kernel`] 注册自己的 Rust 算子。
+/// Only exists under the `builtin-kernels` feature (**off by default**, and only usable inside the
+/// lm-flow repository); otherwise register your own Rust kernels with [`register_kernel`].
 #[cfg(feature = "builtin-kernels")]
 pub fn register_builtin_kernels() {
     use std::sync::Once;
@@ -62,12 +129,13 @@ pub fn register_builtin_kernels() {
     ONCE.call_once(|| unsafe { lmflow_register_builtin_kernels_impl() });
 }
 
-/// C ABI:注册内置算子(见 `include/lmflow/flow.h`)。是 [`register_builtin_kernels`] 的
-/// 导出包装 —— 由 Rust 定义并 `#[no_mangle]` 导出,保证它同时出现在静态库和 cdylib 的
-/// 符号表里,与 `flow.h` 的声明一致。
+/// C ABI: register the built-in kernels (see `include/lmflow/flow.h`). This is the exported
+/// wrapper around [`register_builtin_kernels`] — defined in Rust and `#[no_mangle]`-exported so it
+/// appears in the symbol table of both the static library and the cdylib, matching the declaration
+/// in `flow.h`.
 ///
 /// # Safety
-/// 无参数、无指针入参;内部幂等。可从任意线程安全调用。
+/// Takes no arguments and no pointers, and is internally idempotent. Safe to call from any thread.
 #[cfg(feature = "builtin-kernels")]
 #[no_mangle]
 pub unsafe extern "C" fn lmflow_register_builtin_kernels() {

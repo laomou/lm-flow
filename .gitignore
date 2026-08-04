@@ -27,6 +27,9 @@ buildpy/
 /.pydeps/
 /.pydeps-wheels/
 
+# 文档站产物(docs/web/build.py + cargo doc + pdoc 合出来的 site/)
+/site/
+
 # 编辑器 / 工具
 .vscode/
 .idea/

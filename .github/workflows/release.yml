@@ -1,10 +1,10 @@
 # 打 tag(v*)时产出两条发布线:
 #   1. 原生 SDK —— 头文件 + 各平台编译好的库(.a/.so/.dylib),挂到 GitHub Release。
 #      这是 C/C++/移动端宿主的主产物(include flow.h + 链 liblmflow)。
-#   2. Python wheel —— 发布到 PyPI(pip install lm-flow)。**只发预编 wheel,不发 sdist**:
+#   2. Python wheel —— 发布到 PyPI(pip install lm-lmflow)。**只发预编 wheel,不发 sdist**:
 #      装不到匹配平台的 wheel 时 pip 直接失败,而不是在用户机上编译源码。
 #
-# 一次性准备(仓库管理员做一次):在 PyPI 上为 lm-flow 配置「可信发布者」
+# 一次性准备(仓库管理员做一次):在 PyPI 上为 lm-lmflow 配置「可信发布者」
 # (Trusted Publisher),指向本仓库的 release.yml —— 无需在仓库里存 API token。
 # 见 https://docs.pypi.org/trusted-publishers/ 。之后:`git tag v0.1.0 && git push --tags`。
 name: release

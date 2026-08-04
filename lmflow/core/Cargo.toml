@@ -5,6 +5,10 @@ description = "Dataflow-graph compute engine: a pure-Rust scheduler behind a sta
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/laomou/lm-flow"
+homepage = "https://laomou.github.io/lm-flow/"
+# 指向 docs.rs 而非文档站的 /rust/:crates.io 用户装的是**已发布**版本,而文档站
+# 的 /rust/ 跟着 main 走(已经含 reset / on_error / rate 等尚未发布的条目)。
+documentation = "https://docs.rs/lmflow"
 readme = "README.md"
 keywords = ["dataflow", "graph", "pipeline", "realtime", "ffi"]
 categories = ["concurrency", "multimedia"]

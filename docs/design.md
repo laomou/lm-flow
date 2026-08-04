@@ -1,8 +1,8 @@
 # lmflow 设计方案
 
 > 状态:**成品**。Rust 引擎、C ABI、C++ 糖层(含 OpenCV 互转)、18 个内置算子、
-> Python 绑定(pybind11)、原生 SDK 发布(各平台头文件+库)全部就位;**274 个测试**
-> (Rust 236 + Python 38)全绿,TSan 硬门禁 0 竞态。Rust / C++ / Python 三种宿主的
+> Python 绑定(pybind11)、原生 SDK 发布(各平台头文件+库)、三端文档站全部就位;
+> **277 个测试**(Rust 236 + doctest 3 + Python 38)全绿,TSan 硬门禁 0 竞态。Rust / C++ / Python 三种宿主的
 > hello_world 都输出正确;支持线程池绑核 + 实时优先级(Linux/Android),可交叉编到
 > Android / iOS / 鸿蒙。
 > 定位:一个数据流图计算框架 —— 把计算描述成**有向图**,节点是**算子(Kernel)**,
@@ -1118,8 +1118,46 @@ lm-flow/                          仓库根
 ├── cmake/                        engine.cmake · install-sdk.cmake · find_package 配置
 ├── CMakeLists.txt                顶层构建(驱动 cargo;C/C++ SDK + Python 扩展)
 ├── pyproject.toml                Python wheel(scikit-build-core → 同一份 CMake)
-└── docs/design.md                本文档
+└── docs/
+    ├── design.md                 本文档
+    └── web/                      文档站源码(见 §11.1)
 ```
+
+### 11.1 文档站
+
+`https://laomou.github.io/lm-flow/`,由 `.github/workflows/docs.yml` 在每次推 main 时构建部署。
+一个站点覆盖三端,**三端平等**:
+
+| 路径 | 内容 | 生成方式 |
+|---|---|---|
+| `/` | 手写英文首页 | `docs/web/index.md` → `build.py` |
+| `/rust/` | Rust API(跟 main) | `cargo doc --no-deps`(默认纯 Rust feature) |
+| `/cpp/` | 手写英文 C/C++ 指南 | `docs/web/cpp.md` → `build.py` |
+| `/python/` | Python API | `pdoc`(内省已安装的包) |
+| `/design/` | 本文档(中文) | `docs/design.md` → `build.py` |
+
+三条关键取舍:
+
+1. **C/C++ 端手写,不上 Doxygen。** `flow.h` 的 131 个函数声明**没有一个**前置 Doxygen 可识别
+   注释(全是普通 `/* */`),且大量说明是「章节横幅」而非贴着符号(一条注释同时说明 5 个
+   `lmflow_packet_as_*`)—— 换标记也绑不到符号上,Doxygen 只会产出空壳签名索引。手写指南是
+   唯一能真正解释 ABI 契约(所有权三态、指针生命周期、锁规则)的形式。
+2. **doc 注释语言按「谁会读」划分**,而非按语言划分:面向用户的入口(crate 首页、`Graph` /
+   `Packet` / `Kernel` / `KernelCtx` / `KernelContract` / `register_kernel` / `Timestamp` /
+   `Contract`、`builtin` 与 `ffi` 模块头、Python docstring)用**英文**;引擎内部的实现注释与
+   不变量论证仍用**中文**。
+3. **零新依赖。** `build.py` 只用 `markdown2` + `pygments`,而这两个都是 `pdoc` 的依赖 ——
+   workflow 本来就要 `pip install pdoc`,故依赖清单一行未增。刻意不引 MkDocs / Sphinx:
+   为两个手写页面搭一套静态站生成器,还要让它接管整个 `site/`(把 rustdoc / pdoc 产出当
+   "静态资源"塞进去),是纯粹的摩擦。
+
+`cargo doc` 的产出根目录**没有 `index.html`**(真入口是 `lmflow/index.html`),故 `build.py`
+额外写一个 `site/rust/index.html` 重定向壳,rustdoc 拷贝步骤用 `cp -R .../doc/. site/rust/`
+只合并内容、不覆盖它。workflow 末尾有一步产物齐全校验 —— 宁可构建失败,也不发半成品站点。
+
+`cargo test --doc` 此前**验证不了任何东西**(4 个围栏块全是 ```ignore / ```text);现在 crate
+首页与 `kernel_api` 模块头的 3 个示例都是可运行 doctest,`RUSTDOCFLAGS: -D warnings` 也一并
+把失效的 intra-doc 链接变成硬错误。
 
 ---
 
@@ -1141,7 +1179,7 @@ lm-flow/                          仓库根
 
 ---
 
-## 13. 测试策略(已落地 274 个:Rust 236 + Python 38)
+## 13. 测试策略(已落地 277 个:Rust 236 + doctest 3 + Python 38)
 
 | 测试文件 | 数量 | 覆盖 |
 |---|---|---|

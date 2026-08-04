@@ -286,16 +286,19 @@ typedef struct {
   void (*destroy)(void* self);
 } LMFlowKernelVTable;
 
-/* 注册**捆绑的内置算子**(PassThrough / Scale / Sum / Split / Zip / Filter /
- * Stringify / Sink / Invert / Normalize / Mux / RangeSource / FeedbackAdd /
- * BatchSum / Cast / Affine / Clamp / Reduce —— 权威清单见 cpp/kernels/register.cc)。
+/* 注册**捆绑的内置算子**(PassThroughKernel / ScaleKernel / SumKernel / SplitKernel /
+ * ZipKernel / FilterKernel / StringifyKernel / SinkKernel / InvertKernel /
+ * NormalizeKernel / MuxKernel / RangeSourceKernel / FeedbackAddKernel /
+ * BatchSumKernel / CastKernel / AffineKernel / ClampKernel / ReduceKernel ——
+ * 权威清单见 cpp/kernels/register.cc)。名字都带 `Kernel` 后缀,YAML 里须照写。
  *
  * 宿主须在 init_from_yaml **之前**调用一次,否则会得到「算子未注册」。幂等。
  *
- * 由引擎在 `builtin-kernels` Cargo feature(**默认开**)下提供:算子本体是
- * kernels/ 下的 C++,经 build.rs 链入同一个 liblmflow 产物,本符号是它的导出根。
- * 若用 `--no-default-features` 构建纯 Rust 引擎,则本符号不存在 —— 那种用法下自己
- * 用 Rust 的 `register_kernel`(或 C ABI 的 lmflow_register_kernel)注册算子。
+ * 由引擎在 `builtin-kernels` Cargo feature(**默认关**)下提供:算子本体是
+ * cpp/kernels/ 下的 C++,经 build.rs 链入同一个 liblmflow 产物,本符号是它的导出根。
+ * 默认构建出的是纯 Rust 引擎,**本符号不存在** —— 那种用法下自己用 Rust 的
+ * `register_kernel`(或 C ABI 的 lmflow_register_kernel)注册算子。发布的 SDK
+ * 压缩包与 wheel 都显式带了该 feature,故其中本符号可用。
  *
  * 用显式函数而非静态初始化,是因为静态初始化对象在静态库中可能被链接器裁剪
  * (见 docs/design.md §5.1 与 §14 风险登记)。 */
@@ -751,6 +754,10 @@ uint64_t lmflow_graph_dropped_count(LMFlowGraph*, const char* port);
  *   "fixed_size" 有界 + **满则丢弃最旧的包**,容量由 capacity 指定(默认 1)。
  *                实时场景必备:摄像头 30fps 而算子只跑 10fps 时,
  *                无界队列会让内存无限增长,丢旧帧才是正确取舍。
+ *   "sync_set"   分组对齐:用 sets 把输入口分成若干组,**组内**按时间戳对齐,
+ *                组间互不等待。适合一个节点同时收几路互不相干的流。
+ *   "batch"      攒够 capacity 个包再一次性交给算子(本版本仅支持单输入口)。
+ *                算子里用 lmflow_ctx_input_count / _input_at 遍历这一批。
  *
  * 注意 fixed_size 是**有意的有损**策略,且不会阻塞上游 ——
  * 因此它与「内部边不背压」(见设计文档 §7.5)并不冲突,而是其配套的内存约束手段。 */

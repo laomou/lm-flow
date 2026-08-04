@@ -1,14 +1,20 @@
-//! C ABI 层:`include/flow.h` 的实现。
+//! The C ABI layer: the implementation behind `include/lmflow/flow.h`.
 //!
-//! 约定
-//!  * 每个导出函数都用 `catch_unwind` 包裹 —— Rust panic 穿越 FFI 是 UB。
-//!  * 失败时写线程局部 `lmflow_last_error`,让调用方能拿到可读原因。
-//!  * 跨界结构体 `#[repr(C)]`,布局由 `tests/abi_layout.rs` 与 `cpp/abi_assert.cc` 双向钉死。
-//!  * 所有导出函数对空指针都做检查,返回错误码/默认值而不是崩溃。
+//! Conventions:
+//!  * Every exported function is wrapped in `catch_unwind` — letting a Rust panic cross an FFI
+//!    boundary is undefined behaviour.
+//!  * On failure the thread-local `lmflow_last_error` is set, so the caller can obtain a readable
+//!    reason.
+//!  * Structs that cross the boundary are `#[repr(C)]`, with the layout pinned from both sides by
+//!    `tests/abi_layout.rs` and `cpp/abi_assert.cc`.
+//!  * Every exported function null-checks its pointers and returns an error code or a default
+//!    value rather than crashing.
 //!
-//! 关于 `missing_safety_doc`:本模块的导出函数面向 **C 调用方**,其安全契约(指针有效性、
-//! 所有权移交、生命周期)以 `include/flow.h` 的注释为权威定义 —— 那才是 C/C++ 用户会读的
-//! 文档。在此重复一遍 Rust 风格的 `# Safety` 段落只会造成两处描述漂移,故整体豁免该 lint。
+//! On `missing_safety_doc`: the functions here are consumed by **C callers**, whose safety
+//! contract — pointer validity, ownership transfer, lifetimes — is authoritatively defined by the
+//! comments in `include/lmflow/flow.h`, which is the documentation C and C++ users actually read.
+//! Restating it here in Rust `# Safety` form would only create two descriptions that drift apart,
+//! so the lint is waived for the whole module.
 #![allow(clippy::missing_safety_doc)]
 
 use std::ffi::{c_char, CStr};
@@ -113,7 +119,7 @@ pub struct LMFlowContract {
     _private: [u8; 0],
 }
 
-/// 图输入口句柄的实体(生命周期随 graph)。
+/// The object behind a graph input-port handle; its lifetime follows the graph.
 pub struct InputHandle {
     graph: Arc<GraphInner>,
     edge: usize,

@@ -1,24 +1,28 @@
-//! 引擎自带的**默认 Rust 算子** —— 零 C++,任何配置下都可用。
+//! The engine's **default Rust kernels** — no C++, available in every configuration.
 //!
-//! 这里**刻意只有两个**,且都是**纯结构性、零领域假设**的:
+//! There are **deliberately only two**, and both are purely structural with no assumptions about
+//! the payload:
 //!
-//! | 名字 | 作用 | 端口 |
+//! | Name | What it does | Ports |
 //! |---|---|---|
-//! | [`PassThrough`] | 零拷贝直通(接线 / 占位) | 1 → 1,任意类型 |
-//! | [`Sink`] | 只消费不产出,让分支能自行终结 | 1 → 0,任意类型 |
+//! | [`PassThrough`] | zero-copy forward (wiring / placeholder) | 1 → 1, any type |
+//! | [`Sink`] | consume only, so a branch can terminate itself | 1 → 0, any type |
 //!
-//! **为什么不多塞几个**:`Scale`/`Sum`/`Zip`/`Filter` 这类算子都得假设 payload 是 i64
-//! 之类的具体类型,而 ADR #6 明确「引擎不解释 payload」—— 把整数算术塞进引擎本体与之相悖。
-//! 演示引擎语义(读 options、close 时产出、时间戳对齐、推进 bound、`source_done`)是
-//! `../cpp/kernels/` 那 18 个内置 C++ 算子与 `examples/` 的职责,不该由发布出去的引擎库承担。
-//! 扇出也不需要算子:**一条边可以直接挂多个消费者**,是引擎原生能力(见 §7 边模型)。
+//! **Why not more.** Kernels like `Scale` / `Sum` / `Zip` / `Filter` would all have to assume the
+//! payload is some concrete type such as `i64`, and ADR #6 states plainly that the engine never
+//! interprets payloads — putting integer arithmetic into the engine proper contradicts it.
+//! Demonstrating engine semantics (reading options, emitting on close, timestamp alignment,
+//! advancing bounds, `source_done`) is the job of the 18 built-in C++ kernels in `../cpp/kernels/`
+//! and of `examples/`, not of the engine library that gets published. Fan-out needs no kernel
+//! either: **one edge can feed several consumers** natively (see §7, the edge model).
 //!
-//! 这两个算子用 [`crate::Kernel`] 写成、经与 C++/Python 完全相同的 vtable 注册,
-//! 首次建图时自动注册一次(见 [`register_defaults`]),YAML 里直接按名字引用即可,
-//! 宿主不需要调用任何注册函数。
+//! Both are written with [`crate::Kernel`] and registered through exactly the same vtable as
+//! C++ and Python kernels. [`register_defaults`] runs once when the first graph is built, so YAML
+//! can refer to them by name with no registration call from the host.
 //!
-//! 名字刻意**不带 `Kernel` 后缀**,以免与内置 C++ 算子(`PassThroughKernel` 等)重名 ——
-//! 注册表按名字唯一,重名注册直接报错。
+//! The names deliberately carry **no `Kernel` suffix**, to avoid colliding with the built-in C++
+//! kernels (`PassThroughKernel` and friends) — the registry is keyed by name, and registering a
+//! duplicate is an error.
 
 use std::sync::Once;
 
@@ -26,9 +30,10 @@ use crate::kernel_api::{register_kernel, Kernel, KernelContract, KernelCtx};
 use crate::runtime::{LOG_DEBUG, LOG_INFO};
 use crate::status::Result;
 
-/// 零拷贝直通:把输入 0 原样转发到输出 0(复用同一 payload,不拷贝)。
+/// Zero-copy forward: hands input 0 straight to output 0, reusing the same payload.
 ///
-/// 注册名 **`PassThrough`**。接受任意类型,常用于接线、占位与测试。
+/// Registered as **`PassThrough`**. Accepts any payload type; useful for wiring, placeholders and
+/// tests.
 #[derive(Default)]
 pub struct PassThrough;
 
@@ -42,10 +47,12 @@ impl Kernel for PassThrough {
     }
 }
 
-/// 汇点:只消费、不产出(零输出口),让一条分支能自行终结而不必宿主去 poll。
+/// A terminal sink: consumes packets and produces nothing (no output ports), so a branch can
+/// terminate itself instead of requiring the host to poll it.
 ///
-/// 注册名 **`Sink`**。走引擎日志而非 stdout(库不该抢宿主的输出);同时累加**按图**
-/// 计数器 `sink.packets` / `sink.closed`,便于测试直接断言。
+/// Registered as **`Sink`**. It reports through the engine log rather than stdout — a library
+/// should not commandeer the host's output — and bumps the **per-graph** counters
+/// `sink.packets` / `sink.closed`, which tests can assert on directly.
 #[derive(Default)]
 pub struct Sink {
     count: i64,
@@ -76,10 +83,12 @@ impl Kernel for Sink {
     }
 }
 
-/// 注册全部默认 Rust 算子。**幂等**,由 [`crate::Graph::from_config`] 自动调用。
+/// Register every default Rust kernel. **Idempotent**, and called automatically by
+/// [`crate::Graph::from_config`].
 ///
-/// 注册失败(唯一可能:宿主已用同名注册过自己的算子)被静默忽略 —— 宿主的算子优先,
-/// 引擎不该因为要塞自带算子而让建图失败。
+/// A registration failure — which can only mean the host already registered a kernel of its own
+/// under the same name — is silently ignored. The host's kernel wins; the engine should not fail
+/// graph construction just to install one of its own.
 pub fn register_defaults() {
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {

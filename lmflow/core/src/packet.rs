@@ -293,7 +293,12 @@ impl std::fmt::Debug for Payload {
     }
 }
 
-/// 数据包。`Clone` 只递增引用计数,**不拷贝数据**。
+/// A timestamped data packet.
+///
+/// The payload is immutable and shared: `Clone` bumps a reference count and **does not copy the
+/// data**. Mutation goes through copy-on-write, which is only actually copy-free while this is the
+/// sole reference — which is why a kernel should
+/// [`take_input`](crate::KernelCtx::take_input) rather than borrow when it intends to modify.
 #[derive(Clone, Default)]
 pub struct Packet {
     data: Option<Arc<Payload>>,
