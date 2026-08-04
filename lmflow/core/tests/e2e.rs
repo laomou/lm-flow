@@ -138,11 +138,55 @@ output_ports: ["out"]
         msg.contains("input port"),
         "the error should indicate which port: {msg}"
     );
-    // `Packet::new` 造的包是这条错误最常见的来源,而它有明确出路。错误必须把出路说出来 ——
-    // 否则读者会去翻契约,而真正该改的是造包方式。
+    // `Packet::new`(Native payload)造的包是这条错误最常见的来源,而它有明确出路。
+    // 错误必须把出路说出来 —— 否则读者会去翻契约,而真正该改的是造包方式。
     assert!(
-        msg.contains("Packet::new") && msg.contains("from_builtin") && msg.contains("new_interop"),
-        "NONE 类型的失配必须给出改用哪个构造函数: {msg}"
+        msg.contains("Rust-native")
+            && msg.contains("Packet::new")
+            && msg.contains("from_builtin")
+            && msg.contains("new_interop"),
+        "Native + NONE 的失配必须给出改用哪个 Rust 构造函数: {msg}"
+    );
+}
+
+/// 同样是 `type_id == NONE`,但 payload 是 **Foreign**(C/C++ 自建、type_id 填 0)——
+/// 提示必须换成 C ABI 的说法,**不能**推荐 Rust 的 `Packet::from_i64` 之类。
+///
+/// 存在意义:`NONE` 的来源不止 `Packet::new` —— `from_foreign(.., 0, ..)`、
+/// `new_interop(v, 0)`、以及 C 侧 `type_id` 填 0 的自建包都会走到这里
+/// (`tests/concurrency.rs` 的 `tracked_packet` 就是前者)。此前的提示一律归因到
+/// `Packet::new`,会把用不上的 Rust API 建议推给 C/C++ 宿主。
+#[test]
+fn typed_contract_mismatch_hint_matches_payload_kind() {
+    init();
+    unsafe extern "C" fn noop_drop(p: *mut std::ffi::c_void) {
+        drop(unsafe { Box::from_raw(p as *mut i64) });
+    }
+    let graph = Graph::from_yaml(
+        r#"
+nodes:
+  - { name: "s", kernel: "ScaleKernel", input_ports: ["in"], output_ports: ["out"], options: { factor: 2 } }
+input_ports: ["in"]
+output_ports: ["out"]
+"#,
+    )
+    .unwrap();
+    graph.start().unwrap();
+    // Foreign payload,type_id = 0(LMFLOW_TYPE_NONE)—— 模拟 C/C++ 宿主自建包
+    let ptr = Box::into_raw(Box::new(7i64)) as *mut std::ffi::c_void;
+    let pkt = unsafe { Packet::from_foreign(ptr, 0, Some(noop_drop)) }.at(Timestamp(0));
+    graph.input("in").unwrap().send(pkt).unwrap();
+    graph.close_all_inputs();
+    let msg = graph.wait_done().unwrap_err().to_string();
+
+    assert!(msg.contains("type mismatch"), "{msg}");
+    assert!(
+        msg.contains("LMFLOW_TYPE_NONE") && msg.contains("LMFLOW_TYPE_*"),
+        "Foreign + NONE 应给 C ABI 的出路: {msg}"
+    );
+    assert!(
+        !msg.contains("Packet::from_i64") && !msg.contains("Rust-native"),
+        "不该把 Rust API 建议推给 C/C++ 宿主: {msg}"
     );
 }
 
