@@ -32,10 +32,10 @@ jobs:
       name: github-pages
       url: ${{ steps.deploy.outputs.page_url }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with: { submodules: recursive }   # third_party/pybind11:建扩展要用
       - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with: { python-version: '3.11' }
       - name: 装 lmflow(带扩展)+ pdoc
         run: |
@@ -67,9 +67,9 @@ jobs:
             [ -f "site/$f" ] || { echo "缺少产物:site/$f"; exit 1; }
           done
           echo "站点产物齐全"
-      - uses: actions/configure-pages@v5
+      - uses: actions/configure-pages@v6
         with: { enablement: true }   # 未手动开 Pages 时尝试自动开(需 pages: write)
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/upload-pages-artifact@v5
         with: { path: site }
       - id: deploy
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5
