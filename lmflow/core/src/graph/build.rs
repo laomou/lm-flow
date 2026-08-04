@@ -226,6 +226,31 @@ impl GraphInner {
                     &mut contract as *mut Contract as *mut c_void,
                 )?
             };
+
+            // `HOST_OBJECT`(7)是**预留未启用**的类型(ADR #26)。此前引擎对它没有任何
+            // 校验:契约声明 7、包也带 7,类型检查按数值相等就放行了 —— 于是「未启用」
+            // 实际只靠「没有构造函数生产它」维持,一旦有人用 `new_interop(v, 7)` 或 C 侧
+            // 手填 7 绕过,就会静默进入数据流,而 ADR #9 的两条理由(两级类型系统、
+            // Py_DECREF 抢 GIL 的死锁隐患)都还成立。故在建图期明确拒掉。
+            for (which, types) in [
+                ("input", &contract.input_types),
+                ("output", &contract.output_types),
+            ] {
+                if let Some(i) = types
+                    .iter()
+                    .position(|&t| t == crate::packet::type_id::HOST_OBJECT)
+                {
+                    return Err(Error::InvalidArg(format!(
+                        "node `{name}`: {which} port {i} declares LMFLOW_TYPE_HOST_OBJECT, \
+                         which is reserved and not enabled (see ADR #26). Host-language native \
+                         objects (e.g. PyObject) would create a second type system invisible to \
+                         the YAML graph, and their refcount can drop on an engine worker thread \
+                         where releasing them needs the GIL. Use LMFLOW_TYPE_BUFFER for numeric \
+                         collections, or LMFLOW_TYPE_STR carrying JSON for arbitrary metadata"
+                    )));
+                }
+            }
+
             let kernel = KernelInstance::create(&n.kernel)?;
 
             let input_edges: Vec<EdgeId> = ins.names().iter().map(|x| edge_by_name[x]).collect();

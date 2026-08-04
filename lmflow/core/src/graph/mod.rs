@@ -1729,9 +1729,6 @@ impl GraphInner {
         let node = &self.nodes[n];
         let ctx = unsafe { node.ctx_slot(slot) };
         for (port, &want) in node.input_types.iter().enumerate() {
-            if want == 0 {
-                continue; // 未声明类型 = 接受任意
-            }
             let Some(pkt) = ctx.inputs.get(port).and_then(|s| s.as_ref()) else {
                 continue;
             };
@@ -1739,15 +1736,46 @@ impl GraphInner {
                 continue; // 空包(时间戳边界)不参与类型校验
             }
             let got = pkt.type_id();
+
+            // `HOST_OBJECT` 预留未启用(ADR #26)。契约声明它已在建图期拒掉,但包**自己**
+            // 带 7 是另一条路(`new_interop(v, 7)`、C 侧手填 type_id)。这一条必须在
+            // `want == 0` 的短路**之前**判 —— 否则声明 `any` 的端口(最常见的情形)恰好
+            // 就是漏网的那种,而那正是要堵的洞。
+            if got == crate::packet::type_id::HOST_OBJECT {
+                return Err(Error::Kernel(format!(
+                    "[{}] input port `{}` carries LMFLOW_TYPE_HOST_OBJECT, which is reserved \
+                     and not enabled (see ADR #26); use LMFLOW_TYPE_BUFFER for numeric \
+                     collections, or LMFLOW_TYPE_STR carrying JSON for arbitrary metadata",
+                    node.name,
+                    node.in_ports.name(port).unwrap_or("?"),
+                )));
+            }
+
+            if want == 0 {
+                continue; // 未声明类型 = 接受任意
+            }
             if got != want {
-                // `got == NONE` 是一个**有明确出路**的特例:包是 `Packet::new`(Rust 原生
-                // payload)造的,它按设计不参与跨语言类型校验。光说「类型不匹配」会让人去
-                // 翻契约,而真正要改的是造包方式 —— 故这里直接把出路写进错误里。
+                // `got == NONE` 是一个**有明确出路**的特例,但出路取决于包是谁造的 ——
+                // 按 payload 形态分别给建议,否则会把 Rust API 推给 C/C++ 宿主(或反之)。
+                // NONE 的来源不止一个:`Packet::new`(Native)、`from_foreign(.., 0, ..)`、
+                // `new_interop(v, 0)`、以及 C ABI 侧 type_id 填 0 的自建包(Foreign)。
                 let hint = if got == crate::packet::type_id::NONE {
-                    " (the packet was built with `Packet::new`, whose payload is Rust-native \
-                     and carries no cross-language type; use `Packet::from_i64` / `from_f64` / \
-                     `from_builtin` for built-in payloads, or `Packet::new_interop` with an \
-                     agreed id for a custom type)"
+                    match pkt.payload() {
+                        Some(crate::packet::Payload::Foreign(_)) => {
+                            " (the packet carries no declared type: its type_id is \
+                             LMFLOW_TYPE_NONE, which means \"skip type checking\"; set a real \
+                             LMFLOW_TYPE_* on the packet you submit, or declare this port as \
+                             any-type)"
+                        }
+                        // Native = Rust 原生 payload,只可能来自 Rust 宿主
+                        _ => {
+                            " (the packet carries no declared type because its payload is \
+                             Rust-native, e.g. built with `Packet::new`; use \
+                             `Packet::from_i64` / `from_f64` / `from_builtin` for built-in \
+                             payloads, or `Packet::new_interop` with an agreed id for a \
+                             custom type)"
+                        }
+                    }
                 } else {
                     ""
                 };
