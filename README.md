@@ -44,6 +44,7 @@ lm-flow/
 ├── third_party/pybind11/      vendored git submodule (only used to build the Python wheel)
 ├── cmake/                     engine.cmake · install-sdk.cmake · find_package config
 ├── docs/                      design.md (authoritative design doc, Chinese) · web/ (doc-site sources)
+├── CHANGELOG.md               Release notes (crate · wheel · native SDK share one version)
 ├── CMakeLists.txt             Top-level build (drives cargo; C/C++ SDK + Python extension)
 └── pyproject.toml             Python wheel (scikit-build-core → the same CMake)
 ```
@@ -169,7 +170,7 @@ See [`docs/design.md`](docs/design.md) for the full design.
 C/C++ and mobile hosts don't use pip — they use the **headers + library** directly. Each tagged GitHub Release ships per-platform `lmflow-<version>-<platform>.tar.gz` (Linux x86_64/aarch64, macOS arm64, iOS arm64, Android arm64):
 
 ```text
-lmflow-v0.1.0-linux-x86_64/
+lmflow-v0.2.0-linux-x86_64/
 ├── include/lmflow/   flow.h · flow.hpp · flow_cv.hpp · flow_platform_log.hpp
 └── lib/       liblmflow.a (static, self-contained, preferred) · liblmflow.so (shared)
 ```
@@ -222,6 +223,8 @@ Mobile integration examples: [`lmflow/examples/android/hello_world`](lmflow/exam
 | Python | [`/python/`](https://laomou.github.io/lm-flow/python/) | docstrings in `lmflow/python/lmflow/__init__.py` |
 
 The design document — scheduling model, timestamp and termination semantics, lock ordering rules and the decision log — is [`docs/design.md`](docs/design.md) (Chinese, authoritative), also rendered at [`/design/`](https://laomou.github.io/lm-flow/design/).
+
+Release notes are in [`CHANGELOG.md`](CHANGELOG.md).
 
 The site is built and deployed by [`.github/workflows/docs.yml`](.github/workflows/docs.yml) on every push to `main`; the hand-written pages live in [`docs/web/`](docs/web). To preview it locally:
 
