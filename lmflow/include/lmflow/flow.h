@@ -653,15 +653,17 @@ const char* lmflow_graph_last_error(LMFlowGraph*);
 
 /* ---------- 全局水位:内部边与 Poller 队列的统计 ----------
  * 默认内部边不限容量。需要逐节点无损限制时,在 YAML 节点上设置:
- *     input_queue_capacity: 8
- * 它限制每个正向输入口;满时生产者保留已完成输出并让出 worker,下游出队后恢复,
- * 因此不会用「阻塞 worker」的方式把 diamond 图锁死。0 = 不限;不可与有损
- * input_policy: fixed_size 同时使用。
- * 可按端口覆盖:
- *     input_queue_capacities: { video: 2, metadata: 32, control: 0 }
- * 字节硬限使用 payload 浅尺寸,并计入仍在 staging 的预留:
- *     input_queue_byte_capacity: 67108864
- *     input_queue_byte_capacities: { video: 16777216, metadata: 1048576 }
+ *     input_queues:
+ *       packets: 8
+ *       bytes: 67108864
+ *       ports:
+ *         video: { packets: 2, bytes: 16777216 }
+ *         metadata: { packets: 32, bytes: 1048576 }
+ *         control: { packets: 0, bytes: 0 }
+ * 默认值作用于每个正向输入口;端口覆盖中省略的维度继承默认值,显式 0 = 不限。
+ * 满时生产者保留已完成输出并让出 worker,下游出队后恢复,因此不会用「阻塞 worker」
+ * 的方式把 diamond 图锁死。不可与有损 input_policy: fixed_size 同时使用。
+ * 字节硬限使用 payload 浅尺寸,并计入仍在 staging 的预留。
  * 不可计量的非空 payload 在字节硬限端口上会报错,不会按 0 字节绕过限制。
  *
  * 因此给整张图一个总预算(YAML 顶层):

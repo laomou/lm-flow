@@ -127,7 +127,7 @@ nodes:
     input_ports: [mid]
     output_ports: [out]
     executor: pool
-    input_queue_capacity: 2
+    input_queues: { packets: 2 }
 input_ports: [in]
 output_ports: [out]
 "#,
@@ -172,7 +172,7 @@ nodes:
     input_ports: [mid]
     output_ports: [out]
     executor: sink_pool
-    input_queue_capacity: 3
+    input_queues: { packets: 3 }
 output_ports: [out]
 "#,
     )
@@ -195,9 +195,9 @@ executors:
   - { name: pool, num_threads: 3 }
 nodes:
   - { name: split, kernel: InternalBpDuplicate, input_ports: [in], output_ports: [left, right], executor: pool }
-  - { name: slow, kernel: InternalBpSlowPass, input_ports: [left], output_ports: [slow_out], executor: pool, input_queue_capacity: 2 }
-  - { name: fast, kernel: PassThrough, input_ports: [right], output_ports: [fast_out], executor: pool, input_queue_capacity: 2 }
-  - { name: join, kernel: InternalBpJoinCount, input_ports: [slow_out, fast_out], output_ports: [], executor: pool, input_queue_capacity: 2 }
+  - { name: slow, kernel: InternalBpSlowPass, input_ports: [left], output_ports: [slow_out], executor: pool, input_queues: { packets: 2 } }
+  - { name: fast, kernel: PassThrough, input_ports: [right], output_ports: [fast_out], executor: pool, input_queues: { packets: 2 } }
+  - { name: join, kernel: InternalBpJoinCount, input_ports: [slow_out, fast_out], output_ports: [], executor: pool, input_queues: { packets: 2 } }
 input_ports: [in]
 "#,
     )
@@ -224,7 +224,7 @@ fn capacity_smaller_than_one_emitted_batch_fails_loudly() {
         r#"
 nodes:
   - { name: burst, kernel: InternalBpBurst, input_ports: [in], output_ports: [mid] }
-  - { name: sink, kernel: Sink, input_ports: [mid], output_ports: [], input_queue_capacity: 1 }
+  - { name: sink, kernel: Sink, input_ports: [mid], output_ports: [], input_queues: { packets: 1 } }
 input_ports: [in]
 "#,
     )
@@ -251,10 +251,12 @@ nodes:
     kernel: InternalBpPortJoinCount
     input_ports: [wide, gate]
     output_ports: []
-    input_queue_capacity: 1
-    input_queue_capacities: { wide: 2, gate: 0 }
-    input_queue_byte_capacity: 8
-    input_queue_byte_capacities: { wide: 16, gate: 0 }
+    input_queues:
+      packets: 1
+      bytes: 8
+      ports:
+        wide: { packets: 2, bytes: 16 }
+        gate: { packets: 0, bytes: 0 }
 input_ports: [in, gate]
 "#,
     )
@@ -283,7 +285,7 @@ nodes:
     input_ports: [mid]
     output_ports: [out]
     executor: pool
-    input_queue_byte_capacity: 20
+    input_queues: { bytes: 20 }
 input_ports: [in]
 output_ports: [out]
 "#,
@@ -312,7 +314,7 @@ executors:
   - { name: pool, num_threads: 1 }
 nodes:
   - { name: producer, kernel: PassThrough, input_ports: [in], output_ports: [mid], executor: pool }
-  - { name: waiting_join, kernel: InternalBpPortJoinCount, input_ports: [mid, gate], output_ports: [], executor: pool, input_queue_capacity: 1, input_queue_byte_capacity: 8 }
+  - { name: waiting_join, kernel: InternalBpPortJoinCount, input_ports: [mid, gate], output_ports: [], executor: pool, input_queues: { packets: 1, bytes: 8 } }
 input_ports: [in, gate]
 "#,
     )
@@ -371,7 +373,7 @@ executors:
   - { name: pool, num_threads: 1 }
 nodes:
   - { name: producer, kernel: PassThrough, input_ports: [in], output_ports: [mid], executor: pool }
-  - { name: join, kernel: InternalBpPortJoinCount, input_ports: [mid, gate], output_ports: [], executor: pool, input_queue_capacity: 1 }
+  - { name: join, kernel: InternalBpPortJoinCount, input_ports: [mid, gate], output_ports: [], executor: pool, input_queues: { packets: 1 } }
 input_ports: [in, gate]
 "#,
     )
@@ -403,7 +405,7 @@ executors:
   - { name: pool, num_threads: 4 }
 nodes:
   - { name: producer, kernel: PassThrough, input_ports: [in], output_ports: [mid], executor: pool, max_in_flight: 4 }
-  - { name: consumer, kernel: InternalBpSlowPass, input_ports: [mid], output_ports: [out], executor: pool, input_queue_capacity: 2, input_queue_byte_capacity: 16 }
+  - { name: consumer, kernel: InternalBpSlowPass, input_ports: [mid], output_ports: [out], executor: pool, input_queues: { packets: 2, bytes: 16 } }
 input_ports: [in]
 output_ports: [out]
 "#,
@@ -439,7 +441,7 @@ fn emitted_batch_larger_than_byte_capacity_fails_loudly() {
         r#"
 nodes:
   - { name: producer, kernel: PassThrough, input_ports: [in], output_ports: [mid] }
-  - { name: sink, kernel: Sink, input_ports: [mid], output_ports: [], input_queue_byte_capacity: 8 }
+  - { name: sink, kernel: Sink, input_ports: [mid], output_ports: [], input_queues: { bytes: 8 } }
 input_ports: [in]
 "#,
     )
@@ -462,7 +464,7 @@ fn byte_capacity_rejects_unmeasurable_payloads() {
         r#"
 nodes:
   - { name: producer, kernel: PassThrough, input_ports: [in], output_ports: [mid] }
-  - { name: sink, kernel: Sink, input_ports: [mid], output_ports: [], input_queue_byte_capacity: 8 }
+  - { name: sink, kernel: Sink, input_ports: [mid], output_ports: [], input_queues: { bytes: 8 } }
 input_ports: [in]
 "#,
     )
@@ -485,7 +487,7 @@ fn byte_capacity_accepts_measurable_zero_length_payloads() {
         r#"
 nodes:
   - { name: producer, kernel: PassThrough, input_ports: [in], output_ports: [mid] }
-  - { name: sink, kernel: Sink, input_ports: [mid], output_ports: [], input_queue_byte_capacity: 1 }
+  - { name: sink, kernel: Sink, input_ports: [mid], output_ports: [], input_queues: { bytes: 1 } }
 input_ports: [in]
 "#,
     )
@@ -510,7 +512,7 @@ nodes:
     kernel: Sink
     input_ports: [in]
     output_ports: []
-    input_queue_capacity: 2
+    input_queues: { packets: 2 }
     input_policy: { type: fixed_size, capacity: 2 }
 input_ports: [in]
 "#,
@@ -529,12 +531,33 @@ nodes:
     kernel: Sink
     input_ports: [in]
     output_ports: []
-    input_queue_capacities: { typo: 2 }
+    input_queues:
+      ports: { typo: { packets: 2 } }
 input_ports: [in]
 "#,
     )
     .unwrap_err();
     assert!(error.to_string().contains("unknown input port `typo`"));
+}
+
+#[test]
+fn legacy_split_capacity_fields_are_rejected() {
+    register_test_kernels();
+    let error = Graph::from_yaml(
+        r#"
+nodes:
+  - name: sink
+    kernel: Sink
+    input_ports: [in]
+    output_ports: []
+    input_queue_capacity: 2
+input_ports: [in]
+"#,
+    )
+    .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("unknown field `input_queue_capacity`"));
 }
 
 #[test]
@@ -548,7 +571,8 @@ nodes:
     input_ports: [in, feedback]
     output_ports: []
     back_edges: [feedback]
-    input_queue_byte_capacities: { feedback: 8 }
+    input_queues:
+      ports: { feedback: { bytes: 8 } }
 input_ports: [in, feedback]
 "#,
     )
@@ -565,7 +589,7 @@ executors:
   - { name: pool, num_threads: 1 }
 nodes:
   - { name: producer, kernel: PassThrough, input_ports: [in], output_ports: [mid], executor: pool }
-  - { name: waiting_join, kernel: InternalBpJoinCount, input_ports: [mid, never], output_ports: [], executor: pool, input_queue_capacity: 1 }
+  - { name: waiting_join, kernel: InternalBpJoinCount, input_ports: [mid, never], output_ports: [], input_queues: { packets: 1 } }
 input_ports: [in, never]
 "#,
     )
@@ -590,7 +614,7 @@ executors:
   - { name: pool, num_threads: 2 }
 nodes:
   - { name: producer, kernel: InternalBpEmitOnClose, input_ports: [in], output_ports: [mid], executor: pool }
-  - { name: join, kernel: InternalBpCloseJoinCount, input_ports: [mid, gate], output_ports: [], executor: pool, input_queue_capacity: 1 }
+  - { name: join, kernel: InternalBpCloseJoinCount, input_ports: [mid, gate], output_ports: [], executor: pool, input_queues: { packets: 1 } }
 input_ports: [in, gate]
 "#,
     )
@@ -619,7 +643,7 @@ fn impossible_alignment_reports_backpressure_stall() {
         r#"
 nodes:
   - { name: producer, kernel: PassThrough, input_ports: [in], output_ports: [mid] }
-  - { name: waiting_join, kernel: InternalBpJoinCount, input_ports: [mid, never], output_ports: [], input_queue_capacity: 1 }
+  - { name: waiting_join, kernel: InternalBpJoinCount, input_ports: [mid, never], output_ports: [], input_queues: { packets: 1 } }
 input_ports: [in, never]
 "#,
     )

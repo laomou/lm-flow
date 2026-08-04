@@ -57,6 +57,31 @@ impl Default for InputPolicyConfig {
     }
 }
 
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InputQueueLimitConfig {
+    /// `None` = 继承节点默认值；`Some(0)` = 该端口不限包数。
+    #[serde(default)]
+    pub packets: Option<usize>,
+    /// `None` = 继承节点默认值；`Some(0)` = 该端口不限字节数。
+    #[serde(default)]
+    pub bytes: Option<u64>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InputQueuesConfig {
+    /// 所有正向输入口的默认包数容量。0 = 不限。
+    #[serde(default)]
+    pub packets: usize,
+    /// 所有正向输入口的默认 payload 浅字节容量。0 = 不限。
+    #[serde(default)]
+    pub bytes: u64,
+    /// 按输入口名覆盖；单个维度省略时继承上面的默认值，显式 0 表示不限。
+    #[serde(default)]
+    pub ports: std::collections::BTreeMap<String, InputQueueLimitConfig>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NodeConfig {
@@ -79,24 +104,13 @@ pub struct NodeConfig {
     pub options: serde_yaml::Value,
     #[serde(default)]
     pub input_policy: InputPolicyConfig,
-    /// 每个正向输入口的无损队列容量。0 = 不限(历史行为)。
+    /// 正向输入口的无损包数/字节容量。
     ///
     /// 内部生产者遇满不会阻塞 worker，而是保留本次 staging、释放执行线程，
-    /// 等下游弹包后协作式恢复刷新。与有损 `fixed_size` 互斥。
+    /// 等下游弹包后协作式恢复刷新。`packets` / `bytes` 为节点默认值，
+    /// `ports` 按端口覆盖；与有损 `fixed_size` 互斥。
     #[serde(default)]
-    pub input_queue_capacity: usize,
-    /// 按输入口名覆盖 `input_queue_capacity`。值 0 表示该口不限包数。
-    #[serde(default)]
-    pub input_queue_capacities: std::collections::BTreeMap<String, usize>,
-    /// 每个正向输入口的无损字节容量。0 = 不限。
-    ///
-    /// 计量使用 `Packet::byte_size()` 的 payload 浅尺寸。启用后，不可计量的非空 payload
-    /// 会明确报错，而不是按 0 字节绕过硬限制。
-    #[serde(default)]
-    pub input_queue_byte_capacity: u64,
-    /// 按输入口名覆盖 `input_queue_byte_capacity`。值 0 表示该口不限字节数。
-    #[serde(default)]
-    pub input_queue_byte_capacities: std::collections::BTreeMap<String, u64>,
+    pub input_queues: InputQueuesConfig,
     /// 子图名(ADR #27):非空 = 本节点是该子图的实例,建图期展开内联;与 `kernel` 二选一。
     #[serde(default)]
     pub r#type: String,
@@ -209,10 +223,7 @@ impl Default for NodeConfig {
             max_in_flight: 0,
             options: serde_yaml::Value::default(),
             input_policy: InputPolicyConfig::default(),
-            input_queue_capacity: 0,
-            input_queue_capacities: std::collections::BTreeMap::new(),
-            input_queue_byte_capacity: 0,
-            input_queue_byte_capacities: std::collections::BTreeMap::new(),
+            input_queues: InputQueuesConfig::default(),
             r#type: String::new(),
             back_edges: Vec::new(),
             on_error: String::new(),
@@ -350,41 +361,30 @@ impl GraphConfig {
                 .iter()
                 .map(|d| parse_port_spec(d).map(|s| s.name))
                 .collect::<Result<_>>()?;
-            for port in n
-                .input_queue_capacities
-                .keys()
-                .chain(n.input_queue_byte_capacities.keys())
-            {
+            for port in n.input_queues.ports.keys() {
                 if !port_names.contains(port) {
                     return Err(Error::InvalidArg(format!(
                         "node `{who}`: input queue capacity override references unknown input port `{port}`"
                     )));
                 }
             }
-            for (port, capacity) in &n.input_queue_capacities {
-                if *capacity != 0 && n.back_edges.contains(port) {
+            for (port, limits) in &n.input_queues.ports {
+                if (limits.packets.is_some_and(|capacity| capacity != 0)
+                    || limits.bytes.is_some_and(|capacity| capacity != 0))
+                    && n.back_edges.contains(port)
+                {
                     return Err(Error::InvalidArg(format!(
-                        "node `{who}`: packet capacity override for back-edge input `{port}` is not supported; \
+                        "node `{who}`: input queue capacity override for back-edge input `{port}` is not supported; \
                          back-edges always use their capacity-1 latest-value register"
                     )));
                 }
             }
-            for (port, capacity) in &n.input_queue_byte_capacities {
-                if *capacity != 0 && n.back_edges.contains(port) {
-                    return Err(Error::InvalidArg(format!(
-                        "node `{who}`: byte capacity override for back-edge input `{port}` is not supported; \
-                         back-edges always use their capacity-1 latest-value register"
-                    )));
-                }
-            }
-            let has_lossless_capacity = n.input_queue_capacity != 0
-                || n.input_queue_byte_capacity != 0
-                || n.input_queue_capacities
-                    .values()
-                    .any(|&capacity| capacity != 0)
-                || n.input_queue_byte_capacities
-                    .values()
-                    .any(|&capacity| capacity != 0);
+            let has_lossless_capacity = n.input_queues.packets != 0
+                || n.input_queues.bytes != 0
+                || n.input_queues.ports.values().any(|limits| {
+                    limits.packets.is_some_and(|capacity| capacity != 0)
+                        || limits.bytes.is_some_and(|capacity| capacity != 0)
+                });
             if has_lossless_capacity && n.input_policy.r#type == "fixed_size" {
                 return Err(Error::InvalidArg(format!(
                     "node `{who}`: lossless input queue capacities cannot be combined with \

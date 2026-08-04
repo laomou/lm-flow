@@ -694,28 +694,28 @@ stats_timing: true
 ```
 
 Node fields: `name`, `kernel` (or `type` for a subgraph instance), `input_ports`, `output_ports`,
-`executor`, `max_in_flight`, `options`, `input_policy`, `input_queue_capacity`,
-`input_queue_capacities`, `input_queue_byte_capacity`, `input_queue_byte_capacities`,
-`back_edges`, `on_error`, `rate`.
+`executor`, `max_in_flight`, `options`, `input_policy`, `input_queues`, `back_edges`, `on_error`,
+`rate`.
 
-`input_queue_capacity` applies the same lossless capacity to every forward input port on the
-node. A full queue pauses the producer with its completed output retained, but releases the
-executor thread; dequeue resumes the pending flush. `0` means unbounded. Do not combine it with
-lossy `input_policy: fixed_size`.
-
-Per-port maps override the node default:
+`input_queues.packets` and `input_queues.bytes` are the node defaults. `ports` overrides individual
+dimensions by input-port name; an omitted dimension inherits the default, while an explicit `0`
+disables that limit:
 
 ```yaml
-input_queue_capacity: 8
-input_queue_capacities: { video: 2, metadata: 32, control: 0 }
-input_queue_byte_capacity: 67108864
-input_queue_byte_capacities: { video: 16777216, metadata: 1048576 }
+input_queues:
+  packets: 8
+  bytes: 67108864
+  ports:
+    video: { packets: 2, bytes: 16777216 }
+    metadata: { packets: 32, bytes: 1048576 }
+    control: { packets: 0, bytes: 0 }
 ```
 
-An override value of `0` disables that limit for the named port. Byte capacity counts the shallow
-payload size of queued packets plus pending staging reservations. Builtin payloads and registered
-fixed-layout foreign types are measurable; an unmeasurable non-empty payload is rejected when its
-destination has a byte limit.
+A full queue pauses the producer with its completed output retained, but releases the executor
+thread; dequeue resumes the pending flush. Byte capacity counts the shallow payload size of queued
+packets plus pending staging reservations. Builtin payloads and registered fixed-layout foreign
+types are measurable; an unmeasurable non-empty payload is rejected when its destination has a byte
+limit. Do not combine `input_queues` limits with lossy `input_policy: fixed_size`.
 
 Graph fields: `executors`, `nodes`, `subgraphs`, `include`, `input_ports`, `output_ports`,
 `max_queue_size`, `max_queued_packets`, `max_queued_bytes`, `watchdog_ms`, `stats_timing`.

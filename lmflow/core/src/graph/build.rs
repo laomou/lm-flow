@@ -298,10 +298,11 @@ impl GraphInner {
                     .names()
                     .iter()
                     .map(|port| {
-                        n.input_queue_capacities
+                        n.input_queues
+                            .ports
                             .get(port)
-                            .copied()
-                            .unwrap_or(n.input_queue_capacity)
+                            .and_then(|limits| limits.packets)
+                            .unwrap_or(n.input_queues.packets)
                     })
                     .map(|capacity| (capacity != 0).then_some(capacity))
                     .collect(),
@@ -309,10 +310,11 @@ impl GraphInner {
                     .names()
                     .iter()
                     .map(|port| {
-                        n.input_queue_byte_capacities
+                        n.input_queues
+                            .ports
                             .get(port)
-                            .copied()
-                            .unwrap_or(n.input_queue_byte_capacity)
+                            .and_then(|limits| limits.bytes)
+                            .unwrap_or(n.input_queues.bytes)
                     })
                     .map(|capacity| (capacity != 0).then_some(capacity))
                     .collect(),

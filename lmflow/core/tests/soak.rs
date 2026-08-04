@@ -277,8 +277,9 @@ nodes:
     executor: "cpu"
     input_ports: ["s", "f"]
     output_ports: []
-    input_queue_capacity: 2
-    input_queue_byte_capacity: {internal_bytes}
+    input_queues:
+      packets: 2
+      bytes: {internal_bytes}
 input_ports: ["in"]
 max_queue_size: 100000
 max_queued_packets: {DIAMOND_MAX_QUEUED_PACKETS}
