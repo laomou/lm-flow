@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.18)
-project(lmflow VERSION 0.1.1 LANGUAGES CXX)
+project(lmflow VERSION 0.2.0 LANGUAGES CXX)
 
 # 引擎是 Rust crate(lmflow/core),cargo 权威构建(build.rs 经 cc 顺带编 lmflow/cpp
 # 算子 → liblmflow)。本 CMake(仓库根)驱动 cargo,并拥有 C++/Python 侧。

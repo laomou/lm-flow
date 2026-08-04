@@ -46,6 +46,7 @@ lm-flow/
 ├── third_party/pybind11/      vendored git 子模块(仅用于构建 Python wheel)
 ├── cmake/                     engine.cmake · install-sdk.cmake · find_package 配置
 ├── docs/                      design.md(设计方案,权威文档,中文)· web/(文档站源码)
+├── CHANGELOG.md               发布记录(crate · wheel · 原生 SDK 共用一个版本号)
 ├── CMakeLists.txt             顶层构建(驱动 cargo;C/C++ SDK + Python 扩展)
 └── pyproject.toml             Python wheel(scikit-build-core → 同一份 CMake)
 ```
@@ -173,7 +174,7 @@ C/C++ 或移动端宿主不走 pip —— 直接用**头文件 + 库**。每个 
 `lmflow-<版本>-<平台>.tar.gz`(Linux x86_64/aarch64、macOS arm64、iOS arm64、Android arm64):
 
 ```text
-lmflow-v0.1.0-linux-x86_64/
+lmflow-v0.2.0-linux-x86_64/
 ├── include/lmflow/   flow.h · flow.hpp · flow_cv.hpp · flow_platform_log.hpp
 └── lib/       liblmflow.a(静态,完整,首选)· liblmflow.so(动态)
 ```
@@ -227,6 +228,8 @@ C ABI 是唯一稳定接口(`lmflow/flow.h`);`flow.hpp` 是可选的 C++ 算子�
 | Python | [`/python/`](https://laomou.github.io/lm-flow/python/) | `lmflow/python/lmflow/__init__.py` 的 docstring |
 
 设计方案 —— 调度模型、时间戳与终止语义、锁序规则、决策记录 —— 是 [`docs/design.md`](docs/design.md)(中文,权威),同时渲染在 [`/design/`](https://laomou.github.io/lm-flow/design/)。
+
+发布记录见 [`CHANGELOG.md`](CHANGELOG.md)。
 
 站点由 [`.github/workflows/docs.yml`](.github/workflows/docs.yml) 在每次推 `main` 时构建部署;手写页面的源码在 [`docs/web/`](docs/web)。本地预览:
 
