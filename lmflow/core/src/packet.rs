@@ -311,8 +311,28 @@ impl Packet {
         Self::default()
     }
 
-    /// Rust 原生值。**`type_id` 为 NONE(不参与跨语言类型校验)** ——
-    /// 需要让 C++/Python 算子按类型读取时,请用 `new_interop` 或内建类型构造函数。
+    /// A Rust-native value.
+    ///
+    /// **The resulting `type_id` is `NONE`, so this packet cannot satisfy a typed port
+    /// contract** — including a C++ kernel's `InputSet<T>()` / `InputSetBuiltin(...)`. Sending
+    /// one into a typed port fails loudly at the first packet rather than silently
+    /// mismatching, but it fails at *runtime*, so prefer the right constructor up front:
+    ///
+    /// * a **built-in** payload → [`Packet::from_i64`], [`from_f64`](Packet::from_f64),
+    ///   [`from_builtin`](Packet::from_builtin) and friends; these carry the proper `type_id`
+    ///   and are what cross-language kernels exchange (see ADR #9);
+    /// * a **custom** type that a C++ kernel must read by type → [`Packet::new_interop`] with
+    ///   an id both sides agree on, normally
+    ///   [`fnv1a_type_id`] of the name declared via
+    ///   `LMFLOW_DECLARE_TYPE_NAME` on the C++ side.
+    ///
+    /// `Packet::new` is still the right choice for a payload that never leaves Rust, or for
+    /// ports that declare no type (the default).
+    ///
+    /// The `type_id` is deliberately **not** derived from Rust's [`std::any::TypeId`]: that is a
+    /// different identity space from the C++ mangled-name hash, so auto-deriving it would
+    /// produce ids that look cross-language but only agree with themselves — a silent
+    /// mismatch, which is strictly worse than the current loud one.
     pub fn new<T: Any + Send + Sync>(value: T) -> Self {
         Self {
             data: Some(Arc::new(Payload::Native(Box::new(value)))),
@@ -320,10 +340,13 @@ impl Packet {
         }
     }
 
-    /// Rust 原生值 + 显式跨语言类型标识(须与对方约定一致)。
+    /// A Rust-native value carrying an explicit cross-language `type_id`.
+    ///
+    /// The id must match what the other side expects — typically
+    /// [`fnv1a_type_id`] of the string a C++ kernel declared
+    /// with `LMFLOW_DECLARE_TYPE_NAME`. The payload is held in the `Foreign` form, which gives
+    /// the C side a readable pointer plus that id.
     pub fn new_interop<T: Any + Send + Sync>(value: T, type_id: u64) -> Self {
-        let _ = type_id; // Native 的 type_id 由 into_foreign_like 场景处理,见下
-                         // 以 Foreign 形态承载:提供 C 布局可读的指针与显式 type_id。
         let boxed = Box::new(value);
         let ptr = Box::into_raw(boxed) as *mut c_void;
         unsafe extern "C" fn drop_boxed<T>(p: *mut c_void) {
