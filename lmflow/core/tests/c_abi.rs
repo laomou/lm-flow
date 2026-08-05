@@ -521,7 +521,8 @@ fn from_buffer_copies_contiguous_hwc_in_one_shot() {
         assert_eq!(&view.shape[..3], &[H as i64, W as i64, C as i64]);
         let out = std::slice::from_raw_parts(view.data as *const u8, H * W * C);
         assert_eq!(
-            out, &data[..],
+            out,
+            &data[..],
             "a contiguous HWC buffer must be copied byte-for-byte"
         );
         // 取回的视图必须仍是紧密行优先 —— 这是快路径判据成立的前提。
