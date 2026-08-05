@@ -409,7 +409,7 @@ class Graph:
         """
         return bool(self._g.pump_step())
 
-    async def run_async(self) -> None:
+    async def run_async(self, *, cancel_grace: float = 1.0) -> None:
         """Run the graph without blocking the current asyncio event loop.
 
         If the graph is initialized, this method starts it. Engine threads signal the loop through
@@ -417,9 +417,13 @@ class Graph:
         Pool-only graphs also wake the loop on completion or failure, so no polling timer is used.
 
         The graph must eventually terminate: close its inputs, let a source call
-        :meth:`Context.source_done`, or call :meth:`cancel`. Cancelling the asyncio task cancels
-        the graph and waits for it to terminate before re-raising :class:`asyncio.CancelledError`.
+        :meth:`Context.source_done`, or call :meth:`cancel`. Cancelling the asyncio task cancels the
+        graph and gives it up to ``cancel_grace`` seconds to terminate before re-raising
+        :class:`asyncio.CancelledError`. A second cancellation abandons that graceful wait
+        immediately; :meth:`close` remains the final synchronous cleanup fallback.
         """
+        if cancel_grace < 0:
+            raise ValueError("cancel_grace must be non-negative")
         loop = asyncio.get_running_loop()
         wakeup = asyncio.Event()
 
@@ -452,16 +456,27 @@ class Graph:
 
             await drive_until_terminated()
             self.wait_done()
-        except asyncio.CancelledError:
+        except asyncio.CancelledError as cancelled:
             self.cancel()
-            cleanup = asyncio.create_task(drive_until_terminated())
-            while not cleanup.done():
+            current = asyncio.current_task()
+            uncancel = getattr(current, "uncancel", None)
+            if uncancel is not None:
+                uncancel()
+            cleanup_coro = drive_until_terminated()
+            try:
+                cleanup = asyncio.create_task(cleanup_coro)
+            except RuntimeError:
+                cleanup_coro.close()
+                raise cancelled
+            try:
+                await asyncio.wait_for(asyncio.shield(cleanup), timeout=cancel_grace)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                cleanup.cancel()
                 try:
-                    await asyncio.shield(cleanup)
+                    await cleanup
                 except asyncio.CancelledError:
-                    continue
-            await cleanup
-            raise
+                    pass
+            raise cancelled
         finally:
             self._g.set_wakeup_callback(None)
 
