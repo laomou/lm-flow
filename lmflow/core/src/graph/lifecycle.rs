@@ -326,6 +326,8 @@ impl GraphInner {
         self.in_flight.store(0, Ordering::SeqCst);
         self.delegated_cursor.store(0, Ordering::Relaxed);
         self.delegated_running.store(false, Ordering::Release);
+        self.wakeup_pending.store(false, Ordering::Release);
+        self.wakeup_generation.store(0, Ordering::Release);
         {
             let mut a = self.activity.0.lock().unwrap_or_else(|e| e.into_inner());
             a.waiters = 0;
@@ -458,11 +460,16 @@ impl GraphInner {
                 if !blocked.is_empty() && self.retry_backpressure_progress() {
                     continue;
                 }
-                let details = self.backpressure_stall_details(&blocked);
-                return Err(Error::Kernel(format!(
-                    "wait_until_idle: internal backpressure cannot make progress; blocked queues: [{}]",
-                    details.join("; ")
-                )));
+                if self.is_idle() {
+                    break;
+                }
+                if !blocked.is_empty() {
+                    let details = self.backpressure_stall_details(&blocked);
+                    return Err(Error::Kernel(format!(
+                        "wait_until_idle: internal backpressure cannot make progress; blocked queues: [{}]",
+                        details.join("; ")
+                    )));
+                }
             }
             match self.remaining(deadline) {
                 Some(d) => {

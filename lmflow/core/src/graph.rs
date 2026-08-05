@@ -11,6 +11,7 @@
 use std::cell::UnsafeCell;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::ffi::c_void;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Instant;
@@ -60,6 +61,8 @@ struct Activity {
     waiters: usize,
 }
 
+type WakeupCallback = Arc<dyn Fn() + Send + Sync>;
+
 pub struct GraphInner {
     pub shared: Arc<GraphShared>,
     nodes: Vec<Node>,
@@ -80,6 +83,12 @@ pub struct GraphInner {
     delegated_running: AtomicBool,
     /// 有任何进展时唤醒阻塞中的宿主线程(取到输出、节点关闭、出错、任务入队)
     activity: (Mutex<Activity>, Condvar),
+    /// 事件循环唤醒回调。只负责通知宿主“该进引擎推进了”，不得承载实际工作。
+    wakeup_callback: Mutex<Option<WakeupCallback>>,
+    /// 合并重复通知：宿主调用 `pump_step` 确认一次唤醒后重新武装。
+    wakeup_pending: AtomicBool,
+    /// 每次唤醒请求递增，避免活动恰好发生在 `pump_step(false)` 重新武装窗口时丢通知。
+    wakeup_generation: AtomicU64,
     /// 暂停调度(调试/限速)。已在执行的算子不受影响。
     paused: AtomicBool,
     /// 因下游无损输入队列已满而保留 staging 的节点。下游每次出队后重试这些刷新。
@@ -204,6 +213,7 @@ impl Graph {
         self.inner.resume_blocked_flushes();
         self.inner.finish_all_backpressure_blocks();
         self.inner.notify_activity();
+        self.inner.request_wakeup();
     }
 
     pub fn wait_done_timeout(&self, timeout: std::time::Duration) -> Result<()> {
@@ -243,6 +253,22 @@ impl Graph {
     /// 事件循环型宿主可反复调用它主动推进 `DelegatingExecutor`，而不必进入阻塞接口。
     pub fn pump_step(&self) -> bool {
         self.inner.pump_step_pub()
+    }
+
+    /// Install an edge-triggered event-loop wakeup callback.
+    ///
+    /// The callback may run on any engine thread and must return quickly. It should only schedule
+    /// the host loop to call [`pump_step`](Self::pump_step) until it returns `false`.
+    pub fn set_wakeup_callback<F>(&self, callback: F)
+    where
+        F: Fn() + Send + Sync + 'static,
+    {
+        self.inner.set_wakeup_callback(Some(Arc::new(callback)));
+    }
+
+    /// Remove the event-loop wakeup callback.
+    pub fn clear_wakeup_callback(&self) {
+        self.inner.set_wakeup_callback(None);
     }
 
     /// 推模式订阅输出口。回调在派发该包的线程上执行(可能是线程池线程)。

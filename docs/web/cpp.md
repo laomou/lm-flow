@@ -306,6 +306,26 @@ blocking call such as `lmflow_poller_next` or `lmflow_graph_wait_done`, or calls
 enter concurrently, and multiple delegating executors are pumped fairly. Send without ever
 entering the engine and those nodes will not advance.
 
+Event-loop hosts should install `lmflow_graph_set_wakeup_callback`. The callback may run on any
+engine thread, so it must only post a lightweight event (`QMetaObject::invokeMethod`,
+`uv_async_send`, etc.). On the event-loop thread, call `lmflow_graph_pump_step` until it returns
+false. Wakeups are coalesced and re-arm after the queue is drained.
+
+```cpp
+struct LoopWake {
+  LMFlowGraph* graph;
+  MyEventLoop* loop;
+};
+
+LoopWake wake{graph, &loop};
+lmflow_graph_set_wakeup_callback(graph, [](void* user) {
+  auto* wake = static_cast<LoopWake*>(user);
+  wake->loop->Post([wake] {
+    while (lmflow_graph_pump_step(wake->graph)) {}
+  });
+}, &wake);
+```
+
 ### Reset and re-run
 
 ```c

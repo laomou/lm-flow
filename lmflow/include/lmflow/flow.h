@@ -531,10 +531,12 @@ const char* lmflow_ctx_options_json(const LMFlowContext*);
  *       lmflow_poller_next / _timeout
  *       lmflow_input_send(阻塞等待空位时)
  *   若宿主只 send 而从不调用上述任一接口,委托执行器上的节点将**不会推进**。
+ *   事件循环宿主应安装 lmflow_graph_set_wakeup_callback:收到通知后在事件循环线程
+ *   反复调用 lmflow_graph_pump_step,直到返回 false。
  *   反之,这些接口在等待期间一律会抽取并执行委托任务,故不会因此死锁。
  *
- * 源节点(0 输入)**不能**挂委托执行器:它的 process 常年阻塞,会独占宿主线程、
- *   拖垮全图(init 阶段报错)。同理,一个池上的源节点数 >= 该池线程数也报错。
+ * 源节点(0 输入)**不能**挂委托执行器:用户 process 仍可能阻塞并独占宿主线程、
+ *   拖垮全图(init 阶段报错)。线程池 Source 应用 source_yield/rate 协作等待。
  *
  * 节点引用了未定义的 executor 名字 → init 阶段报错(见 lmflow_graph_init_from_yaml)。 */
 
@@ -672,6 +674,12 @@ LMFlowStatus lmflow_graph_wait_until_idle_timeout(LMFlowGraph*, int64_t timeout_
  * 事件循环型宿主可反复调用它主动推进委托节点,而不必进入阻塞接口。
  * 有实际进展返回 true;当前无事可做返回 false。同一张图的委托任务始终串行执行。 */
 bool lmflow_graph_pump_step(LMFlowGraph*);
+/* 事件循环集成：引擎有新活动需要宿主关注时调用 cb(user)。
+ * 回调可能来自任意引擎线程，只能做线程安全的“投递到事件循环”动作，不得直接调用
+ * lmflow_graph_*。通知为合并的边沿触发：收到后应在事件循环线程反复调用 pump_step，
+ * 直到返回 false，才会重新武装下一次通知。cb=NULL 表示移除。 */
+LMFlowStatus lmflow_graph_set_wakeup_callback(
+    LMFlowGraph*, void (*cb)(void* user), void* user);
 
 /* 暂停 / 恢复调度(调试、限速用)。暂停期间已在执行的算子不受影响;
  * 送包仍会入队,只是不被调度。cancel 优先于 pause。 */

@@ -519,6 +519,25 @@ pub unsafe extern "C" fn lmflow_graph_pump_step(g: *mut LMFlowGraph) -> bool {
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn lmflow_graph_set_wakeup_callback(
+    g: *mut LMFlowGraph,
+    cb: Option<unsafe extern "C" fn(*mut c_void)>,
+    user: *mut c_void,
+) -> i32 {
+    guard(|| {
+        with_graph(g, |graph| {
+            if let Some(callback) = cb {
+                let user = user as usize;
+                graph.set_wakeup_callback(move || unsafe { callback(user as *mut c_void) });
+            } else {
+                graph.clear_wakeup_callback();
+            }
+            code::OK
+        })
+    })
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn lmflow_graph_pause(g: *mut LMFlowGraph) {
     guard_val((), || {
         if let Some(gr) = graph_of(g) {
