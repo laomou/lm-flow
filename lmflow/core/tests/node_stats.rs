@@ -243,6 +243,20 @@ input_ports: [busy_in, a_in, b_in]
         .unwrap()
         .send(Packet::from_i64(1).at(Timestamp(0)))
         .unwrap();
+
+    let running_deadline = std::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        let dot = graph.to_dot_with_stats();
+        if dot.contains("queued 0 · running 1/1") {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < running_deadline,
+            "busy node never occupied the single executor thread"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+
     graph
         .input("a_in")
         .unwrap()
@@ -263,12 +277,18 @@ input_ports: [busy_in, a_in, b_in]
             assert!(dot.contains("wait "), "{dot}");
             assert!(dot.contains("exec "), "{dot}");
             assert!(dot.contains("legend_executor_hot"), "{dot}");
-            std::thread::sleep(Duration::from_millis(1_050));
-            let sustained = graph.to_dot_with_stats();
-            assert!(
-                sustained.contains("fillcolor=\"#ffd6d6\""),
-                "持续排队超过 1 秒应标红:\n{sustained}"
-            );
+            let sustained_deadline = std::time::Instant::now() + Duration::from_secs(2);
+            loop {
+                let sustained = graph.to_dot_with_stats();
+                if sustained.contains("fillcolor=\"#ffd6d6\"") {
+                    break;
+                }
+                assert!(
+                    std::time::Instant::now() < sustained_deadline,
+                    "持续排队超过 1 秒应标红:\n{sustained}"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
             break;
         }
         assert!(
