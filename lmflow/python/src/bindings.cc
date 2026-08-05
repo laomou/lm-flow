@@ -1056,7 +1056,13 @@ PYBIND11_MODULE(_lmflow, m) {
       .def("wait_until_idle", &Graph::wait_until_idle, py::arg("timeout") = std::nullopt)
       .def("pump_step", &Graph::pump_step)
       .def("set_wakeup_callback", &Graph::set_wakeup_callback, py::arg("callback"),
-           "Install a thread-safe event-loop wakeup callback; pass None to remove it.")
+           "Install a thread-safe event-loop wakeup callback; pass None to remove it.\n\n"
+           "There is only ONE slot per graph: installing again replaces the previous callback, "
+           "and the notification is graph-global (\"something progressed\"), not per-port. "
+           "Graph.run_async() owns this slot today. Anything else that needs waking -- an async "
+           "output iterator, an async send that waits for queue space -- must go through a shared "
+           "dispatcher that owns the slot and broadcasts to its waiters; calling this a second "
+           "time silently displaces run_async()'s callback and the graph quietly stops advancing.")
       .def("new_buffer", &Graph::new_buffer, py::arg("shape"), py::arg("dtype"))
       .def_property_readonly("state", &Graph::state)
       .def("dump", &Graph::dump)

@@ -259,6 +259,18 @@ impl Graph {
     ///
     /// The callback may run on any engine thread and must return quickly. It should only schedule
     /// the host loop to call [`pump_step`](Self::pump_step) until it returns `false`.
+    ///
+    /// # There is only one slot
+    ///
+    /// A graph holds a *single* callback: installing again **replaces** the previous one rather
+    /// than adding to it, and the notification is graph-global — it says "something progressed",
+    /// not which port produced output or which queue freed a slot.
+    ///
+    /// So a host that wants several independent wakeup consumers (waiting for the run to finish,
+    /// for a port to emit, for an input queue to drain) must fan out itself: one owner installs
+    /// this callback and broadcasts to the waiters, each re-checking its own condition. Calling
+    /// this a second time from elsewhere silently displaces the first callback, and the symptom
+    /// is a graph that stops advancing — no error, no log.
     pub fn set_wakeup_callback<F>(&self, callback: F)
     where
         F: Fn() + Send + Sync + 'static,
