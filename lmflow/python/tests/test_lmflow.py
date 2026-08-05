@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 import unittest
 
@@ -223,6 +224,44 @@ output_ports: [out]
             g.start()
             g.wait_done(timeout=15.0)  # 没有输入口可喂,源自产
             self.assertEqual([p.as_int() for p in out], [0, 1, 2, 3, 4])
+
+    def test_run_async_drives_delegating_executor(self):
+        async def scenario():
+            with graph(
+                """
+executors:
+  - { name: host, type: DelegatingExecutor }
+nodes:
+  - { name: dbl, kernel: TDouble, executor: host, input_ports: [in], output_ports: [out] }
+input_ports: [in]
+output_ports: [out]
+"""
+            ) as g:
+                out = g.add_poller("out")
+                run = asyncio.create_task(g.run_async())
+                await asyncio.sleep(0)
+                g.input("in").send(21, ts=0)
+                g.close_all_inputs()
+                await asyncio.wait_for(run, timeout=2.0)
+                self.assertEqual(out.try_next().as_int(), 42)
+
+        asyncio.run(scenario())
+
+    def test_run_async_waits_for_pool_source_without_polling(self):
+        async def scenario():
+            with graph(
+                """
+nodes:
+  - { name: src, kernel: RangeSourceKernel, input_ports: [], output_ports: [out],
+      options: { count: 3 }, rate: 100.0 }
+output_ports: [out]
+"""
+            ) as g:
+                out = g.add_poller("out")
+                await asyncio.wait_for(g.run_async(), timeout=2.0)
+                self.assertEqual([packet.as_int() for packet in out], [0, 1, 2])
+
+        asyncio.run(scenario())
 
     def test_source_yield_releases_worker_and_retries(self):
         with graph(

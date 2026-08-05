@@ -677,6 +677,26 @@ class Graph {
     return lmflow_graph_pump_step(g_);
   }
 
+  void set_wakeup_callback(const py::object& callback) {
+    if (callback.is_none()) {
+      LMFlowStatus status;
+      {
+        py::gil_scoped_release unlock;
+        status = lmflow_graph_set_wakeup_callback(g_, nullptr, nullptr);
+      }
+      check(status, "set_wakeup_callback");
+      wakeup_callback_.reset();
+      return;
+    }
+    wakeup_callback_ = py::reinterpret_borrow<py::function>(callback);
+    LMFlowStatus status;
+    {
+      py::gil_scoped_release unlock;
+      status = lmflow_graph_set_wakeup_callback(g_, &wakeup_trampoline, this);
+    }
+    check(status, "set_wakeup_callback");
+  }
+
   int state() const { return static_cast<int>(lmflow_graph_state(g_)); }
   std::string dump() const {
     const char* s = lmflow_graph_dump(g_);
@@ -739,8 +759,10 @@ class Graph {
     g_ = nullptr;
     {
       py::gil_scoped_release unlock;
+      lmflow_graph_set_wakeup_callback(g, nullptr, nullptr);
       lmflow_graph_free(g);
     }
+    wakeup_callback_.reset();
     observers_.clear();
   }
 
@@ -757,8 +779,20 @@ class Graph {
     }
   }
 
+  static void wakeup_trampoline(void* user) {
+    auto* self = static_cast<Graph*>(user);
+    py::gil_scoped_acquire gil;
+    if (!self->wakeup_callback_) return;
+    try {
+      (*self->wakeup_callback_)();
+    } catch (py::error_already_set& error) {
+      error.discard_as_unraisable("lmflow: wakeup callback raised an exception");
+    }
+  }
+
   LMFlowGraph* g_ = nullptr;
   std::list<py::function> observers_;
+  std::optional<py::function> wakeup_callback_;
 };
 
 py::tuple Context::new_buffer(const std::vector<int64_t>& shape, const py::object& dtype) {
@@ -1000,6 +1034,8 @@ PYBIND11_MODULE(_lmflow, m) {
       .def("wait_done", &Graph::wait_done, py::arg("timeout") = std::nullopt)
       .def("wait_until_idle", &Graph::wait_until_idle, py::arg("timeout") = std::nullopt)
       .def("pump_step", &Graph::pump_step)
+      .def("set_wakeup_callback", &Graph::set_wakeup_callback, py::arg("callback"),
+           "Install a thread-safe event-loop wakeup callback; pass None to remove it.")
       .def("new_buffer", &Graph::new_buffer, py::arg("shape"), py::arg("dtype"))
       .def_property_readonly("state", &Graph::state)
       .def("dump", &Graph::dump)

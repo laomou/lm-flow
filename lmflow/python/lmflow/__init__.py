@@ -49,7 +49,8 @@ usual case where the Python main thread calls ``wait_done`` / ``poller.next`` or
 ``pump_step``, they run on that main thread and can overlap with C++ kernels on a pool.
 The tradeoff is that a delegating executor only advances while a host thread is inside
 a blocking call (``wait_done`` / ``wait_until_idle`` / ``poller.next`` / blocking
-``send``), or explicitly calls ``pump_step``.
+``send``), explicitly calls ``pump_step``, or runs ``await graph.run_async()``. The async path
+uses an engine wakeup callback and ``asyncio.call_soon_threadsafe``; it does not poll.
 
 The default executor itself is engine-owned and not configurable — ``default`` is a
 reserved name in ``executors``.
@@ -70,6 +71,7 @@ from __future__ import annotations
 
 import os
 import sys
+import asyncio
 from typing import Any, Callable, Iterator, Sequence
 
 try:
@@ -387,6 +389,48 @@ class Graph:
         nodes without entering a blocking wait.
         """
         return bool(self._g.pump_step())
+
+    async def run_async(self) -> None:
+        """Run the graph without blocking the current asyncio event loop.
+
+        If the graph is initialized, this method starts it. Engine threads signal the loop through
+        a coalesced wakeup callback; delegated tasks are then drained on the event-loop thread.
+        Pool-only graphs also wake the loop on completion or failure, so no polling timer is used.
+
+        The graph must eventually terminate: close its inputs, let a source call
+        :meth:`Context.source_done`, or call :meth:`cancel`.
+        """
+        loop = asyncio.get_running_loop()
+        wakeup = asyncio.Event()
+
+        def notify_loop() -> None:
+            loop.call_soon_threadsafe(wakeup.set)
+
+        self._g.set_wakeup_callback(notify_loop)
+        try:
+            if self.state == GraphState.INITIALIZED:
+                self.start()
+            elif self.state not in (
+                GraphState.RUNNING,
+                GraphState.DRAINING,
+                GraphState.TERMINATED,
+            ):
+                raise RuntimeError(
+                    "run_async requires an initialized, running, draining, or terminated graph"
+                )
+
+            while True:
+                wakeup.clear()
+                while self.pump_step():
+                    pass
+                if self.state == GraphState.TERMINATED:
+                    self.wait_done(timeout=0.0)
+                    return
+                if wakeup.is_set():
+                    continue
+                await wakeup.wait()
+        finally:
+            self._g.set_wakeup_callback(None)
 
     # ---- 内省 ----
 

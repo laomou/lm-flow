@@ -971,7 +971,10 @@ lmflow_input_send(阻塞等待空位时)
 ```
 
 - 若宿主只 `send` 而从不调用上述任一接口,**委托执行器上的节点不会推进**。
-  自己掌握事件循环、不愿长阻塞的宿主可以用 `Graph::pump_step()` 主动推进一步。
+  自己掌握事件循环、不愿长阻塞的宿主可安装 `Graph::set_wakeup_callback` /
+  `lmflow_graph_set_wakeup_callback`:回调从任意引擎线程发出,只负责向 Qt/libuv/自研 loop
+  投递事件；事件循环线程收到后反复 `pump_step()` 到 false。通知按边沿合并,不会每个
+  委托任务都跨线程唤醒一次。Python 直接用 `await graph.run_async()`。
 - 反之,这些接口在等待期间一律抽取并执行委托任务,故不会因此死锁。
 - 源节点(0 输入)**不能**挂委托执行器:用户 `process` 仍可能阻塞并独占宿主线程、
   拖垮全图(建图期报错)。线程池上的 Source 应使用 `source_yield` / `rate` 协作等待；

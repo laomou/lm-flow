@@ -256,6 +256,56 @@ output_ports: [out]
 }
 
 #[test]
+fn c_abi_wakeup_callback_coalesces_delegated_tasks() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static WAKES: AtomicUsize = AtomicUsize::new(0);
+    unsafe extern "C" fn wake(_user: *mut c_void) {
+        WAKES.fetch_add(1, Ordering::SeqCst);
+    }
+
+    lmflow::register_builtin_kernels();
+    WAKES.store(0, Ordering::SeqCst);
+    unsafe {
+        let graph = lmflow_graph_new();
+        let yaml = cs(r#"
+executors:
+  - { name: host, type: DelegatingExecutor }
+nodes:
+  - { name: pass, kernel: PassThroughKernel, executor: host, input_ports: [in], output_ports: [out] }
+input_ports: [in]
+output_ports: [out]
+"#);
+        assert_eq!(lmflow_graph_init_from_yaml(graph, yaml.as_ptr()), 0);
+        assert_eq!(
+            lmflow_graph_set_wakeup_callback(graph, Some(wake), std::ptr::null_mut()),
+            0
+        );
+        assert_eq!(lmflow_graph_start(graph), 0);
+        let input_name = cs("in");
+        let input = lmflow_graph_input(graph, input_name.as_ptr());
+        assert_eq!(lmflow_input_send(input, make_int_packet(1, 0)), 0);
+        assert_eq!(lmflow_input_send(input, make_int_packet(2, 1)), 0);
+        assert_eq!(
+            WAKES.load(Ordering::SeqCst),
+            1,
+            "multiple queued delegated tasks should share one wakeup"
+        );
+        while lmflow_graph_pump_step(graph) {}
+        assert_eq!(lmflow_input_send(input, make_int_packet(3, 2)), 0);
+        assert_eq!(
+            WAKES.load(Ordering::SeqCst),
+            2,
+            "draining to false should re-arm the next wakeup"
+        );
+        lmflow_graph_set_wakeup_callback(graph, None, std::ptr::null_mut());
+        lmflow_graph_cancel(graph);
+        let _ = lmflow_graph_wait_done(graph);
+        lmflow_input_free(input);
+        lmflow_graph_free(graph);
+    }
+}
+
+#[test]
 fn builtin_packet_types_roundtrip() {
     unsafe {
         // 整数

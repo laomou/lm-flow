@@ -326,6 +326,8 @@ impl GraphInner {
         self.in_flight.store(0, Ordering::SeqCst);
         self.delegated_cursor.store(0, Ordering::Relaxed);
         self.delegated_running.store(false, Ordering::Release);
+        self.wakeup_pending.store(false, Ordering::Release);
+        self.wakeup_generation.store(0, Ordering::Release);
         {
             let mut a = self.activity.0.lock().unwrap_or_else(|e| e.into_inner());
             a.waiters = 0;

@@ -8,6 +8,9 @@ impl GraphInner {
     }
     pub(super) fn set_state(&self, s: State) {
         *self.state.lock().expect("state lock poisoned") = s;
+        if s == State::Terminated {
+            self.request_wakeup();
+        }
     }
 
     pub(super) fn send(&self, edge: EdgeId, pkt: Packet, blocking: bool) -> Result<()> {
@@ -251,10 +254,13 @@ impl GraphInner {
     /// `try_claim` 返回到任务真正入队之间会出现「节点已有已认领调用、全局仍显示空闲」
     /// 的窗口,`wait_done` 可能把正常排空误报成卡死。
     pub(super) fn dispatch_task(&self, n: NodeId) {
-        if !self.executors[self.nodes[n].executor].submit(n) {
+        let executor = &self.executors[self.nodes[n].executor];
+        if !executor.submit(n) {
             // 池已关停(仅发生在拆图时):撤销全局计数。该次认领残留在 ready 里,
             // 但拆图路径不依赖精确排空(GraphInner::drop 兜底关流),不会死锁。
             self.in_flight.fetch_sub(1, Ordering::SeqCst);
+        } else if executor.is_delegating() {
+            self.request_wakeup();
         }
         self.notify_activity();
     }
@@ -292,6 +298,7 @@ impl GraphInner {
 
     pub fn executor_task_completed(&self) {
         self.notify_activity();
+        self.request_wakeup();
     }
 
     /// 执行器空闲 = 没有已认领调用,且没有委托给宿主线程的待办。
@@ -560,6 +567,51 @@ impl GraphInner {
     /// 执行一步:跑一个主线程任务,或推进关流。返回是否真的做了事。
     pub(super) fn pump_step(&self) -> bool {
         self.run_one_main_task() || self.try_advance_closing()
+    }
+
+    fn delegated_tasks_pending(&self) -> bool {
+        self.executors
+            .iter()
+            .any(|executor| executor.is_delegating() && executor.pending() > 0)
+    }
+
+    pub(super) fn request_wakeup(&self) {
+        self.wakeup_generation.fetch_add(1, Ordering::AcqRel);
+        if self
+            .wakeup_pending
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return;
+        }
+        let callback = self
+            .wakeup_callback
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let Some(callback) = callback.as_ref() else {
+            self.wakeup_pending.store(false, Ordering::Release);
+            return;
+        };
+        // 持锁调用是刻意的：clear_wakeup_callback 必须等已进入的回调返回，C/Python
+        // 宿主随后才能安全释放 user 指针。回调契约禁止重入 graph API，只允许投递事件。
+        if catch_unwind(AssertUnwindSafe(|| callback())).is_err() {
+            runtime::log_warn("graph wakeup callback panicked; notification was discarded");
+        }
+    }
+
+    pub(super) fn set_wakeup_callback(&self, callback: Option<WakeupCallback>) {
+        *self
+            .wakeup_callback
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = callback;
+        self.wakeup_pending.store(false, Ordering::Release);
+        if self.delegated_tasks_pending()
+            || self.shared.is_cancelled()
+            || self.shared.has_error()
+            || self.state() == State::Terminated
+        {
+            self.request_wakeup();
+        }
     }
 
     pub(super) fn run_node(&self, n: NodeId) {
@@ -1034,7 +1086,17 @@ impl GraphInner {
         self.wait_done(None)
     }
     pub fn pump_step_pub(&self) -> bool {
-        self.pump_step()
+        let generation = self.wakeup_generation.load(Ordering::Acquire);
+        let progressed = self.pump_step();
+        if !progressed {
+            self.wakeup_pending.store(false, Ordering::Release);
+            if self.wakeup_generation.load(Ordering::Acquire) != generation
+                || self.delegated_tasks_pending()
+            {
+                self.request_wakeup();
+            }
+        }
+        progressed
     }
     pub fn all_nodes_closed_pub(&self) -> bool {
         self.all_nodes_closed()
