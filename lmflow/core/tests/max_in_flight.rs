@@ -215,9 +215,9 @@ fn max_in_flight_on_single_threaded_executor_is_rejected() {
     let err = Graph::from_yaml(
         r#"
 executors:
-  - { name: "", type: "DelegatingExecutor" }
+  - { name: "host", type: "DelegatingExecutor" }
 nodes:
-  - { name: "s", kernel: "PassThroughKernel", input_ports: ["in"], output_ports: ["out"], max_in_flight: 4 }
+  - { name: "s", kernel: "PassThroughKernel", executor: "host", input_ports: ["in"], output_ports: ["out"], max_in_flight: 4 }
 input_ports: ["in"]
 output_ports: ["out"]
 "#,

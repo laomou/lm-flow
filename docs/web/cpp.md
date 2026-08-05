@@ -288,12 +288,16 @@ A node that declares no `executor` runs on the **default executor** — a thread
 CPU count, which the engine creates for you. That is why the example above makes progress with no
 `executors:` block at all.
 
-If you want the older behaviour (zero concurrency, deterministic order, Python kernels free of GIL
-contention), make the default executor hand work back to the host thread:
+The default executor is **engine-owned and not configurable** — `default` is a reserved name in
+`executors`. Everything you declare there is your own executor and must be named. So if you want the
+older behaviour (zero concurrency, deterministic order, Python kernels free of GIL contention),
+declare a `DelegatingExecutor` and point the nodes at it:
 
 ```yaml
 executors:
-  - { name: "", type: "DelegatingExecutor" }   # empty name configures the default
+  - { name: "host", type: "DelegatingExecutor" }
+nodes:
+  - { name: draw, kernel: Overlay, executor: "host" }
 ```
 
 A delegating executor owns no threads, so its tasks are only pumped while the host is inside a
@@ -929,10 +933,11 @@ The rules that actually bite, in one place:
    packet borrowed from one, is a dangling reference.
 3. **Observer and log callbacks run on the dispatching thread** — a pool thread if the producing node
    has an executor. Make them thread-safe, and do not re-enter `lmflow_graph_*` from them.
-4. **Nodes without an `executor` run on the default executor**, a thread pool sized to the CPU
-   count. So the default *is* concurrent and execution order is not deterministic. Declare
-   `- { name: "", type: "DelegatingExecutor" }` to hand the default back to the host thread and get
-   deterministic, zero-concurrency execution (pumped during blocking host calls).
+4. **Nodes without an `executor` run on the default executor**, an engine-owned thread pool sized to
+   the CPU count (`default` is a reserved name; it is not configurable). So the default *is*
+   concurrent and execution order is not deterministic. For deterministic, zero-concurrency
+   execution, declare your own `DelegatingExecutor` and point the nodes at it (its tasks are pumped
+   during blocking host calls).
 5. **A source node (no input ports) cannot run on a delegating executor.** Its `process` typically
    blocks waiting for the next frame, which would monopolise the host thread and stall the graph.
    Nor may a pool carry as many source nodes as it has threads — that starves everything else on it.

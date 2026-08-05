@@ -8,7 +8,8 @@ use lmflow::{Graph, Packet, Timestamp};
 
 // 两个节点都未指定 executor,故都归**默认执行器** —— 一个按 CPU 核数开线程的线程池,
 // 引擎自动创建,不必写 executors 块。想要零并发、顺序确定(便于断点调试)就把默认
-// 换成委托执行器:executors: [{ name: "", type: "DelegatingExecutor" }]。
+// 自己声明一个委托执行器、把节点指过去:
+// executors: [{ name: "host", type: "DelegatingExecutor" }] + 节点上写 executor: "host"。
 const CONFIG: &str = r#"
 nodes:
   - name: "node1"

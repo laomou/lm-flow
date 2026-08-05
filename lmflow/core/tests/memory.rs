@@ -52,10 +52,10 @@ fn linear_graph(kernel: &str) -> Graph {
     Graph::from_yaml(&format!(
         r#"
 executors:
-  - {{ name: "", type: "DelegatingExecutor" }}
+  - {{ name: "host", type: "DelegatingExecutor" }}
 nodes:
-  - {{ name: "a", kernel: "{kernel}", input_ports: ["in"], output_ports: ["mid"] }}
-  - {{ name: "b", kernel: "{kernel}", input_ports: ["mid"], output_ports: ["out"] }}
+  - {{ name: "a", kernel: "{kernel}", executor: "host", input_ports: ["in"], output_ports: ["mid"] }}
+  - {{ name: "b", kernel: "{kernel}", executor: "host", input_ports: ["mid"], output_ports: ["out"] }}
 input_ports: ["in"]
 output_ports: ["out"]
 "#
@@ -358,11 +358,11 @@ fn cow_is_zero_copy_on_linear_pipeline() {
     let graph = Graph::from_yaml(
         r#"
 executors:
-  - { name: "", type: "DelegatingExecutor" }
+  - { name: "host", type: "DelegatingExecutor" }
 nodes:
-  - { name: "p1",  kernel: "PassThroughKernel", input_ports: ["in"],  output_ports: ["m1"] }
-  - { name: "p2",  kernel: "PassThroughKernel", input_ports: ["m1"],  output_ports: ["m2"] }
-  - { name: "inv", kernel: "InvertKernel",      input_ports: ["m2"],  output_ports: ["out"] }
+  - { name: "p1",  kernel: "PassThroughKernel", executor: "host", input_ports: ["in"],  output_ports: ["m1"] }
+  - { name: "p2",  kernel: "PassThroughKernel", executor: "host", input_ports: ["m1"],  output_ports: ["m2"] }
+  - { name: "inv", kernel: "InvertKernel",      executor: "host", input_ports: ["m2"],  output_ports: ["out"] }
 input_ports: ["in"]
 output_ports: ["out"]
 "#,

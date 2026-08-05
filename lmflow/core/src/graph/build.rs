@@ -169,24 +169,33 @@ impl GraphInner {
 
         // ---- 校验 5 + 建执行器 ----
         //
-        // 归一化:`executors` 条目名为空 = 配置**默认执行器**,节点不写 `executor` 也归到它。
-        // 归一化之后默认执行器和其它执行器完全同构 —— 有名字、可索引、可提交任务,
-        // 于是重名 / 未定义名这两条既有校验自动覆盖它,派任务时也无需为它开特例。
-        let mut executors: Vec<Executor> = Vec::new();
+        // `executors` 里写的**一律是宿主自己的执行器**,必须有名字 —— 节点靠名字引用它。
+        // 默认执行器则完全由引擎持有:按 CPU 核数开的线程池,恒在下标 0,YAML 无从干涉。
+        // 因此 `default` 是**保留名**,写了报错;否则图里会同时出现两个 `default`。
+        // 节点侧 `executor` 留空即归默认执行器,归一化到同一个名字。于是默认执行器和
+        // 其它执行器完全同构 —— 有名字、可索引、可提交任务,派任务时无需为它开特例。
+        let mut executors: Vec<Executor> = vec![Executor::Pool(default_thread_pool())];
         for e in &cfg.executors {
-            let name = exec_name(&e.name);
-            if executors.iter().any(|p| p.name() == name) {
+            if e.name.is_empty() {
+                return Err(Error::InvalidArg(
+                    "executors entry must have a name; nodes select an executor by it".into(),
+                ));
+            }
+            if e.name == DEFAULT_EXECUTOR_NAME {
                 return Err(Error::InvalidArg(format!(
-                    "executor `{name}` defined more than once \
-                     (an entry with an empty name configures the default executor `{DEFAULT_EXECUTOR_NAME}`)"
+                    "executor name `{DEFAULT_EXECUTOR_NAME}` is reserved for the engine's implicit \
+                     default executor (where nodes without an `executor` run) and cannot be declared. \
+                     Pick another name; to control threads / affinity / priority, declare your own \
+                     pool and point the nodes at it with `executor:`"
                 )));
             }
-            executors.push(build_executor(name, e)?);
-        }
-        // 宿主没配默认执行器就补一个:按核数开的线程池。它必须存在且在下标 0 ——
-        // 不写 `executor` 的节点全归它,`Node::executor` 因此没有「不属于任何执行器」这种状态。
-        if !executors.iter().any(|p| p.name() == DEFAULT_EXECUTOR_NAME) {
-            executors.insert(0, Executor::Pool(default_thread_pool()));
+            if executors.iter().any(|p| p.name() == e.name) {
+                return Err(Error::InvalidArg(format!(
+                    "executor `{}` defined more than once",
+                    e.name
+                )));
+            }
+            executors.push(build_executor(&e.name, e)?);
         }
         let known: Vec<&str> = executors.iter().map(|p| p.name()).collect();
         for (idx, n) in cfg.nodes.iter().enumerate() {
@@ -199,8 +208,8 @@ impl GraphInner {
                 )));
             }
         }
-        // 定义了却没人用的池只会白占线程,出声提醒。默认执行器豁免:它是引擎补的,
-        // 没人用不是宿主的错(而且一句名字为空的警告只会让人困惑)。
+        // 定义了却没人用的池只会白占线程,出声提醒。默认执行器豁免:它是引擎建的,
+        // 宿主根本没声明过它,没人用不是宿主的错。
         for p in &executors {
             if p.name() == DEFAULT_EXECUTOR_NAME || p.is_delegating() {
                 continue;
@@ -275,7 +284,7 @@ impl GraphInner {
             let ctxs: Vec<UnsafeCell<Context>> =
                 (0..mif).map(|_| UnsafeCell::new(make_ctx())).collect();
 
-            // 上面已校验过名字存在(空名归一化到默认执行器),故必有下标。
+            // 上面已校验过名字存在(节点侧留空归一化到默认执行器),故必有下标。
             let executor = executors
                 .iter()
                 .position(|p| p.name() == exec_name(&n.executor))
@@ -376,10 +385,10 @@ impl GraphInner {
     }
 }
 
-/// 节点 `executor` 字段的归一化:空 = 默认执行器。
+/// 节点 `executor` 字段的归一化:空 = 引擎隐式的默认执行器。
 ///
-/// `executors` 条目名走同一条规则,于是「不写 executor」和「写了空名条目」
-/// 天然指向同一个执行器。
+/// 只作用于**节点侧**的引用 —— `executors` 条目必须有名字,且不得叫 `default`
+/// (那个名字是引擎保留的,见 `DEFAULT_EXECUTOR_NAME`)。
 fn exec_name(n: &str) -> &str {
     if n.is_empty() {
         DEFAULT_EXECUTOR_NAME
@@ -388,10 +397,10 @@ fn exec_name(n: &str) -> &str {
     }
 }
 
-/// 默认执行器(宿主没配时引擎补的那个):按 CPU 核数开线程的线程池。
+/// 引擎隐式的默认执行器:按 CPU 核数开线程的线程池。
 ///
-/// 不绑核、不设实时优先级 —— 那些是场景相关的调优,宿主想改就在 YAML 里写一条空名
-/// `executors` 条目覆盖(含改成 `DelegatingExecutor`)。
+/// 不绑核、不设实时优先级,也不可配 —— 那些是场景相关的调优,宿主想控制就自己声明一个
+/// 具名池(或具名 `DelegatingExecutor`),把节点用 `executor:` 指过去。
 fn default_thread_pool() -> ThreadPool {
     let n = std::thread::available_parallelism()
         .map(|n| n.get())

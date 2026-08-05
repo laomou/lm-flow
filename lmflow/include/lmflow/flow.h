@@ -507,19 +507,20 @@ const char* lmflow_ctx_options_json(const LMFlowContext*);
  *     num_threads / affinity / priority 对它没有意义,写了会报错而非静默忽略。
  *
  * 默认(节点未写 executor)= **默认执行器**,它是一个按 CPU 核数开线程的线程池。
- *   - executors 里**名字为空的条目 = 配置默认执行器**,内部归一化成名字 "default"
- *     (于是 DOT 标 @default、线程名 default-0,和别的执行器完全同构);
- *   - 不写这条时引擎按可用并行度补一个;想改线程数 / 绑核 / 优先级就写空名条目覆盖:
- *
- *       executors:
- *         - { name: "", type: "ThreadPoolExecutor", num_threads: 4 }
- *
+ *   - 它**完全由引擎持有**,名字是 "default"(于是 DOT 标 @default、线程名 default-0,
+ *     和别的执行器完全同构),恒在下标 0。节点侧 executor 留空即归它。
+ *   - **不可配**:不绑核、不设实时优先级,YAML 里碰不到它。executors 里写的一律是**宿主
+ *     自己的**执行器,必须有名字,且 "default" 是**保留名** —— 声明它会报错。
  *   - ⚠ 代价:默认执行**不是零并发**、执行顺序不确定,且 Python 算子会抢 GIL。
  *
- * 想要零并发 / 顺序确定 / 断点调试直观 / Python 算子免 GIL 争抢,把默认换成委托执行器:
+ * 想控制线程数 / 绑核 / 优先级,或想要宿主线程语义 —— 都是「自己声明一个,把节点指过去」:
  *
  *       executors:
- *         - { name: "", type: "DelegatingExecutor" }
+ *         - { name: "cpu",  type: "ThreadPoolExecutor", num_threads: 4 }
+ *         - { name: "host", type: "DelegatingExecutor" }   # 零并发、顺序确定、免 GIL 争抢
+ *       nodes:
+ *         - { name: "detect", kernel: "Detector", executor: "cpu"  }
+ *         - { name: "draw",   kernel: "Overlay",  executor: "host" }
  *
  * ⚠ 委托任务的执行时机:引擎不能凭空占用宿主线程,只能在宿主**进入引擎**时借用它。
  *   因此挂在 DelegatingExecutor 上的节点,其任务在宿主调用下列**阻塞接口**期间被抽取执行:

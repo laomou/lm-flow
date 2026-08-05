@@ -107,10 +107,14 @@ fn sink_chain_yaml_timing(depth: usize, pool: usize, timing: bool) -> String {
         // pool == 0 要量的是**宿主线程**路径。默认执行器现在是线程池(ADR #16),
         // 所以必须显式把默认换成委托执行器 —— 否则 `sink/main_thread` 会悄悄变成
         // 又一组线程池数据,和上面记录的基线不可比。
-        s += "executors:\n  - { name: \"\", type: \"DelegatingExecutor\" }\n";
+        s += "executors:\n  - { name: \"host\", type: \"DelegatingExecutor\" }\n";
     }
     s += "nodes:\n";
-    let exec = if pool > 0 { ", executor: \"cpu\"" } else { "" };
+    let exec = if pool > 0 {
+        ", executor: \"cpu\""
+    } else {
+        ", executor: \"host\""
+    };
     for i in 0..depth {
         let inp = if i == 0 {
             "in".to_string()

@@ -34,17 +34,23 @@ explicitly. ``__del__`` is only a fallback and its timing is not guaranteed.
 thread pool sized to the CPU count. So by default Python kernels *do* contend for
 the GIL and cannot truly run in parallel; heavy compute belongs in C++ kernels.
 
-To get back the contention-free behaviour, make the default executor delegate to the
-host thread — one line of YAML::
+To get back the contention-free behaviour, declare a ``DelegatingExecutor`` and point
+the Python kernels at it::
 
     executors:
-      - { name: "", type: "DelegatingExecutor" }
+      - { name: "host", type: "DelegatingExecutor" }
+      - { name: "cpu",  type: "ThreadPoolExecutor", num_threads: 4 }
+    nodes:
+      - { name: resize, kernel: PyResize, executor: "host" }   # Python: no GIL contention
+      - { name: invert, kernel: Invert,   executor: "cpu"  }   # C++:真并行
 
-Then Python kernels all run on the Python main thread, exactly as before. You can
-also declare a *named* ``DelegatingExecutor`` and put only the Python kernels on it,
-leaving the C++ kernels on a pool so the two genuinely run in parallel. The tradeoff
-is that a delegating executor only advances while the host is inside a blocking call
-(``wait_done`` / ``wait_until_idle`` / ``poller.next`` / blocking ``send``).
+Kernels on ``host`` run on the Python main thread, exactly as before, and can run in
+parallel with C++ kernels on a pool. The tradeoff is that a delegating executor only
+advances while the host is inside a blocking call (``wait_done`` / ``wait_until_idle``
+/ ``poller.next`` / blocking ``send``).
+
+The default executor itself is engine-owned and not configurable — ``default`` is a
+reserved name in ``executors``.
 
 Every potentially blocking call (``poller.next`` / ``wait_done`` / ``send``) releases
 the GIL while waiting.

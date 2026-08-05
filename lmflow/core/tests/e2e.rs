@@ -519,9 +519,9 @@ fn source_node_rejected_on_delegating_executor() {
     let err = Graph::from_yaml(
         r#"
 executors:
-  - { name: "", type: "DelegatingExecutor" }
+  - { name: "host", type: "DelegatingExecutor" }
 nodes:
-  - { name: "src", kernel: "RangeSourceKernel", input_ports: [], output_ports: ["out"] }
+  - { name: "src", kernel: "RangeSourceKernel", executor: "host", input_ports: [], output_ports: ["out"] }
 output_ports: ["out"]
 "#,
     )

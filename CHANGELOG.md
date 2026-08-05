@@ -41,19 +41,21 @@ to each GitHub Release.
 - **`DelegatingExecutor` — host-thread execution is now an executor type**, selected with
   `type: "DelegatingExecutor"`. It owns no threads and hands ready nodes back to the host thread,
   restoring the old default's guarantees: zero concurrency, deterministic order, straightforward
-  debugging, and Python kernels free of GIL contention. Declaring it with an empty name makes it the
-  default for the whole graph:
+  debugging, and Python kernels free of GIL contention. Declare one and point nodes at it:
 
   ```yaml
   executors:
-    - { name: "", type: "DelegatingExecutor" }
+    - { name: "host", type: "DelegatingExecutor" }
+  nodes:
+    - { name: draw, kernel: Overlay, executor: "host" }
   ```
 
   `num_threads` / `affinity` / `priority` on a delegating executor are rejected rather than silently
   ignored.
-- **An empty `executors[].name` configures the default executor** (normalised to `default`), so the
-  default pool's thread count, CPU affinity, and realtime priority are all tunable:
-  `- { name: "", type: "ThreadPoolExecutor", num_threads: 4 }`.
+- **`default` is now a reserved executor name.** Everything in `executors` is the host's own
+  executor and must be named; the default executor is engine-owned and not configurable. Declaring
+  `name: "default"`, or an entry with an empty name, is an error. To control threads / affinity /
+  priority, declare your own pool and point the nodes at it.
 - **`Graph::pump_step()`** is documented as the way for a host that owns its own event loop to
   advance delegating-executor nodes without blocking.
 

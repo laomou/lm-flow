@@ -42,10 +42,12 @@ class PyOffsetKernel(lmflow.Kernel):
 
 
 # 两个节点都未指定 executor → 都归**默认执行器**(按 CPU 核数开线程的线程池)。
-# ⚠ 于是 Python 算子会在引擎工作线程上抢 GIL。想要「完全没有 GIL 争抢」,把默认换成
-# 委托执行器(交还 Python 主线程),一行即可 —— 见 opencv_pipeline 那个例子:
+# ⚠ 于是 Python 算子会在引擎工作线程上抢 GIL。想要「完全没有 GIL 争抢」,自己声明一个
+# 委托执行器(交还 Python 主线程)、把节点指过去 —— 见 opencv_pipeline 那个例子:
 #   executors:
-#     - { name: "", type: "DelegatingExecutor" }
+#     - { name: "host", type: "DelegatingExecutor" }
+#   nodes:
+#     - { name: scale, kernel: ScaleKernel, executor: "host", ... }
 CONFIG = """
 nodes:
   - name: "scale"

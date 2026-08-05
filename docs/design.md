@@ -66,7 +66,7 @@
 | 13 | **`flow.hpp` 糖层保留**,但不属于 ABI | 让 C++ 算子写法自然;模板便利全部在用户 TU 内 monomorphize,不过界 |
 | 14 | **OpenCV 不进 core**,隔离到可选头 `flow_cv.hpp` | 引擎与 `flow.h`/`flow.hpp` 零图像库依赖,没装 OpenCV 也能编译全部 core |
 | 15 | **`LMFlowBuffer` 预留 `flags`/`device`/`reserved`** | 一次性预留,未来加字段(最可能是 GPU 内存空间)不破 ABI |
-| 16 | **节点默认跑在默认线程池(按 CPU 核数)**;宿主线程执行改为显式 `DelegatingExecutor` | 默认不必宿主进入引擎就能推进(旧默认下「只 `send` 不 `wait` 就不动」是常见困惑);要零并发/顺序确定/Python 免 GIL 争抢,声明一条空名 `DelegatingExecutor` 即可 |
+| 16 | **节点默认跑在默认线程池(按 CPU 核数)**;宿主线程执行改为显式 `DelegatingExecutor` | 默认不必宿主进入引擎就能推进(旧默认下「只 `send` 不 `wait` 就不动」是常见困惑);要零并发/顺序确定/Python 免 GIL 争抢,自己声明一个具名 `DelegatingExecutor`、把节点指过去 |
 | 17 | **端口扁平序号 = YAML 声明顺序** | 常见做法是按 tag 字典序分组,混用「有标签/无标签」端口时 `Index(0)` 拿到的不是写的第一个 —— 真实陷阱,故分道 |
 | 18 | **引入 side packet(常量输入)** | `options` 只能给标量/JSON,无法交付「一个已初始化好的模型」这类对象 |
 | 19 | **输入策略做成节点级可插拔**(`sync`/`immediate`/`fixed_size`/`sync_set`) | 实时丢帧与(A 阶段的)时间戳对齐共用同一扩展点;`fixed_size` 同时是「内部边无界」的配套内存约束 |
@@ -931,29 +931,27 @@ executors:
 
 **默认(节点未写 `executor`)= 默认执行器,它是一个按 CPU 核数开线程的线程池**(ADR #16):
 
-- `executors` 里**名字为空的条目 = 配置默认执行器**,内部归一化成名字 `default` ——
-  于是它和别的执行器完全同构:DOT 标 `@default`、线程名 `default-0`、日志里指名道姓。
-- 不写这条时引擎按 `available_parallelism()` 补一个;想改线程数 / 绑核 / 优先级就写空名条目覆盖:
-
-```yaml
-executors:
-  - { name: "", type: "ThreadPoolExecutor", num_threads: 4, affinity: [0, 1, 2, 3] }
-```
-
-- 默认池是多线程的,故默认节点配 `max_in_flight > 1` 是**合法**的(ADR #29)。
+- 它**完全由引擎持有**,名字是 `default`,恒在 `executors` 的下标 0。和别的执行器完全同构:
+  DOT 标 `@default`、线程名 `default-0`、日志里指名道姓。
+- **不可配** —— 不绑核、不设实时优先级,YAML 里碰不到它。`executors` 里写的一律是**宿主
+  自己的**执行器,故 `default` 是**保留名**,声明它会报错(否则一张图里出现两个 `default`)。
 - ⚠ 代价:默认执行不再零并发、**执行顺序不再确定**;且 Python 算子会在 worker 线程上
   抢 GIL(见 §8.2)。另见 §3.4 —— **线程池上的 CoW 零拷贝是尽力而为、不保证**。
 
-**要旧的宿主线程语义,把默认换成 `DelegatingExecutor`**(一行):
+**想控制线程数 / 绑核 / 优先级,或想要宿主线程语义 —— 都是「自己声明一个,把节点指过去」**:
 
 ```yaml
 executors:
-  - { name: "", type: "DelegatingExecutor" }
+  - { name: "cpu",  type: "ThreadPoolExecutor", num_threads: 4, affinity: [0, 1, 2, 3] }
+  - { name: "host", type: "DelegatingExecutor" }        # 不拥有线程,交还宿主线程
+nodes:
+  - { name: "detect", kernel: "Detector", executor: "cpu"  }
+  - { name: "draw",   kernel: "Overlay",  executor: "host" }   # 零并发、顺序确定
+  - { name: "post",   kernel: "Post" }                          # 不写 → 默认池
 ```
 
-换回来就重新拿到:零并发、执行顺序确定、断点调试直观,以及 **Python 算子跑在
-Python 主线程上、完全没有 GIL 争抢**(§8.2)。也可以只给部分节点用 —— 声明一个
-具名 `DelegatingExecutor`,让那几个节点 `executor:` 指它。
+挂在 `DelegatingExecutor` 上就重新拿到:零并发、执行顺序确定、断点调试直观,以及
+**Python 算子跑在 Python 主线程上、完全没有 GIL 争抢**(§8.2)。
 
 ⚠ **委托任务的执行时机** —— 引擎不能凭空占用宿主线程,只能在宿主**进入引擎**时借用它。
 因此挂在 `DelegatingExecutor` 上的节点,其任务在宿主调用下列**阻塞接口**期间被抽取执行:
@@ -1187,10 +1185,9 @@ with lmflow.Graph.from_yaml(CONFIG) as graph:        # with 是硬要求,见 8.3
 
 - ⚠ **默认会有 GIL 争抢**:默认执行器是线程池(ADR #16),Python 算子在引擎工作线程上
   被回调、期间持 GIL ⇒ 多个 Python 算子之间无法真并行。
-- **想回到「完全没有 GIL 争抢」**:把默认换成委托执行器 —— 一行
-  `executors: [{ name: "", type: "DelegatingExecutor" }]`,Python 算子就都在 Python
-  主线程上执行(§7.9)。也可以只让 Python 算子挂具名的委托执行器、把 C++ 算子放进池里,
-  两者真并行(见 `examples/python/opencv_pipeline/opencv_pipeline.py`)。
+- **想回到「完全没有 GIL 争抢」**:声明一个 `DelegatingExecutor`,把 Python 算子指过去 ——
+  它们就都在 Python 主线程上执行(§7.9)。C++ 算子仍可放进线程池,两者真并行
+  (见 `examples/python/opencv_pipeline/opencv_pipeline.py`)。
 - 重计算仍应优先写成 C++ 算子 —— 那是唯一能在池里真并行的路。
 - **所有可能阻塞的接口必须释放 GIL**(`poller.next` / `wait_done` / `send`),
   否则工作线程拿不到 GIL → 直接死锁。pybind11 用 `py::call_guard<py::gil_scoped_release>()`。

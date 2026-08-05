@@ -55,49 +55,40 @@ output_ports: ["out"]
     assert_eq!(g.executor_names(), vec!["default", "cpu"]);
 }
 
+/// `executors` 里写的一律是宿主自己的执行器:必须有名字,且不能占用引擎保留的 `default`。
 #[test]
-fn empty_executor_name_configures_the_default() {
-    init();
-    // 空名 = 配置默认执行器,而不是「一个没名字的池」。
-    let g = Graph::from_yaml(
-        r#"
-executors:
-  - { name: "", type: "ThreadPoolExecutor", num_threads: 3 }
-nodes:
-  - { name: "p", kernel: "PassThroughKernel", input_ports: ["in"], output_ports: ["out"] }
-input_ports: ["in"]
-output_ports: ["out"]
-"#,
-    )
-    .unwrap();
-    assert_eq!(
-        g.executor_names(),
-        vec!["default"],
-        "空名条目应当配置默认执行器,而不是再添一个"
-    );
-}
-
-#[test]
-fn rejects_duplicate_executors_including_the_default() {
+fn rejects_empty_and_reserved_executor_names() {
     init();
     let err = Graph::from_yaml(
         r#"
 executors:
-  - { name: "a", type: "ThreadPoolExecutor", num_threads: 1 }
-  - { name: "a", type: "ThreadPoolExecutor", num_threads: 1 }
+  - { type: "ThreadPoolExecutor", num_threads: 2 }
 nodes: []
 "#,
     )
     .unwrap_err();
-    assert!(err.to_string().contains("defined more than once"), "{err}");
+    assert!(err.to_string().contains("must have a name"), "{err}");
 
-    // 空名归一化成 "default",故这两条是同一个执行器 —— 必须当重名拒掉,
-    // 不能悄悄让后一条覆盖前一条。
+    // `default` 是引擎隐式默认执行器的名字 —— 声明它会让一张图里出现两个 default。
     let err = Graph::from_yaml(
         r#"
 executors:
-  - { name: "", type: "ThreadPoolExecutor", num_threads: 1 }
   - { name: "default", type: "ThreadPoolExecutor", num_threads: 2 }
+nodes: []
+"#,
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("is reserved"), "{err}");
+}
+
+#[test]
+fn rejects_duplicate_executors() {
+    init();
+    let err = Graph::from_yaml(
+        r#"
+executors:
+  - { name: "a", type: "ThreadPoolExecutor", num_threads: 1 }
+  - { name: "a", type: "ThreadPoolExecutor", num_threads: 1 }
 nodes: []
 "#,
     )
@@ -202,7 +193,8 @@ enum Placement {
     Default,
     /// 二:显式指名一个具名线程池。
     ExplicitPool,
-    /// 三:把默认换成 `DelegatingExecutor` —— 交还宿主线程,零并发、顺序确定。
+    /// 三:显式指名一个 `DelegatingExecutor` —— 交还宿主线程,零并发、顺序确定。
+    /// 默认执行器是引擎持有的线程池、不可替换,所以想要宿主线程语义只能自己声明一个。
     Delegating,
 }
 
@@ -222,8 +214,8 @@ impl Placement {
                 ", executor: \"cpu\"",
             ),
             Placement::Delegating => (
-                "executors:\n  - { name: \"\", type: \"DelegatingExecutor\" }\n",
-                "",
+                "executors:\n  - { name: \"host\", type: \"DelegatingExecutor\" }\n",
+                ", executor: \"host\"",
             ),
         }
     }
@@ -361,9 +353,9 @@ fn every_placement_is_labelled_in_dot() {
     for p in Placement::ALL {
         let dot = p.linear_graph().to_dot();
         let want_label = match p {
-            // 空名归一化成 default —— 委托和默认池都叫这个名字,靠填色区分。
-            Placement::Default | Placement::Delegating => "@default",
+            Placement::Default => "@default",
             Placement::ExplicitPool => "@cpu",
+            Placement::Delegating => "@host",
         };
         assert!(
             dot.contains(want_label),
@@ -386,7 +378,7 @@ fn every_placement_is_labelled_in_dot() {
     }
 }
 
-// ------------------------------------------------------- 默认执行器(空名归一化)
+// ------------------------------------------------------- 默认执行器(引擎隐式持有)
 /// 默认执行器可见、有名字、是线程池。
 #[test]
 fn default_executor_is_a_named_thread_pool() {
@@ -407,9 +399,10 @@ output_ports: ["out"]
     );
 }
 
-/// 空名条目能覆盖默认池的配置(这里用 num_threads: 1 把 worker 钉死成一个)。
+/// 想控制线程数 / 绑核 / 优先级,就自己声明一个具名池、把节点指过去 ——
+/// 默认执行器是引擎持有的,不可配(见 `rejects_empty_and_reserved_executor_names`)。
 #[test]
-fn default_pool_config_can_be_overridden() {
+fn own_pool_is_how_you_control_threads() {
     init();
     let seen = std::sync::Arc::new(Mutex::new(Vec::<String>::new()));
 
@@ -417,14 +410,17 @@ fn default_pool_config_can_be_overridden() {
         let graph = Graph::from_yaml(
             r#"
 executors:
-  - { name: "", type: "ThreadPoolExecutor", num_threads: 1 }
+  - { name: "solo", type: "ThreadPoolExecutor", num_threads: 1 }
 nodes:
-  - { name: "p", kernel: "PassThroughKernel", input_ports: ["in"], output_ports: ["out"] }
+  - { name: "p", kernel: "PassThroughKernel", executor: "solo", input_ports: ["in"], output_ports: ["out"] }
 input_ports: ["in"]
 output_ports: ["out"]
 "#,
         )
         .unwrap();
+        // 默认执行器仍然存在(恒在首位),只是这张图没节点用它。
+        assert_eq!(graph.executor_names(), vec!["default", "solo"]);
+
         let rec = seen.clone();
         graph
             .observe("out", move |_pkt| {
@@ -445,9 +441,9 @@ output_ports: ["out"]
     }
 
     let names = seen.lock().expect("lock poisoned").clone();
-    // num_threads: 1 ⇒ 只可能有 default-0 这一个 worker。
+    // num_threads: 1 ⇒ 只可能有 solo-0 这一个 worker。
     assert!(
-        names.iter().all(|n| n == "default-0"),
+        names.iter().all(|n| n == "solo-0"),
         "num_threads: 1 应当只开一个 worker,actual: {names:?}"
     );
 }

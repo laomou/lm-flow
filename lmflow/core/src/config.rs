@@ -14,8 +14,8 @@ fn default_max_queue_size() -> usize {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExecutorConfig {
-    /// 执行器名,节点用 `executor:` 按名引用。**空 = 配置默认执行器**
-    /// (归一化成 `"default"`);不写这条时引擎按 CPU 核数补一个默认线程池。
+    /// 执行器名,节点用 `executor:` 按名引用。**必填**,且 `"default"` 是引擎保留名
+    /// (那是隐式默认执行器,不写 `executor` 的节点归它)—— 两者都会在建图期报错。
     #[serde(default)]
     pub name: String,
     /// `"ThreadPoolExecutor"`(默认,空也算)= 自有工作线程的线程池;

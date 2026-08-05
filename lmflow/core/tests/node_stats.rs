@@ -68,10 +68,10 @@ output_ports: ["out"]
 /// 交还宿主线程后执行严格同步,峰值恒为 1,那种精确断言才有意义。
 const CHAIN_SYNC: &str = r#"
 executors:
-  - { name: "", type: "DelegatingExecutor" }
+  - { name: "host", type: "DelegatingExecutor" }
 nodes:
-  - { name: a, kernel: PassThrough, input_ports: ["in"],  output_ports: ["mid"] }
-  - { name: b, kernel: PassThrough, input_ports: ["mid"], output_ports: ["out"] }
+  - { name: a, kernel: PassThrough, executor: "host", input_ports: ["in"],  output_ports: ["mid"] }
+  - { name: b, kernel: PassThrough, executor: "host", input_ports: ["mid"], output_ports: ["out"] }
 input_ports: ["in"]
 output_ports: ["out"]
 "#;
