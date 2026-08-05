@@ -465,7 +465,9 @@ nodes:
             started = time.monotonic()
             g.start()
             g.wait_done(timeout=1.0)
-            self.assertGreaterEqual(time.monotonic() - started, 0.015)
+            # wait_done 成功已证明 source_yield 后发生了第二次调度；这里只守住
+            # 20 ms yield 没退化成立即忙重试，并给 Windows 计时量化留余量。
+            self.assertGreaterEqual(time.monotonic() - started, 0.01)
 
     def test_subgraph_expands_and_runs(self):
         # 子图是纯 YAML / 建图期展开,绑定无需改:一个 PassPair 实例展开成两级直通。
