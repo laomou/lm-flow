@@ -311,6 +311,12 @@ engine thread, so it must only post a lightweight event (`QMetaObject::invokeMet
 `uv_async_send`, etc.). On the event-loop thread, call `lmflow_graph_pump_step` until it returns
 false. Wakeups are coalesced and re-arm after the queue is drained.
 
+A graph has only **one** callback slot — installing again replaces the previous callback — and the
+notification is graph-global: it says "something progressed", not which port emitted or which queue
+freed a slot. If several parts of your host need waking, have one owner install the callback and
+broadcast to them, each re-checking its own condition. Installing a second callback from elsewhere
+silently displaces the first, and the symptom is a graph that quietly stops advancing.
+
 ```cpp
 struct LoopWake {
   LMFlowGraph* graph;
