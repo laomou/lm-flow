@@ -373,7 +373,7 @@ impl GraphInner {
                     return Err(Error::Kernel(format!(
                         "wait_done: internal backpressure cannot make progress; blocked queues: [{}]. \
                          increase the input queue packet capacity or inspect downstream alignment",
-                         details.join("; ")
+                        details.join("; ")
                     )));
                 }
                 if self.retry_idle_progress() {

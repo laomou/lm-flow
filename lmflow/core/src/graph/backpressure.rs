@@ -164,6 +164,12 @@ impl GraphInner {
     }
 
     /// 驱动按序刷新。下游容量不足时保留槽与 staging,让出 worker;由下游出队后重试。
+    ///
+    /// ⚠ 本文件里对 `blocked_flush_nodes` 的每次增删都**刻意放在持 `node.sched` 的作用域内**:
+    /// 它是「哪些节点有 `blocked_flush`」的索引,与 `sched.blocked_flush` 必须原子地一起变。
+    /// 分两步做会露出「索引已空、节点仍有 blocked_flush」的中间态,而 `wait_done` / `is_idle`
+    /// 正是读这个索引判死锁的 —— 读到中间态就把正常排空误报成卡死。
+    /// 由此锁序恒为 `node.sched` → `blocked_flush_nodes`(见 design.md R2),反向即死锁。
     pub(super) fn drive_invocation_flushes(&self, n: NodeId, mut first: Option<(usize, bool)>) {
         let node = &self.nodes[n];
         loop {
@@ -229,6 +235,9 @@ impl GraphInner {
         if self.shared.is_cancelled() || self.shared.has_error() {
             self.finish_all_backpressure_blocks();
         }
+        // 取快照即释放索引锁 —— 下面要锁 `node.sched`,而锁序是 sched → 索引(R2),
+        // 反过来就死锁。这里靠的是「临时 MutexGuard 活到语句末」:别把 `.lock()` 的
+        // 结果绑成局部变量,那会把它的存活期拉长到覆盖下面的 sched 加锁。
         let blocked: Vec<NodeId> = self
             .blocked_flush_nodes
             .lock()

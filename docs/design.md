@@ -577,8 +577,19 @@ cc.Input(0)               //        直接序号,最省事但依赖声明顺序
 > 回调前必须放掉所有锁,否则算子内部回调 `lmflow_ctx_*`(或算子自身阻塞)会死锁。
 > 这条决定了 §7.3 的 staging 设计。
 >
-> **R2 —— 锁序恒为 `node.sched` → `edge.queue`,禁止反向。**
+> **R2 —— 锁序恒为 `node.sched` → {`edge.queue`, `blocked_flush_nodes`},禁止反向。**
 > 推包路径必须「锁边 → push → **解锁边** → 再唤醒下游节点」。全局无环,故无死锁。
+>
+> `blocked_flush_nodes` 是「哪些节点有 `blocked_flush`」的索引,**必须与 `sched.blocked_flush`
+> 在同一把 `node.sched` 锁内一起更新**。否则会出现「索引已空、节点仍有 blocked_flush」
+> 这类不一致快照,而 `wait_done` / `is_idle` 正是读这个索引来判定死锁的 —— 不一致就会
+> 把正常排空误报成卡死。
+>
+> 只读该索引的地方(`is_idle`、`wait_done`、`wait_until_idle`、`resume_blocked_flushes`)
+> 一律「取快照后立即释放,再去锁 `sched`」。注意这依赖**临时 `MutexGuard` 在语句末释放**:
+> `let v: Vec<_> = self.blocked_flush_nodes.lock()...collect();` 出了这条语句锁就没了。
+> 同一条语言规则曾经反过来咬过一次(见 §附录的 `pump_step` 自锁死),所以别把 `.lock()`
+> 的结果绑成活得更久的局部变量,那会把只读路径变成反向锁序。
 >
 > **R3 —— `running == true` 是节点的独占令牌。**
 > 一旦某线程把节点置为 `running`,它即独占该节点的 `Context` 与「从输入边弹包」的权利,
@@ -871,7 +882,7 @@ Graphviz 生成 SVG 的完整循环。
 | 同一节点被两线程并发 `process` | R3 独占令牌(`running` 在 node 锁下置位) |
 | 丢唤醒(包躺队列没人跑) | `rescan` 标记 + `finish` 重扫 |
 | 回调期持锁死锁 | R1 零锁调用 + staging 暂存 |
-| 锁序成环 | R2 单向 `node → edge`;push 后先解锁再唤醒 |
+| 锁序成环 | R2 单向 `node → {edge, blocked_flush_nodes}`;push 后先解锁再唤醒;索引只读处取完快照即释放 |
 | **扇出汇合背压死锁** | §7.5 内部边不背压 |
 | 末尾节点永不关闭 | 关流在 `finish` 与上游事件两处检查 |
 | `wait_done` 永久阻塞 | `open_nodes` 计数 + Condvar;错误也唤醒;并提供超时版本 |
