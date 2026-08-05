@@ -33,3 +33,11 @@ name = "dispatch"
 harness = false
 # 只用引擎自带的 Rust 默认算子(PassThrough / Sink)→ **不需要任何 feature**,
 # 量引擎派发成本。测量口径见文件头注释。
+
+[[bench]]
+name = "throughput"
+harness = false
+
+[[bench]]
+name = "packet"
+harness = false

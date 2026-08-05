@@ -28,6 +28,7 @@ set(LMFLOW_ROOT "${CMAKE_CURRENT_SOURCE_DIR}")   # 仓库根:cmake/ · third_par
 set(LMFLOW_SRC  "${LMFLOW_ROOT}/lmflow")          # 源码根:core/(含 cpp/ include/) · python/
 
 option(LMFLOW_BUILD_TESTS  "Build C++ tests"                          ON)
+option(LMFLOW_BUILD_BENCHMARKS "Build native performance benchmarks" OFF)
 option(LMFLOW_BUILD_PYTHON "Build the pybind11 Python extension"      OFF)
 option(LMFLOW_WITH_CV_TEST "Compile the CV test kernel into _lmflow"  OFF)
 option(LMFLOW_BUILD_KERNELS "Build and link the bundled C++ kernels"   ON)
@@ -41,6 +42,9 @@ elseif(CMAKE_SOURCE_DIR STREQUAL LMFLOW_ROOT)     # 作为顶层工程时:C++ �
   if(LMFLOW_BUILD_TESTS)
     enable_testing()
     add_subdirectory(lmflow/cpp/tests)
+  endif()
+  if(LMFLOW_BUILD_BENCHMARKS)
+    add_subdirectory(lmflow/benchmarks)
   endif()
   include("${LMFLOW_ROOT}/cmake/install-sdk.cmake")
 endif()

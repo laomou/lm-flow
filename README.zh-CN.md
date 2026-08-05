@@ -234,6 +234,21 @@ C ABI 是唯一稳定接口(`lmflow/flow.h`);`flow.hpp` 是可选的 C++ 算子�
 
 移动端集成示例:[`lmflow/examples/android/hello_world`](lmflow/examples/android/hello_world)(JNI)、[`lmflow/examples/ios/hello_world`](lmflow/examples/ios/hello_world)(Swift)、[`lmflow/examples/harmonyos/hello_world`](lmflow/examples/harmonyos/hello_world)(NAPI)。
 
+## 性能测试
+
+性能测试按边界拆开，避免为了测 C++ 又让纯 Rust core 获得第二条 C++ 构建路径：
+
+```bash
+cd lmflow/core
+cargo bench --bench dispatch    # 调度器/执行器派发成本
+cargo bench --bench throughput  # Rust Input → Graph → Poller 端到端
+cargo bench --bench packet      # Packet clone 与 CoW
+```
+
+完整 C/C++ SDK 和 Python/NumPy 绑定的基准、构建命令与指标解释见
+[`lmflow/benchmarks/README.md`](lmflow/benchmarks/README.md)。CI 只编译这些基准，
+不在共享 runner 上设置易受噪声影响的性能阈值。
+
 ## 文档
 
 <https://laomou.github.io/lm-flow/> —— 一个站点,三端 API:

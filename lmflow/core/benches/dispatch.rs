@@ -2,8 +2,8 @@
 //!
 //! # 为什么单独一组
 //!
-//! `throughput.rs` 里的 `queue/end_to_end` 与 `crossing/*` 都是 `send` 一个、`poller.next()`
-//! 取一个的**往返**。而 `main_thread` 这组用的是委托执行器(节点交还宿主线程),
+//! `throughput.rs` 的端到端组是 `send` 一个、`poller.next()` 取一个的**往返**。
+//! 而 `main_thread` 这组用的是委托执行器(节点交还宿主线程),
 //! `next()` 本身就在 **pump 任务**(design §7.9)—— 于是「驱动图」和「取输出」被算进了同一个数字里,
 //! 还额外含 poller 队列锁与 condvar。那个数字是**宿主往返延迟**,不是引擎吞吐。
 //!
@@ -18,7 +18,7 @@
 //! (节点之间多转发一包要多少)。取差值把「建图/喂入/收尾」等固定成本消掉了,
 //! 所以它比任何单点绝对值都稳。
 //!
-//! ⚠ **不要**拿本组的 `depth1` 直接减 `throughput.rs::queue/end_to_end` 去算「poller 的代价」:
+//! ⚠ **不要**拿本组的 `depth1` 直接减 `throughput.rs` 的端到端数字去算「poller 的代价」:
 //! 本组 `depth1` 是**两个节点**(1 个 PassThrough + 末端 Sink),而 `end_to_end` 是
 //! 一个节点 + poller,节点数就不一样,减出来的数没有意义。要比就比每跳边际值。
 //!
@@ -168,8 +168,7 @@ fn bench_dispatch(c: &mut Criterion) {
 }
 
 /// 只量「送进图输入口」这一步(图暂停,不派发)—— 作为上面各数字的下界参照。
-/// 与 `throughput.rs::queue/enqueue_paused` 同口径,但这里用 Rust 默认算子,
-/// 故纯 Rust 配置下也能跑。
+/// 与 `throughput.rs` 的输入热路径同口径,但暂停图以排除派发成本。
 fn bench_enqueue_only(c: &mut Criterion) {
     let mut g = c.benchmark_group("dispatch");
     g.throughput(Throughput::Elements(BATCH));

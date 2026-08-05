@@ -230,6 +230,22 @@ The C ABI is the only stable interface (`lmflow/flow.h`); `flow.hpp` is the opti
 
 Mobile integration examples: [`lmflow/examples/android/hello_world`](lmflow/examples/android/hello_world) (JNI), [`lmflow/examples/ios/hello_world`](lmflow/examples/ios/hello_world) (Swift), [`lmflow/examples/harmonyos/hello_world`](lmflow/examples/harmonyos/hello_world) (NAPI).
 
+## Performance benchmarks
+
+Benchmarks are split by boundary so measuring C++ never adds a second C++ build
+path to the pure Rust core:
+
+```bash
+cd lmflow/core
+cargo bench --bench dispatch    # scheduler/executor dispatch
+cargo bench --bench throughput  # Rust Input → Graph → Poller
+cargo bench --bench packet      # Packet clone and copy-on-write
+```
+
+See [`lmflow/benchmarks/README.md`](lmflow/benchmarks/README.md) for complete
+C/C++ SDK and Python/NumPy binding benchmarks. CI compiles benchmark targets but
+does not enforce noisy timing thresholds on shared runners.
+
 ## Documentation
 
 <https://laomou.github.io/lm-flow/> — one site, three API surfaces:
