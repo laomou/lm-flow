@@ -10,6 +10,12 @@ to each GitHub Release.
 
 ## [Unreleased]
 
+### Changed
+
+- **Graph runtime module layout.** The former monolithic graph implementation is split into
+  dedicated Poller, node/readiness, backpressure, runtime scheduling, and lifecycle files without
+  changing the public API or execution behavior.
+
 ## [0.3.0] — 2026-08-04
 
 ### Added

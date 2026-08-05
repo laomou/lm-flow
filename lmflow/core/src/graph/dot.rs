@@ -549,10 +549,10 @@ impl GraphInner {
         }
     }
 
-    fn dot_hotspots(&self, now_us: i64) -> DotHotspots {
+    fn dot_hotspots(&self, now_us: i64, node_states: &[NodeRunState]) -> DotHotspots {
         let mut hotspots = DotHotspots::default();
         for (node_id, node) in self.nodes.iter().enumerate() {
-            match self.dot_node_state(node_id) {
+            match node_states[node_id] {
                 NodeRunState::Running => hotspots.running += 1,
                 NodeRunState::Error => hotspots.errors += 1,
                 _ => {}
@@ -607,6 +607,12 @@ impl GraphInner {
                 interval.as_ref().expect("statistics interval exists"),
             )
         });
+        let node_states = self
+            .nodes
+            .iter()
+            .enumerate()
+            .map(|(node_id, _)| self.dot_node_state(node_id))
+            .collect::<Vec<_>>();
         // 执行器配色板(浅色填充);按执行器序号取模。
         const COLORS: &[&str] = &[
             "#cde4ff", "#d7f0d0", "#ffe4c7", "#f0d0e8", "#d0eeee", "#efe6b0", "#e0d4f0", "#ffd6d6",
@@ -665,8 +671,10 @@ impl GraphInner {
         );
         out.push_str("  edge [fontsize=10];\n");
         if with_stats {
-            let hotspots =
-                self.dot_hotspots(snapshot_us.expect("statistics snapshot timestamp exists"));
+            let hotspots = self.dot_hotspots(
+                snapshot_us.expect("statistics snapshot timestamp exists"),
+                &node_states,
+            );
             let limit = self.shared.config.max_queued_packets;
             let limit = if limit == 0 {
                 "unbounded".to_string()
@@ -737,7 +745,7 @@ impl GraphInner {
             let short = n.name.rsplit('/').next().unwrap_or(n.name.as_str());
             let short_label = truncate_label(short, NODE_LABEL_CHARS);
             let kernel_label = truncate_label(&n.kernel_name, KERNEL_LABEL_CHARS);
-            let node_state = self.dot_node_state(i);
+            let node_state = node_states[i];
             let executor_group = n.executor.map_or(0, |executor| executor + 1);
             layout_keys[i] = (executor_group, node_state.sort_order());
             let (exec, mut fill) = match n.executor {

@@ -250,7 +250,6 @@ input_ports: [in]
     let closed_dot = idle.to_dot_compact();
     assert!(closed_dot.contains("@main\\nCLOSED"));
 
-    let gate = RunningGateGuard::hold();
     let running = Graph::from_yaml(
         r#"
 executors:
@@ -262,6 +261,7 @@ input_ports: [in]
     )
     .unwrap();
     running.start().unwrap();
+    let gate = RunningGateGuard::hold();
     running
         .input("in")
         .unwrap()
@@ -270,7 +270,7 @@ input_ports: [in]
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
     loop {
         let dot = running.to_dot_compact();
-        if dot.contains("@pool") && dot.contains("\\nRUNNING") {
+        if dot.contains("@pool\\nRUNNING") {
             assert!(dot.contains("color=\"#2ca02c\", penwidth=3"));
             assert!(dot.contains("hotspots running 1 · error 0"));
             break;
