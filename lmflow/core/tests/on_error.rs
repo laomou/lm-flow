@@ -80,7 +80,9 @@ fn drive(g: &Graph, want: usize) -> (Vec<i64>, State, Option<String>) {
     g.start().unwrap();
     let inp = g.input("in").unwrap();
     for i in 0..6i64 {
-        inp.send(Packet::from_i64(i).at(Timestamp(i))).unwrap();
+        if inp.send(Packet::from_i64(i).at(Timestamp(i))).is_err() {
+            break;
+        }
     }
     g.close_all_inputs();
     let mut got = Vec::new();
