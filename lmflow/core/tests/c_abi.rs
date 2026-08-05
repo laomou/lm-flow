@@ -35,6 +35,8 @@ fn make_int_packet(v: i32, ts: i64) -> LMFlowPacket {
     }
 }
 
+// 不写 executors —— 走**默认执行器**(按 CPU 核数开线程的线程池),也就是绝大多数
+// 宿主的实际配置。委托执行器另有专门用例(见 tests/concurrency.rs)。
 const CONFIG: &str = r#"
 nodes:
   - name: "n1"
@@ -593,7 +595,7 @@ fn introspection_through_c_abi() {
             .to_str()
             .unwrap()
             .to_string();
-        assert!(dot_compact.contains("@main\\nCREATED"));
+        assert!(dot_compact.contains("@default\\nCREATED"));
         assert!(!dot_compact.contains("CREATED · 0 pkts"));
         assert!(!dot_compact.contains("ports:"));
         assert!(CStr::from_ptr(lmflow_graph_to_dot_view(g, 99))
@@ -673,7 +675,7 @@ fn observer_receives_packets() {
                 lmflow_input_send(input, make_int_packet(i * 10, i as i64)),
                 0
             );
-            // 主线程执行器:需要进入引擎才会推进(见 docs/design.md §7.9)
+            // 每送一个就排干一次,故 observer 收到的顺序是确定的
             assert_eq!(lmflow_graph_wait_until_idle(g), 0);
         }
         lmflow_graph_close_all_inputs(g);

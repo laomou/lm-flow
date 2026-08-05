@@ -213,10 +213,12 @@ impl GraphInner {
             .lock()
             .expect("DOT interval lock poisoned") = dot::DotIntervalBaselines::default();
 
-        // 拉起线程池。必须在 Arc 存在之后:工作线程持 Weak,避免 Arc 环。
+        // 拉起真正有节点归属的执行器。必须在 Arc 存在之后:工作线程持 Weak,避免 Arc 环。
         let weak = Arc::downgrade(self);
-        for pool in &self.executors {
-            pool.start(weak.clone());
+        for (executor_id, executor) in self.executors.iter().enumerate() {
+            if self.nodes.iter().any(|node| node.executor == executor_id) {
+                executor.start(weak.clone());
+            }
         }
         // 源节点(0 输入)无输入触发,须在此显式起调度 —— start 里唯一主动调度的一处。
         // 之后由 finish→schedule_node 自我续产,直到内核 source_done() 或图被 cancel。
@@ -237,7 +239,7 @@ impl GraphInner {
     /// **不碰线程池**:worker 随图存活、此刻都 park 在 condvar 上、`stop` 仍为 false,
     /// 下一轮 `start` 直接复用(见 executor.rs 模块头);shutdown+join 只发生在 Drop。
     pub(super) fn reset(&self) -> Result<()> {
-        // 1. 校验静止。in_flight==0 且 main_queue 空 ⇒ 没有 worker 在 run_node 中途,
+        // 1. 校验静止。in_flight==0 且委托队列为空 ⇒ 没有 worker 在 run_node 中途,
         //    故下面所有「无并发」的复位都成立(与 Drop / start 用同一条静止依据)。
         {
             let st = *self.state.lock().expect("state lock poisoned");
@@ -315,10 +317,9 @@ impl GraphInner {
 
         // 5. GraphInner 顶层。side_packets 保留(下一轮 start 会自动 clone 进各 ctx)。
         //    epoch 不动:它只是各诊断时间戳的单调基准。
-        self.main_queue
-            .lock()
-            .expect("main queue lock poisoned")
-            .clear();
+        for executor in &self.executors {
+            executor.clear_delegated();
+        }
         self.in_flight.store(0, Ordering::SeqCst);
         {
             let mut a = self.activity.0.lock().unwrap_or_else(|e| e.into_inner());
@@ -344,7 +345,7 @@ impl GraphInner {
         loop {
             // 先把能自己干的干完
             while self.pump_step() {}
-            if self.all_nodes_closed() {
+            if self.all_nodes_closed() && self.workers_idle() {
                 break;
             }
             // 在判断是否空闲**之前**捕获活动代数,再据此等待 —— 否则会丢唤醒。

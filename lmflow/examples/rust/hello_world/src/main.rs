@@ -6,8 +6,10 @@
 
 use lmflow::{Graph, Packet, Timestamp};
 
-// 两个节点都未指定 executor,故都跑在**主线程**上 —— 任务在 poller.next() /
-// wait_done() 等阻塞调用期间被抽取执行。要并发就显式声明 executors 并给节点指定。
+// 两个节点都未指定 executor,故都归**默认执行器** —— 一个按 CPU 核数开线程的线程池,
+// 引擎自动创建,不必写 executors 块。想要零并发、顺序确定(便于断点调试)就把默认
+// 自己声明一个委托执行器、把节点指过去:
+// executors: [{ name: "host", type: "DelegatingExecutor" }] + 节点上写 executor: "host"。
 const CONFIG: &str = r#"
 nodes:
   - name: "node1"

@@ -30,12 +30,30 @@ down, otherwise engine threads may call back into a dying interpreter and crash.
 Always use ``with lmflow.Graph.from_yaml(...) as g:``, or call ``g.close()``
 explicitly. ``__del__`` is only a fallback and its timing is not guaranteed.
 
-**GIL** — a node with no ``executor`` runs on the **host main thread**, where
-Python kernels never contend for the GIL. It only matters once you put a Python
-kernel on a thread pool: there they cannot truly run in parallel, so heavy compute
-belongs in C++ kernels (or keep the Python kernels on the main thread and put the
-C++ kernels on the pool). Every potentially blocking call (``poller.next`` /
-``wait_done`` / ``send``) releases the GIL while waiting.
+**GIL** — a node with no ``executor`` runs on the **default executor**, which is a
+thread pool sized to the CPU count. So by default Python kernels *do* contend for
+the GIL and cannot truly run in parallel; heavy compute belongs in C++ kernels.
+
+To get back the contention-free behaviour, declare a ``DelegatingExecutor`` and point
+the Python kernels at it::
+
+    executors:
+      - { name: "host", type: "DelegatingExecutor" }
+      - { name: "cpu",  type: "ThreadPoolExecutor", num_threads: 4 }
+    nodes:
+      - { name: resize, kernel: PyResize, executor: "host" }   # Python: no GIL contention
+      - { name: invert, kernel: Invert,   executor: "cpu"  }   # C++:真并行
+
+Kernels on ``host`` run on the Python main thread, exactly as before, and can run in
+parallel with C++ kernels on a pool. The tradeoff is that a delegating executor only
+advances while the host is inside a blocking call (``wait_done`` / ``wait_until_idle``
+/ ``poller.next`` / blocking ``send``).
+
+The default executor itself is engine-owned and not configurable — ``default`` is a
+reserved name in ``executors``.
+
+Every potentially blocking call (``poller.next`` / ``wait_done`` / ``send``) releases
+the GIL while waiting.
 
 **Data types** — Python kernels may only send/receive **builtin types**: int /
 float / bool / str / bytes, plus N-dimensional numeric buffers (``as_numpy()`` /

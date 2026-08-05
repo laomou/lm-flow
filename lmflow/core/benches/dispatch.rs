@@ -3,8 +3,8 @@
 //! # 为什么单独一组
 //!
 //! `throughput.rs` 里的 `queue/end_to_end` 与 `crossing/*` 都是 `send` 一个、`poller.next()`
-//! 取一个的**往返**。而默认执行器就是宿主主线程(ADR #16),`next()` 本身就在
-//! **pump 任务**(design §7.9)—— 于是「驱动图」和「取输出」被算进了同一个数字里,
+//! 取一个的**往返**。而 `main_thread` 这组用的是委托执行器(节点交还宿主线程),
+//! `next()` 本身就在 **pump 任务**(design §7.9)—— 于是「驱动图」和「取输出」被算进了同一个数字里,
 //! 还额外含 poller 队列锁与 condvar。那个数字是**宿主往返延迟**,不是引擎吞吐。
 //!
 //! 这里换一种口径:图以 **`Sink` 结尾、没有图输出口**,喂满一批后用
@@ -87,7 +87,7 @@ use lmflow::{Graph, Packet, Timestamp};
 const BATCH: u64 = 256;
 
 /// `depth` 级 `PassThrough` 之后接一个 `Sink`,**没有图输出口**。
-/// `pool > 0` 时全部节点挂线程池,否则走宿主主线程执行器。
+/// `pool > 0` 时全部节点挂线程池,否则显式用委托执行器(交还宿主线程)。
 /// `max_queue_size` 调大,批量喂入不撞全局软水位(那会转成输入口背压,污染测量)。
 fn sink_chain_yaml(depth: usize, pool: usize) -> String {
     sink_chain_yaml_timing(depth, pool, true)
@@ -103,9 +103,18 @@ fn sink_chain_yaml_timing(depth: usize, pool: usize, timing: bool) -> String {
         s += &format!(
             "executors:\n  - {{ name: \"cpu\", type: \"ThreadPoolExecutor\", num_threads: {pool} }}\n"
         );
+    } else {
+        // pool == 0 要量的是**宿主线程**路径。默认执行器现在是线程池(ADR #16),
+        // 所以必须显式把默认换成委托执行器 —— 否则 `sink/main_thread` 会悄悄变成
+        // 又一组线程池数据,和上面记录的基线不可比。
+        s += "executors:\n  - { name: \"host\", type: \"DelegatingExecutor\" }\n";
     }
     s += "nodes:\n";
-    let exec = if pool > 0 { ", executor: \"cpu\"" } else { "" };
+    let exec = if pool > 0 {
+        ", executor: \"cpu\""
+    } else {
+        ", executor: \"host\""
+    };
     for i in 0..depth {
         let inp = if i == 0 {
             "in".to_string()

@@ -1,4 +1,11 @@
-//! 执行器:把「就绪节点」派给某个线程池执行。
+//! 执行器:把「就绪节点」派给某个执行器执行。
+//!
+//! 两种执行器,由 YAML 的 `executors[].type` 选:
+//!  * [`ThreadPool`](ThreadPool) —— 拥有自己的工作线程,真并发。**默认执行器就是它**。
+//!  * [`DelegatingExecutor`] —— 一个线程都不拥有,把任务交还**宿主线程**跑;
+//!    宿主进入阻塞接口期间才被抽取执行(见该类型的文档)。
+//!
+//! 两者对调度器是同一个东西([`Executor`]),`GraphInner::dispatch_task` 不为谁分叉。
 //!
 //! 零外部依赖(只用 std):任务队列 = `Mutex<VecDeque<NodeId>>` + `Condvar`。
 //!
@@ -251,6 +258,186 @@ fn worker(shared: Arc<Shared>, graph: Weak<GraphInner>) {
     }
 }
 
+// ---------------------------------------------------------------- 委托执行器
+
+/// 委托执行器:一个线程都不拥有,把就绪节点**交还宿主线程**跑。
+///
+/// ⚠ **任务的执行时机** —— 引擎不能凭空占用宿主线程,只能在宿主**进入引擎**时借用它。
+/// 所以 `submit` 只是入队,真正执行发生在宿主调用下列阻塞接口期间
+/// (由 `GraphInner::run_one_main_task` 抽取):
+///
+/// ```text
+/// lmflow_graph_wait_done / _timeout
+/// lmflow_graph_wait_until_idle / _timeout
+/// lmflow_poller_next / _timeout
+/// lmflow_input_send(阻塞等待空位时)
+/// ```
+///
+/// 推论:若宿主只 `send` 而从不调用上述任一接口,挂在本执行器上的节点**不会推进**
+/// (想主动推进而不阻塞,用 `Graph::pump_step`)。反之,这些接口在等待期间一律抽取
+/// 并执行委托任务,故不会因此死锁。
+///
+/// 换来的是**零并发、执行顺序确定、断点调试直观**,以及 Python 算子就在宿主
+/// (Python 主)线程上跑、**完全没有 GIL 争抢**。
+///
+/// 队列自持(而不是挂在 `GraphInner` 上)是刻意的:这样「宿主线程」在调度器眼里
+/// 就只是又一个执行器,派任务的地方无需为它开特例。
+pub struct DelegatingExecutor {
+    name: String,
+    queue: Mutex<VecDeque<NodeId>>,
+}
+
+impl DelegatingExecutor {
+    pub fn new(name: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            queue: Mutex::new(VecDeque::new()),
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// 入队待宿主抽取。**恒返回 `true`**:委托执行器没有「已关停」这个状态 ——
+    /// 宿主线程不由引擎拉起,也无从 join。拆图时队里的残留由 `GraphInner::drop`
+    /// 的兜底关流负责(与线程池 `submit` 失败后的善后同理)。
+    pub fn submit(&self, node: NodeId) -> bool {
+        self.queue
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push_back(node);
+        true
+    }
+
+    pub fn pending(&self) -> usize {
+        self.queue.lock().unwrap_or_else(|e| e.into_inner()).len()
+    }
+
+    /// 弹一个待办交给宿主线程跑;`None` = 队列空。
+    pub fn take(&self) -> Option<NodeId> {
+        self.queue
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .pop_front()
+    }
+
+    /// 清空队列(`reset` 用:上一轮的残留不能带进下一轮)。
+    pub fn clear(&self) {
+        self.queue.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    }
+}
+
+// ---------------------------------------------------------------- 统一抽象
+
+/// 引擎隐式默认执行器的名字。
+///
+/// 节点不写 `executor` 就归到它。它**完全由引擎持有**:恒是一个按 CPU 核数开线程的
+/// 线程池,不绑核、不设实时优先级,YAML 里无从干涉 —— 想控制这些就自己声明一个具名池,
+/// 把节点用 `executor:` 指过去。
+///
+/// 因此这个名字在 `executors` 里是**保留的**,声明即报错:否则一张图里会同时出现
+/// 两个 `default`。`executors` 里写的一律是宿主自己的执行器,且必须有名字。
+pub const DEFAULT_EXECUTOR_NAME: &str = "default";
+
+/// 一个执行器。
+///
+/// 用 `enum` 而不是 `Box<dyn Executor>`:`dispatch_task` 在热路径上
+/// (`schedule_node` 的 `while try_claim` 每轮都调一次),静态分发省掉虚表;
+/// 而且「关停 + join 必须发生在动节点之前」这条约定要看得清具体类型(见模块头)。
+pub enum Executor {
+    /// 拥有自己工作线程的线程池(YAML `type: "ThreadPoolExecutor"`)。
+    Pool(ThreadPool),
+    /// 不拥有线程,交还宿主线程(YAML `type: "DelegatingExecutor"`)。
+    Delegating(DelegatingExecutor),
+}
+
+impl Executor {
+    pub fn name(&self) -> &str {
+        match self {
+            Self::Pool(p) => p.name(),
+            Self::Delegating(d) => d.name(),
+        }
+    }
+
+    /// 是否把任务交还宿主线程(而不是自有工作线程)。
+    pub fn is_delegating(&self) -> bool {
+        matches!(self, Self::Delegating(_))
+    }
+
+    /// **自有**工作线程数。委托执行器返回 0 —— 它一个线程都不拥有。
+    /// 「并行度是否 >1」的校验(`max_in_flight`)就是问这个。
+    pub fn num_threads(&self) -> usize {
+        match self {
+            Self::Pool(p) => p.num_threads(),
+            Self::Delegating(_) => 0,
+        }
+    }
+
+    /// CPU 亲和力核列表(空 = 不绑)。仅用于内省 / 可视化。
+    pub fn affinity(&self) -> &[usize] {
+        match self {
+            Self::Pool(p) => p.affinity(),
+            Self::Delegating(_) => &[],
+        }
+    }
+
+    /// 实时优先级(0 = 普通分时)。仅用于内省 / 可视化。
+    pub fn priority(&self) -> i32 {
+        match self {
+            Self::Pool(p) => p.priority(),
+            Self::Delegating(_) => 0,
+        }
+    }
+
+    /// 拉起工作线程。委托执行器是 no-op:宿主线程早就在跑,不由引擎创建。
+    pub fn start(&self, graph: Weak<GraphInner>) {
+        match self {
+            Self::Pool(p) => p.start(graph),
+            Self::Delegating(_) => {}
+        }
+    }
+
+    /// 投递一个就绪节点。返回 `false` 表示没收下,调用方须善后(撤销已取得的令牌)。
+    pub fn submit(&self, node: NodeId) -> bool {
+        match self {
+            Self::Pool(p) => p.submit(node),
+            Self::Delegating(d) => d.submit(node),
+        }
+    }
+
+    pub fn pending(&self) -> usize {
+        match self {
+            Self::Pool(p) => p.pending(),
+            Self::Delegating(d) => d.pending(),
+        }
+    }
+
+    /// 关停并 join。幂等。委托执行器是 no-op(无线程可 join)。
+    pub fn shutdown(&self) {
+        match self {
+            Self::Pool(p) => p.shutdown(),
+            Self::Delegating(_) => {}
+        }
+    }
+
+    /// 弹一个**待宿主执行**的任务;线程池恒返回 `None`(它的任务由自己的 worker 取)。
+    pub fn take_delegated(&self) -> Option<NodeId> {
+        match self {
+            Self::Pool(_) => None,
+            Self::Delegating(d) => d.take(),
+        }
+    }
+
+    /// 清空待宿主执行的队列(`reset` 用);线程池是 no-op。
+    pub fn clear_delegated(&self) {
+        match self {
+            Self::Pool(_) => {}
+            Self::Delegating(d) => d.clear(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -288,6 +475,62 @@ mod tests {
         // 不 start 也应能安全关停
         p.shutdown();
         p.shutdown();
+    }
+
+    #[test]
+    fn delegating_queues_fifo_and_never_rejects() {
+        let d = DelegatingExecutor::new(DEFAULT_EXECUTOR_NAME);
+        assert!(d.submit(7));
+        assert!(d.submit(8));
+        assert_eq!(d.pending(), 2);
+        // 宿主按入队顺序抽取 —— 这正是「执行顺序确定」的来源。
+        assert_eq!(d.take(), Some(7));
+        assert_eq!(d.take(), Some(8));
+        assert_eq!(d.take(), None);
+    }
+
+    #[test]
+    fn delegating_submit_survives_shutdown() {
+        let e = Executor::Delegating(DelegatingExecutor::new("host"));
+        e.shutdown(); // no-op:没有线程可关
+        assert!(
+            e.submit(1),
+            "委托执行器没有『已关停』状态 —— 宿主线程不由引擎拉起,也无从 join"
+        );
+    }
+
+    #[test]
+    fn delegating_clear_drops_pending() {
+        let d = DelegatingExecutor::new("host");
+        d.submit(1);
+        d.submit(2);
+        d.clear();
+        assert_eq!(d.pending(), 0, "reset 不能把上一轮的残留带进下一轮");
+    }
+
+    #[test]
+    fn executor_kinds_report_their_shape() {
+        let pool = Executor::Pool(ThreadPool::new("cpu", 4, vec![2, 3], 10));
+        let host = Executor::Delegating(DelegatingExecutor::new(DEFAULT_EXECUTOR_NAME));
+
+        assert!(!pool.is_delegating());
+        assert_eq!(pool.name(), "cpu");
+        assert_eq!(pool.num_threads(), 4);
+        assert_eq!(pool.affinity(), &[2, 3]);
+        assert_eq!(pool.priority(), 10);
+        assert_eq!(pool.take_delegated(), None, "池的任务由它自己的 worker 取");
+
+        assert!(host.is_delegating());
+        assert_eq!(host.name(), DEFAULT_EXECUTOR_NAME);
+        assert_eq!(
+            host.num_threads(),
+            0,
+            "委托执行器一个线程都不拥有 —— max_in_flight 校验就是问这个"
+        );
+        assert!(host.affinity().is_empty());
+        assert_eq!(host.priority(), 0);
+        host.submit(5);
+        assert_eq!(host.take_delegated(), Some(5));
     }
 
     /// Linux 下验证绑核**真的生效**:让工作线程回读自己的亲和力掩码,应恰为所绑的核。

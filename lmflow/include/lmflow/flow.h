@@ -480,8 +480,8 @@ size_t lmflow_ctx_option_str_array(const LMFlowContext*, const char* key, const 
 /* 整个 options 子树的 JSON;无 options 时返回 "{}"。生命周期随 graph。 */
 const char* lmflow_ctx_options_json(const LMFlowContext*);
 
-/* ---------- 执行器(线程池)与算子的归属 ----------
- * 图在 YAML 里定义**命名线程池**,节点按名字选择在哪个池上执行:
+/* ---------- 执行器与算子的归属 ----------
+ * 图在 YAML 里定义**命名执行器**,节点按名字选择在哪个执行器上跑:
  *
  *   executors:
  *     - name: "cpu"                 # 名字供节点引用
@@ -499,21 +499,40 @@ const char* lmflow_ctx_options_json(const LMFlowContext*);
  *       executor: "cpu"             # 跑在 cpu 池
  *     - name: "draw"
  *       kernel: "Overlay"
- *                                   # 未指定 → 跑在**宿主主线程**
+ *                                   # 未指定 → 跑在**默认执行器**
  *
- * 默认(节点未写 executor)= **宿主主线程**,不是线程池。这样:
- *   - 默认零并发、执行顺序确定、断点调试直观;并发是**显式 opt-in**;
- *   - Python 算子默认就跑在 Python 主线程上,**完全没有 GIL 争抢**
- *     (只有显式把 Python 算子放进线程池时才需要考虑 GIL,见设计文档 §8.2)。
+ * 执行器类型(`type`)目前两种:
+ *   - "ThreadPoolExecutor"(默认,type 留空也算它)—— 自有 worker 线程,真并发;
+ *   - "DelegatingExecutor" —— **不拥有任何线程**,把就绪节点交还**宿主线程**跑。
+ *     num_threads / affinity / priority 对它没有意义,写了会报错而非静默忽略。
  *
- * ⚠ 主线程任务的执行时机:引擎不能凭空占用宿主线程,只能在宿主**进入引擎**时借用它。
- *   因此主线程节点的任务在宿主调用下列**阻塞接口**期间被抽取执行:
+ * 默认(节点未写 executor)= **默认执行器**,它是一个按 CPU 核数开线程的线程池。
+ *   - 它**完全由引擎持有**,名字是 "default"(于是 DOT 标 @default、线程名 default-0,
+ *     和别的执行器完全同构),恒在下标 0。节点侧 executor 留空即归它。
+ *   - **不可配**:不绑核、不设实时优先级,YAML 里碰不到它。executors 里写的一律是**宿主
+ *     自己的**执行器,必须有名字,且 "default" 是**保留名** —— 声明它会报错。
+ *   - ⚠ 代价:默认执行**不是零并发**、执行顺序不确定,且 Python 算子会抢 GIL。
+ *
+ * 想控制线程数 / 绑核 / 优先级,或想要宿主线程语义 —— 都是「自己声明一个,把节点指过去」:
+ *
+ *       executors:
+ *         - { name: "cpu",  type: "ThreadPoolExecutor", num_threads: 4 }
+ *         - { name: "host", type: "DelegatingExecutor" }   # 零并发、顺序确定、免 GIL 争抢
+ *       nodes:
+ *         - { name: "detect", kernel: "Detector", executor: "cpu"  }
+ *         - { name: "draw",   kernel: "Overlay",  executor: "host" }
+ *
+ * ⚠ 委托任务的执行时机:引擎不能凭空占用宿主线程,只能在宿主**进入引擎**时借用它。
+ *   因此挂在 DelegatingExecutor 上的节点,其任务在宿主调用下列**阻塞接口**期间被抽取执行:
  *       lmflow_graph_wait_done / _timeout
  *       lmflow_graph_wait_until_idle / _timeout
  *       lmflow_poller_next / _timeout
  *       lmflow_input_send(阻塞等待空位时)
- *   若宿主只 send 而从不调用上述任一接口,主线程上的节点将**不会推进**。
- *   反之,这些接口在等待期间一律会抽取并执行主线程任务,故不会因此死锁。
+ *   若宿主只 send 而从不调用上述任一接口,委托执行器上的节点将**不会推进**。
+ *   反之,这些接口在等待期间一律会抽取并执行委托任务,故不会因此死锁。
+ *
+ * 源节点(0 输入)**不能**挂委托执行器:它的 process 常年阻塞,会独占宿主线程、
+ *   拖垮全图(init 阶段报错)。同理,一个池上的源节点数 >= 该池线程数也报错。
  *
  * 节点引用了未定义的 executor 名字 → init 阶段报错(见 lmflow_graph_init_from_yaml)。 */
 
@@ -596,7 +615,7 @@ LMFlowPoller* lmflow_graph_add_poller_ex(LMFlowGraph*, const char* port, bool ob
 /* 有界 Poller。capacity 必须 >= 1。
  * DROP_OLDEST / DROP_NEWEST / LATEST 有损且**永不阻塞生产线程** —— 单线程宿主请用这三种。
  * BLOCK 无损,但**要求宿主在另一个线程里持续排水**:它是在派发路径内部原地等的,而派发
- * 可能就跑在宿主自己的线程上(主线程执行器 / send 直接派发)。那时宿主既是生产者又是唯一
+ * 可能就跑在宿主自己的线程上(委托执行器 / send 直接派发)。那时宿主既是生产者又是唯一
  * 消费者 —— 卡住就永远走不到 lmflow_poller_next,wait_done 也永不返回。
  * 故 BLOCK 带**5 秒等待上界**(经 C ABI 创建时不可改):到点仍无进展则记录图错误并放弃该包,
  * wait_done / wait_until_idle 会返回该错误 —— 宁可响亮失败,不可静默挂死。 */

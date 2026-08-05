@@ -40,13 +40,22 @@ fn tracked_packet(v: i32, ts: i64) -> Packet {
     unsafe { Packet::from_foreign(ptr, 0, Some(tracked_drop)) }.at(Timestamp(ts))
 }
 
+/// 所有权记账用的线性图,**显式跑委托执行器**(交还宿主线程)。
+///
+/// 为什么不用默认执行器:默认是线程池,`poller.next()` 取到包时工作线程可能还没
+/// 走完收尾,内部引用尚未释放 —— 于是「取一个、放一个、立刻断言零残留」这种
+/// 逐包记账会偶发失败(实测约 13/30)。那不是漏,是**异步**:图析构后的总账仍然平。
+/// 委托执行器下「拿到输出即所有权已结清」成立,记账才逐包可断言。
+/// 线程池路径的记账另有覆盖(`*_pool_max_in_flight_*` 那几个)。
 fn linear_graph(kernel: &str) -> Graph {
     lmflow::register_builtin_kernels();
     Graph::from_yaml(&format!(
         r#"
+executors:
+  - {{ name: "host", type: "DelegatingExecutor" }}
 nodes:
-  - {{ name: "a", kernel: "{kernel}", input_ports: ["in"], output_ports: ["mid"] }}
-  - {{ name: "b", kernel: "{kernel}", input_ports: ["mid"], output_ports: ["out"] }}
+  - {{ name: "a", kernel: "{kernel}", executor: "host", input_ports: ["in"], output_ports: ["mid"] }}
+  - {{ name: "b", kernel: "{kernel}", executor: "host", input_ports: ["mid"], output_ports: ["out"] }}
 input_ports: ["in"]
 output_ports: ["out"]
 "#
@@ -336,15 +345,24 @@ fn buffer_addr(p: &Packet) -> usize {
 ///
 /// ⚠ 必须用**多节点**管线:单节点管线覆盖不到「上游 ctx 残留引用」这一类 bug
 /// (曾真实发生:输入槽只在下次调用开头才清,导致下游 CoW 永远复制)。
+///
+/// ⚠ **显式跑委托执行器**:这条不变量目前只在同步执行下确定成立。放到线程池上时,
+/// 上游节点的 ctx 输入槽可能还没被下次调用清掉,下游就已经在改写了 —— 引用计数 >1,
+/// CoW 退化成复制。实测(600 次单包管线):委托 0 次复制,线程池约 13% 会复制。
+/// **这不是本次改动引入的** —— `main` 上把同一张图挂到 `executor: cpu` 同样如此,
+/// 只是从前默认执行器是宿主线程,这条测试才一直是绿的。池上的零拷贝要真正做到确定,
+/// 得让上游在 dispatch/finish 时就释放输入槽,那是独立的引擎改动。
 #[test]
 fn cow_is_zero_copy_on_linear_pipeline() {
     lmflow::register_builtin_kernels();
     let graph = Graph::from_yaml(
         r#"
+executors:
+  - { name: "host", type: "DelegatingExecutor" }
 nodes:
-  - { name: "p1",  kernel: "PassThroughKernel", input_ports: ["in"],  output_ports: ["m1"] }
-  - { name: "p2",  kernel: "PassThroughKernel", input_ports: ["m1"],  output_ports: ["m2"] }
-  - { name: "inv", kernel: "InvertKernel",      input_ports: ["m2"],  output_ports: ["out"] }
+  - { name: "p1",  kernel: "PassThroughKernel", executor: "host", input_ports: ["in"],  output_ports: ["m1"] }
+  - { name: "p2",  kernel: "PassThroughKernel", executor: "host", input_ports: ["m1"],  output_ports: ["m2"] }
+  - { name: "inv", kernel: "InvertKernel",      executor: "host", input_ports: ["m2"],  output_ports: ["out"] }
 input_ports: ["in"]
 output_ports: ["out"]
 "#,

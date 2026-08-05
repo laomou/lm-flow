@@ -61,8 +61,27 @@ input_ports: ["in"]
 output_ports: ["out"]
 "#;
 
+/// 同一条链,但显式挂**委托执行器**(交还宿主线程)。
+///
+/// 只给那些断言**精确队列深度**的用例用:队列高水位本质上是调度产物 ——
+/// 默认执行器是线程池,「送一个」与「worker 取一个」并发进行,峰值可能是 1 也可能是 2。
+/// 交还宿主线程后执行严格同步,峰值恒为 1,那种精确断言才有意义。
+const CHAIN_SYNC: &str = r#"
+executors:
+  - { name: "host", type: "DelegatingExecutor" }
+nodes:
+  - { name: a, kernel: PassThrough, executor: "host", input_ports: ["in"],  output_ports: ["mid"] }
+  - { name: b, kernel: PassThrough, executor: "host", input_ports: ["mid"], output_ports: ["out"] }
+input_ports: ["in"]
+output_ports: ["out"]
+"#;
+
 fn run_chain(n: i64) -> Graph {
-    let g = Graph::from_yaml(CHAIN).unwrap();
+    run_chain_of(CHAIN, n)
+}
+
+fn run_chain_of(yaml: &str, n: i64) -> Graph {
+    let g = Graph::from_yaml(yaml).unwrap();
     let out = g.add_poller("out").unwrap();
     g.start().unwrap();
     let inp = g.input("in").unwrap();
@@ -129,7 +148,8 @@ fn total_us_is_consistent_with_processed() {
 
 #[test]
 fn dot_with_stats_annotates_and_keeps_structure() {
-    let g = run_chain(3);
+    // 精确断言 peakQ 需要同步执行 —— 见 CHAIN_SYNC 的说明。
+    let g = run_chain_of(CHAIN_SYNC, 3);
     let plain = g.to_dot();
     let stats = g.to_dot_with_stats();
 
@@ -215,8 +235,8 @@ fn dot_view_modes_separate_compact_and_diagnostics() {
     let explicit = graph.to_dot_with_view(DotView::Compact);
     let diagnostics = graph.to_dot_with_stats();
 
-    assert!(compact.contains("@main\\nCREATED"));
-    assert!(explicit.contains("@main\\nCREATED"));
+    assert!(compact.contains("@default\\nCREATED"));
+    assert!(explicit.contains("@default\\nCREATED"));
     assert!(compact.contains("window since start"));
     assert!(explicit.contains("window "));
     assert!(!compact.contains("CREATED · 0 pkts"));
@@ -242,13 +262,13 @@ input_ports: [in]
     .unwrap();
     idle.start().unwrap();
     let idle_dot = idle.to_dot_compact();
-    assert!(idle_dot.contains("@main\\nIDLE"));
+    assert!(idle_dot.contains("@default\\nIDLE"));
     assert!(idle_dot.contains("hotspots running 0 · error 0"));
     assert!(idle_dot.contains("color=\"#4c78a8\""));
     idle.close_all_inputs();
     idle.wait_done_timeout(Duration::from_secs(2)).unwrap();
     let closed_dot = idle.to_dot_compact();
-    assert!(closed_dot.contains("@main\\nCLOSED"));
+    assert!(closed_dot.contains("@default\\nCLOSED"));
 
     let running = Graph::from_yaml(
         r#"
@@ -305,7 +325,7 @@ input_ports: [in]
         .unwrap_err();
     assert!(error.to_string().contains("intentional DOT state error"));
     let error_dot = failed.to_dot_compact();
-    assert!(error_dot.contains("@main"));
+    assert!(error_dot.contains("@default"));
     assert!(error_dot.contains("\\nERROR"));
     assert!(error_dot.contains("hotspots running 0 · error 1"));
     assert!(error_dot.contains("color=\"#d62728\", penwidth=3"));

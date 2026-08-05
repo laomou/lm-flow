@@ -308,7 +308,8 @@ pub struct Node {
     pub in_ports: Arc<PortTable>,
     pub out_ports: Arc<PortTable>,
     /// `None` = 宿主主线程(默认执行器,ADR #16);`Some(i)` = executors[i] 线程池
-    pub(super) executor: Option<usize>,
+    /// 本节点所属执行器在 `GraphInner::executors` 中的下标。
+    pub(super) executor: usize,
     pub(super) policy: InputPolicy,
     pub(super) input_types: Vec<u64>,
     pub(super) output_types: Vec<u64>,

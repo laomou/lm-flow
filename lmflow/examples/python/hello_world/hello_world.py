@@ -41,8 +41,13 @@ class PyOffsetKernel(lmflow.Kernel):
         pass
 
 
-# 两个节点都未指定 executor → 都跑在 Python 主线程上,因此**没有 GIL 争抢**。
-# 任务在 poller.next() / wait_done() 等阻塞调用期间被抽取执行。
+# 两个节点都未指定 executor → 都归**默认执行器**(按 CPU 核数开线程的线程池)。
+# ⚠ 于是 Python 算子会在引擎工作线程上抢 GIL。想要「完全没有 GIL 争抢」,自己声明一个
+# 委托执行器(交还 Python 主线程)、把节点指过去 —— 见 opencv_pipeline 那个例子:
+#   executors:
+#     - { name: "host", type: "DelegatingExecutor" }
+#   nodes:
+#     - { name: scale, kernel: ScaleKernel, executor: "host", ... }
 CONFIG = """
 nodes:
   - name: "scale"

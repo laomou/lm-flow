@@ -511,18 +511,23 @@ input_ports: ["in"]
 }
 
 #[test]
-fn source_node_requires_executor() {
+fn source_node_rejected_on_delegating_executor() {
     init();
-    // 0 输入 = 源节点:必须挂线程池 executor(否则会独占宿主主线程、拖垮全图)。
+    // 0 输入 = 源节点:process 常年阻塞,跑在委托执行器上会独占宿主线程、拖垮全图。
+    // 默认执行器是线程池,所以源节点**不写 executor 现在是合法的** —— 只有把默认
+    // 显式改成 DelegatingExecutor(或指名一个委托执行器)才该被拒。
     let err = Graph::from_yaml(
         r#"
+executors:
+  - { name: "host", type: "DelegatingExecutor" }
 nodes:
-  - { name: "src", kernel: "RangeSourceKernel", input_ports: [], output_ports: ["out"] }
+  - { name: "src", kernel: "RangeSourceKernel", executor: "host", input_ports: [], output_ports: ["out"] }
 output_ports: ["out"]
 "#,
     )
     .unwrap_err();
-    assert!(err.to_string().contains("requires an executor"), "{err}");
+    assert!(err.to_string().contains("source node"), "{err}");
+    assert!(err.to_string().contains("delegating executor"), "{err}");
 }
 
 #[test]
