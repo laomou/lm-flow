@@ -641,10 +641,29 @@ class TestErrors(unittest.TestCase):
             g.start()
             g.input("in").send(1, ts=0)
             g.close_all_inputs()
-            with self.assertRaises(Exception):
+            with self.assertRaises(lmflow.KernelError):
                 g.wait_done(timeout=5.0)
             # 异常文本必须能拿到 —— 否则算子失败无从诊断
             self.assertIn("deliberately raised an exception", g.last_error())
+
+    def test_kernel_error_still_caught_as_runtime_error(self):
+        # KernelError 派生自 RuntimeError,所以本次改动前写的 `except RuntimeError` 不能失效。
+        self.assertTrue(issubclass(lmflow.KernelError, RuntimeError))
+        with graph(one_node("TBoom")) as g:
+            g.start()
+            g.input("in").send(1, ts=0)
+            g.close_all_inputs()
+            with self.assertRaises(RuntimeError):
+                g.wait_done(timeout=5.0)
+
+    def test_cancellation_is_not_reported_as_kernel_error(self):
+        # 这才是加 KernelError 的目的:从前 cancel 与算子失败都塌成裸 RuntimeError,分不开。
+        with graph(one_node("TDouble")) as g:
+            g.start()
+            g.cancel()
+            with self.assertRaises(RuntimeError) as ctx:
+                g.wait_done(timeout=5.0)
+            self.assertNotIsInstance(ctx.exception, lmflow.KernelError)
 
     def test_missing_required_option_fails_at_start(self):
         with graph(one_node("TNeedsOption")) as g:

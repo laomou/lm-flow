@@ -95,6 +95,7 @@ __all__ = [
     "GraphState",
     "DotView",
     "Timeout",
+    "KernelError",
     "registered_kernels",
     "register_builtin_kernels",
     "has_cv_test_kernels",
@@ -124,6 +125,20 @@ INVALID_ID = _native.INVALID_ID
 
 class Timeout(TimeoutError):
     """Raised by timeout-bearing calls when they time out."""
+
+
+#: Raised when the graph failed to execute — a kernel raised, returned a failure status,
+#: emitted a packet of the wrong type, or the graph could not make progress.
+#:
+#: Subclasses :class:`RuntimeError`, so code that already caught ``RuntimeError`` keeps
+#: working; catch this instead to tell an execution failure apart from a cancellation or a
+#: bad-state error, which both remain plain :class:`RuntimeError`.
+#:
+#: Note the engine reports graph *stalls* with the same status code as kernel failures, so a
+#: deadlocked or unsatisfiable graph also surfaces here. Read ``str(exc)`` to tell them apart:
+#: a genuine kernel failure reads ``kernel failed: [node] ...``, whereas a stall reads
+#: ``wait_done: ...`` / ``wait_until_idle: ...``.
+KernelError = _native.KernelError
 
 
 class LogLevel:
@@ -369,7 +384,11 @@ class Graph:
         self._g.resume()
 
     def wait_done(self, timeout: float | None = None) -> None:
-        """Wait for the graph to finish (close the inputs first). Releases the GIL while waiting."""
+        """Wait for the graph to finish (close the inputs first). Releases the GIL while waiting.
+
+        Raises :class:`Timeout` on expiry, :class:`KernelError` if the run failed, and plain
+        ``RuntimeError`` if the graph was cancelled or is in the wrong state.
+        """
         try:
             self._g.wait_done(timeout)
         except TimeoutError as e:
