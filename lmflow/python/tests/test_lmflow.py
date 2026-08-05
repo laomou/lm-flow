@@ -579,8 +579,17 @@ class TestErrors(unittest.TestCase):
         self.assertTrue(str(ctx.exception), "must provide a readable reason")
 
     def test_unsupported_config_is_rejected_not_ignored(self):
+        # max_in_flight > 1 要求所属执行器的线程数 > 1。默认执行器是按 CPU 核数开的
+        # 线程池,所以「不写 executor + max_in_flight: 8」现在是**合法**的 ——
+        # 要构造这个错误,得显式挂一个单线程执行器。
         with self.assertRaises(ValueError) as ctx:
-            graph("nodes: [ { kernel: PassThroughKernel, max_in_flight: 8 } ]")
+            graph(
+                """
+executors:
+  - { name: solo, type: ThreadPoolExecutor, num_threads: 1 }
+nodes: [ { kernel: PassThroughKernel, executor: solo, max_in_flight: 8 } ]
+"""
+            )
         self.assertIn("max_in_flight", str(ctx.exception))
 
     def test_unknown_kernel_lists_available(self):
