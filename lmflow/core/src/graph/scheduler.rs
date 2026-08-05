@@ -595,7 +595,8 @@ impl GraphInner {
         // 持锁调用是刻意的：clear_wakeup_callback 必须等已进入的回调返回，C/Python
         // 宿主随后才能安全释放 user 指针。回调契约禁止重入 graph API，只允许投递事件。
         if catch_unwind(AssertUnwindSafe(|| callback())).is_err() {
-            runtime::log_warn("graph wakeup callback panicked; notification was discarded");
+            self.wakeup_pending.store(false, Ordering::Release);
+            runtime::log_warn("graph wakeup callback panicked; wakeup re-armed");
         }
     }
 

@@ -115,6 +115,26 @@ fn each_poller_subscription_counts_as_an_independent_queue_slot() {
 }
 
 #[test]
+fn wait_until_idle_does_not_report_empty_backpressure_stall() {
+    let graph = graph();
+    let first = graph.add_poller("out").unwrap();
+    let second = graph.add_poller("out").unwrap();
+    graph.start().unwrap();
+    let input = graph.input("in").unwrap();
+
+    for value in 0..256 {
+        input
+            .send(Packet::from_i64(value).at(Timestamp(value)))
+            .unwrap();
+        graph.wait_until_idle().unwrap();
+        drop(first.try_next());
+        drop(second.try_next());
+    }
+
+    finish(&graph);
+}
+
+#[test]
 fn poller_retention_triggers_graph_input_watermark() {
     let graph = Graph::from_yaml(
         r#"

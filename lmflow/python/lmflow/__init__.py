@@ -424,7 +424,7 @@ class Graph:
                 while self.pump_step():
                     pass
                 if self.state == GraphState.TERMINATED:
-                    self.wait_done(timeout=0.0)
+                    self.wait_done()
                     return
                 if wakeup.is_set():
                     continue

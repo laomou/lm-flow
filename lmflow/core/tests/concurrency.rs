@@ -675,6 +675,39 @@ output_ports: [out]
     ));
 }
 
+#[test]
+fn rust_wakeup_callback_rearms_after_panic() {
+    init();
+    let graph = Graph::from_yaml(
+        r#"
+executors:
+  - { name: host, type: DelegatingExecutor }
+nodes:
+  - { name: pass, kernel: PassThroughKernel, executor: host, input_ports: [in], output_ports: [out] }
+input_ports: [in]
+output_ports: [out]
+"#,
+    )
+    .unwrap();
+    let wakes = Arc::new(AtomicUsize::new(0));
+    let seen = wakes.clone();
+    graph.set_wakeup_callback(move || {
+        if seen.fetch_add(1, Ordering::SeqCst) == 0 {
+            panic!("first wakeup fails");
+        }
+    });
+    graph.start().unwrap();
+    let input = graph.input("in").unwrap();
+    input.send(Packet::new(1).at(Timestamp(0))).unwrap();
+    graph.cancel();
+    assert_eq!(wakes.load(Ordering::SeqCst), 2);
+    graph.clear_wakeup_callback();
+    assert!(matches!(
+        graph.wait_done_timeout(Duration::from_secs(1)),
+        Err(lmflow::Error::Cancelled)
+    ));
+}
+
 /// 默认池是多线程的,所以默认节点配 `max_in_flight > 1` 现在**合法**(ADR #29 新语义)。
 /// 单核机器上默认池只有 1 个线程,那时该报错 —— 两种结果都对,别把机器规格写进断言。
 #[test]

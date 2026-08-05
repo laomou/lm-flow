@@ -463,14 +463,13 @@ impl GraphInner {
                 if self.is_idle() {
                     break;
                 }
-                if blocked.is_empty() {
-                    continue;
+                if !blocked.is_empty() {
+                    let details = self.backpressure_stall_details(&blocked);
+                    return Err(Error::Kernel(format!(
+                        "wait_until_idle: internal backpressure cannot make progress; blocked queues: [{}]",
+                        details.join("; ")
+                    )));
                 }
-                let details = self.backpressure_stall_details(&blocked);
-                return Err(Error::Kernel(format!(
-                    "wait_until_idle: internal backpressure cannot make progress; blocked queues: [{}]",
-                    details.join("; ")
-                )));
             }
             match self.remaining(deadline) {
                 Some(d) => {
