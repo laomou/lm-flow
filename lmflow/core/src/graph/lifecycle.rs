@@ -213,10 +213,12 @@ impl GraphInner {
             .lock()
             .expect("DOT interval lock poisoned") = dot::DotIntervalBaselines::default();
 
-        // 拉起线程池。必须在 Arc 存在之后:工作线程持 Weak,避免 Arc 环。
+        // 拉起真正有节点归属的执行器。必须在 Arc 存在之后:工作线程持 Weak,避免 Arc 环。
         let weak = Arc::downgrade(self);
-        for pool in &self.executors {
-            pool.start(weak.clone());
+        for (executor_id, executor) in self.executors.iter().enumerate() {
+            if self.nodes.iter().any(|node| node.executor == executor_id) {
+                executor.start(weak.clone());
+            }
         }
         // 源节点(0 输入)无输入触发,须在此显式起调度 —— start 里唯一主动调度的一处。
         // 之后由 finish→schedule_node 自我续产,直到内核 source_done() 或图被 cancel。
