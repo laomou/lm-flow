@@ -533,13 +533,11 @@ output_ports: ["out"]
 #[test]
 fn source_node_produces_and_terminates() {
     init();
-    // 源算子(0 输入)产 0..count,发完 SourceDone → 图自然终止;源挂线程池。
+    // 源算子(0 输入)产 0..count,发完 SourceDone → 图自然终止;默认执行器就是线程池。
     let graph = Graph::from_yaml(
         r#"
-executors:
-  - { name: "cpu", type: "ThreadPoolExecutor", num_threads: 2 }
 nodes:
-  - { name: "src", kernel: "RangeSourceKernel", input_ports: [], output_ports: ["out"], executor: "cpu", options: { count: 5 } }
+  - { name: "src", kernel: "RangeSourceKernel", input_ports: [], output_ports: ["out"], options: { count: 5 } }
 output_ports: ["out"]
 "#,
     )

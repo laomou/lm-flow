@@ -452,6 +452,26 @@ output_ports: [out]
 
 
 class TestConcurrency(unittest.TestCase):
+    def test_delegating_executor_can_be_pumped_explicitly(self):
+        with graph(
+            """
+executors:
+  - { name: host, type: DelegatingExecutor }
+nodes:
+  - { name: p, kernel: TDouble, executor: host, input_ports: [in], output_ports: [out] }
+input_ports: [in]
+output_ports: [out]
+"""
+        ) as g:
+            out = g.add_poller("out")
+            g.start()
+            g.input("in").send(7, ts=0)
+            self.assertIsNone(out.try_next())
+            self.assertTrue(g.pump_step())
+            self.assertEqual(out.try_next().as_int(), 14)
+            g.close_all_inputs()
+            g.wait_done(timeout=5.0)
+
     def test_python_kernel_on_thread_pool_does_not_deadlock(self):
         with graph(
             """

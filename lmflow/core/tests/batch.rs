@@ -47,18 +47,15 @@ fn batch_sums_and_flushes_partial_on_close() {
     );
 }
 
-/// 批处理跑在线程池上:worker 线程做 try_claim 批弹包,主线程 pump —— 并发触达调度热路径(TSan)。
+/// 批处理跑在默认线程池上:worker 做 try_claim 批弹包，并发触达调度热路径(TSan)。
 #[test]
-fn batch_on_thread_pool() {
+fn batch_on_default_pool() {
     init();
     let graph = Graph::from_yaml(
         r#"
-executors:
-  - { name: cpu, type: ThreadPoolExecutor, num_threads: 2 }
 nodes:
   - name: b
     kernel: BatchSumKernel
-    executor: cpu
     input_ports: ["in"]
     output_ports: ["out"]
     input_policy: { type: batch, capacity: 4 }

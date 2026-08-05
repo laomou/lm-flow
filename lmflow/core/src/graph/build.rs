@@ -372,6 +372,8 @@ impl GraphInner {
             state: Mutex::new(State::Initialized),
             executors,
             in_flight: AtomicUsize::new(0),
+            delegated_cursor: AtomicUsize::new(0),
+            delegated_running: AtomicBool::new(false),
             activity: (Mutex::new(Activity::default()), Condvar::new()),
             paused: AtomicBool::new(false),
             blocked_flush_nodes: Mutex::new(BTreeSet::new()),

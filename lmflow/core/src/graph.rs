@@ -74,6 +74,10 @@ pub struct GraphInner {
     executors: Vec<Executor>,
     /// 已投递到执行器、尚未跑完的任务数。用于「是否空闲」与终止判定。
     in_flight: AtomicUsize,
+    /// 委托任务抽取游标。多个 DelegatingExecutor 之间轮询，避免前面的队列长期饿死后面的。
+    delegated_cursor: AtomicUsize,
+    /// 同一时刻只允许一个宿主线程执行委托任务，兑现 DelegatingExecutor 的零并发语义。
+    delegated_running: AtomicBool,
     /// 有任何进展时唤醒阻塞中的宿主线程(取到输出、节点关闭、出错、任务入队)
     activity: (Mutex<Activity>, Condvar),
     /// 暂停调度(调试/限速)。已在执行的算子不受影响。
@@ -222,9 +226,16 @@ impl Graph {
         self.inner.executor_names()
     }
 
-    /// 是否空闲:主线程队列为空且线程池无在飞任务。
+    /// 是否空闲:委托队列为空且所有执行器无在飞任务。
     pub fn is_idle(&self) -> bool {
         self.inner.is_idle_pub()
+    }
+
+    /// 在当前宿主线程上执行至多一个委托任务，或推进一次关流。
+    ///
+    /// 事件循环型宿主可反复调用它主动推进 `DelegatingExecutor`，而不必进入阻塞接口。
+    pub fn pump_step(&self) -> bool {
+        self.inner.pump_step_pub()
     }
 
     /// 推模式订阅输出口。回调在派发该包的线程上执行(可能是线程池线程)。

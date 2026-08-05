@@ -44,10 +44,12 @@ the Python kernels at it::
       - { name: resize, kernel: PyResize, executor: "host" }   # Python: no GIL contention
       - { name: invert, kernel: Invert,   executor: "cpu"  }   # C++:真并行
 
-Kernels on ``host`` run on the Python main thread, exactly as before, and can run in
-parallel with C++ kernels on a pool. The tradeoff is that a delegating executor only
-advances while the host is inside a blocking call (``wait_done`` / ``wait_until_idle``
-/ ``poller.next`` / blocking ``send``).
+Kernels on ``host`` run serially on whichever host thread enters the engine. In the
+usual case where the Python main thread calls ``wait_done`` / ``poller.next`` or
+``pump_step``, they run on that main thread and can overlap with C++ kernels on a pool.
+The tradeoff is that a delegating executor only advances while a host thread is inside
+a blocking call (``wait_done`` / ``wait_until_idle`` / ``poller.next`` / blocking
+``send``), or explicitly calls ``pump_step``.
 
 The default executor itself is engine-owned and not configurable — ``default`` is a
 reserved name in ``executors``.
@@ -377,6 +379,14 @@ class Graph:
             self._g.wait_until_idle(timeout)
         except TypeError as e:
             raise Timeout(str(e)) from None
+
+    def pump_step(self) -> bool:
+        """Run at most one delegated task on the calling host thread.
+
+        Event-loop hosts can call this repeatedly to advance ``DelegatingExecutor``
+        nodes without entering a blocking wait.
+        """
+        return bool(self._g.pump_step())
 
     # ---- 内省 ----
 

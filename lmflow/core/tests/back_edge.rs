@@ -148,19 +148,16 @@ output_ports: ["out"]
     );
 }
 
-/// 反馈自环跑在线程池上:worker 线程做 try_claim(back-edge 弹包)/ dispatch(cap-1),
-/// 主线程 pump —— 并发触达被改动的调度热路径(TSan 覆盖)。max_in_flight=1 故仍确定。
+/// 反馈自环跑在默认线程池上:worker 做 try_claim(back-edge 弹包)/dispatch(cap-1),
+/// 不依赖宿主 pump，且并发触达调度热路径(TSan 覆盖)。max_in_flight=1 故仍确定。
 #[test]
-fn feedback_loop_on_thread_pool() {
+fn feedback_loop_on_default_pool() {
     init();
     let graph = Graph::from_yaml(
         r#"
-executors:
-  - { name: cpu, type: ThreadPoolExecutor, num_threads: 2 }
 nodes:
   - name: acc
     kernel: FeedbackAddKernel
-    executor: cpu
     input_ports: ["in", "out"]
     output_ports: ["out"]
     back_edges: ["out"]

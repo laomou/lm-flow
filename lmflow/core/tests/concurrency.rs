@@ -5,18 +5,38 @@
 //!  * 阻塞接口在等线程池时不会**提前返回**,也不会**永久挂住**;
 //!  * 并发下算子的 `Close` 只被调用一次(宿主线程与工作线程会同时想关它);
 //!  * 所有权守恒在并发下仍然成立;
-//!  * 混合执行器(一部分节点在池里、一部分在主线程)不会死锁。
+//!  * 混合执行器(一部分节点在池里、一部分交还宿主线程)不会死锁。
 
 #![cfg(feature = "builtin-kernels")] // 用内置 C++ 算子:纯 Rust 构建(--no-default-features)时整文件跳过
 
 use std::sync::atomic::{AtomicIsize, AtomicUsize, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, Once};
 use std::time::Duration;
 
-use lmflow::{Graph, Packet, Timestamp};
+use lmflow::{register_kernel, Graph, Kernel, KernelCtx, Packet, Timestamp};
 
 fn init() {
     lmflow::register_builtin_kernels();
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        register_kernel::<DelegatedSlowPass>("DelegatedSlowPass").unwrap();
+    });
+}
+
+static DELEGATED_ACTIVE: AtomicUsize = AtomicUsize::new(0);
+static DELEGATED_MAX_ACTIVE: AtomicUsize = AtomicUsize::new(0);
+
+#[derive(Default)]
+struct DelegatedSlowPass;
+
+impl Kernel for DelegatedSlowPass {
+    fn process(&mut self, cc: &mut KernelCtx) -> lmflow::Result<()> {
+        let active = DELEGATED_ACTIVE.fetch_add(1, Ordering::SeqCst) + 1;
+        DELEGATED_MAX_ACTIVE.fetch_max(active, Ordering::SeqCst);
+        std::thread::sleep(Duration::from_millis(5));
+        DELEGATED_ACTIVE.fetch_sub(1, Ordering::SeqCst);
+        cc.forward(0, 0)
+    }
 }
 
 /// 与 memory.rs 同样的所有权记账,但用于并发场景。
@@ -96,18 +116,16 @@ nodes: []
     assert!(err.to_string().contains("defined more than once"), "{err}");
 }
 
-/// 全部节点跑在线程池上:结果必须完整且有序。
+/// 全部节点跑在默认线程池上:结果必须完整且有序。
 #[test]
-fn all_nodes_on_pool_produce_correct_output() {
+fn all_nodes_on_default_pool_produce_correct_output() {
     init();
     let graph = Graph::from_yaml(
         r#"
-executors:
-  - { name: "cpu", type: "ThreadPoolExecutor", num_threads: 4 }
 nodes:
-  - { name: "n1", kernel: "PassThroughKernel", executor: "cpu", input_ports: ["in"],  output_ports: ["m1"] }
-  - { name: "n2", kernel: "PassThroughKernel", executor: "cpu", input_ports: ["m1"], output_ports: ["m2"] }
-  - { name: "n3", kernel: "PassThroughKernel", executor: "cpu", input_ports: ["m2"], output_ports: ["out"] }
+  - { name: "n1", kernel: "PassThroughKernel", input_ports: ["in"],  output_ports: ["m1"] }
+  - { name: "n2", kernel: "PassThroughKernel", input_ports: ["m1"], output_ports: ["m2"] }
+  - { name: "n3", kernel: "PassThroughKernel", input_ports: ["m2"], output_ports: ["out"] }
 input_ports: ["in"]
 output_ports: ["out"]
 "#,
@@ -133,22 +151,20 @@ output_ports: ["out"]
     assert_eq!(got, (0..N).collect::<Vec<_>>(), "order must be preserved");
 }
 
-/// 节点确实跑在**别的线程**上 —— 而不是静默退回主线程。
+/// 默认节点确实跑在**别的线程**上 —— 而不是静默退回主线程。
 ///
 /// 用 Rust 的 observer 回调(**按图**注册)取代全局日志:回调在派发该包的线程上
 /// 执行,于是能直接看到算子跑在哪个线程。按图隔离,不受并发跑的其它测试干扰。
 #[test]
-fn pool_nodes_actually_run_off_the_host_thread() {
+fn default_pool_nodes_actually_run_off_the_host_thread() {
     init();
     let seen = std::sync::Arc::new(Mutex::new(Vec::<String>::new()));
 
     {
         let graph = Graph::from_yaml(
             r#"
-executors:
-  - { name: "cpu", type: "ThreadPoolExecutor", num_threads: 2 }
 nodes:
-  - { name: "p", kernel: "PassThroughKernel", executor: "cpu", input_ports: ["in"], output_ports: ["out"] }
+  - { name: "p", kernel: "PassThroughKernel", input_ports: ["in"], output_ports: ["out"] }
 input_ports: ["in"]
 output_ports: ["out"]
 "#,
@@ -176,9 +192,48 @@ output_ports: ["out"]
     let names = seen.lock().expect("lock poisoned").clone();
     assert_eq!(names.len(), 20, "observer should receive all 20 packets");
     assert!(
-        names.iter().all(|n| n.starts_with("cpu-")),
-        "a kernel with an assigned executor must actually run on a cpu-N pool thread, actual: {names:?}"
+        names.iter().all(|n| n.starts_with("default-")),
+        "a node without executor must run on a default-N pool thread, actual: {names:?}"
     );
+}
+
+#[test]
+fn default_pool_advances_without_host_pumping() {
+    init();
+    let graph = Graph::from_yaml(
+        r#"
+nodes:
+  - { name: "p", kernel: "PassThroughKernel", input_ports: ["in"], output_ports: ["out"] }
+input_ports: ["in"]
+output_ports: ["out"]
+"#,
+    )
+    .unwrap();
+    let seen = Arc::new(AtomicUsize::new(0));
+    let observed = seen.clone();
+    graph
+        .observe("out", move |_| {
+            observed.fetch_add(1, Ordering::SeqCst);
+        })
+        .unwrap();
+    graph.start().unwrap();
+    graph
+        .input("in")
+        .unwrap()
+        .send(Packet::new(7).at(Timestamp(0)))
+        .unwrap();
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while seen.load(Ordering::SeqCst) == 0 && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(
+        seen.load(Ordering::SeqCst),
+        1,
+        "default worker must advance after send without wait/poller/pump_step"
+    );
+    graph.close_all_inputs();
+    graph.wait_done_timeout(Duration::from_secs(30)).unwrap();
 }
 
 // ------------------------------------------------------- 三类执行器落位的矩阵
@@ -241,7 +296,7 @@ output_ports: ["out"]
         match self {
             Placement::Default => "default-",
             Placement::ExplicitPool => "cpu-",
-            // 委托执行器在宿主线程上跑 —— 也就是跑测试的这个线程。
+            // 本测试只从当前宿主线程进入阻塞接口，所以委托任务也在该线程执行。
             Placement::Delegating => "HOST",
         }
     }
@@ -312,7 +367,7 @@ fn every_placement_lands_on_its_own_thread() {
             let rec = seen.clone();
             graph
                 .observe("out", move |_pkt| {
-                    // 委托执行器下回调就在宿主线程上,故顺带记线程 id 以便区分。
+                    // 本测试只由当前宿主线程推进委托任务，故顺带记线程 id 以便区分。
                     let name = if std::thread::current().id() == host {
                         "HOST".to_string()
                     } else {
@@ -478,6 +533,113 @@ fn delegating_only_advances_when_the_host_enters_the_engine() {
     );
 }
 
+#[test]
+fn multiple_delegating_executors_are_pumped_fairly() {
+    init();
+    let graph = Graph::from_yaml(
+        r#"
+executors:
+  - { name: "host_a", type: "DelegatingExecutor" }
+  - { name: "host_b", type: "DelegatingExecutor" }
+nodes:
+  - { name: "a", kernel: "PassThroughKernel", executor: "host_a", input_ports: ["in_a"], output_ports: ["out_a"] }
+  - { name: "b", kernel: "PassThroughKernel", executor: "host_b", input_ports: ["in_b"], output_ports: ["out_b"] }
+input_ports: ["in_a", "in_b"]
+output_ports: ["out_a", "out_b"]
+"#,
+    )
+    .unwrap();
+    let out_b = graph.add_poller("out_b").unwrap();
+    graph.start().unwrap();
+    for i in 0..10i32 {
+        graph
+            .input("in_a")
+            .unwrap()
+            .send(Packet::new(i).at(Timestamp(i as i64)))
+            .unwrap();
+    }
+    graph
+        .input("in_b")
+        .unwrap()
+        .send(Packet::new(99).at(Timestamp(0)))
+        .unwrap();
+
+    assert!(graph.pump_step(), "first delegated executor should advance");
+    assert!(
+        graph.pump_step(),
+        "second delegated executor should not starve"
+    );
+    assert_eq!(
+        out_b
+            .try_next()
+            .and_then(|packet| packet.get::<i32>().copied()),
+        Some(99),
+        "round-robin pumping must reach host_b even while host_a remains busy"
+    );
+    graph.close_all_inputs();
+    graph.wait_done_timeout(Duration::from_secs(30)).unwrap();
+}
+
+#[test]
+fn delegating_execution_is_serial_across_host_threads() {
+    init();
+    DELEGATED_ACTIVE.store(0, Ordering::SeqCst);
+    DELEGATED_MAX_ACTIVE.store(0, Ordering::SeqCst);
+    let graph = Arc::new(
+        Graph::from_yaml(
+            r#"
+executors:
+  - { name: "host_a", type: "DelegatingExecutor" }
+  - { name: "host_b", type: "DelegatingExecutor" }
+nodes:
+  - { name: "a", kernel: "DelegatedSlowPass", executor: "host_a", input_ports: ["in_a"], output_ports: ["out_a"] }
+  - { name: "b", kernel: "DelegatedSlowPass", executor: "host_b", input_ports: ["in_b"], output_ports: ["out_b"] }
+input_ports: ["in_a", "in_b"]
+output_ports: ["out_a", "out_b"]
+"#,
+        )
+        .unwrap(),
+    );
+    graph.add_poller("out_a").unwrap();
+    graph.add_poller("out_b").unwrap();
+    graph.start().unwrap();
+    graph
+        .input("in_a")
+        .unwrap()
+        .send(Packet::new(1).at(Timestamp(0)))
+        .unwrap();
+    graph
+        .input("in_b")
+        .unwrap()
+        .send(Packet::new(2).at(Timestamp(0)))
+        .unwrap();
+
+    let barrier = Arc::new(std::sync::Barrier::new(3));
+    let handles: Vec<_> = (0..2)
+        .map(|_| {
+            let graph = graph.clone();
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                graph.pump_step()
+            })
+        })
+        .collect();
+    barrier.wait();
+    for handle in handles {
+        let _ = handle.join().unwrap();
+    }
+    while graph.pump_step() {}
+
+    assert_eq!(
+        DELEGATED_MAX_ACTIVE.load(Ordering::SeqCst),
+        1,
+        "one graph must never execute delegated kernels concurrently"
+    );
+    graph.close_all_inputs();
+    graph.wait_done_timeout(Duration::from_secs(30)).unwrap();
+}
+
 /// 默认池是多线程的,所以默认节点配 `max_in_flight > 1` 现在**合法**(ADR #29 新语义)。
 /// 单核机器上默认池只有 1 个线程,那时该报错 —— 两种结果都对,别把机器规格写进断言。
 #[test]
@@ -561,7 +723,7 @@ output_ports: ["out"]
     .expect("2 threads for 1 source + 1 node is fine");
 }
 
-/// 混合执行器:一部分节点在池里、一部分在主线程 —— 最容易死锁的组合。
+/// 混合执行器:一部分节点在池里、一部分交还宿主线程 —— 最容易死锁的组合。
 #[test]
 fn mixed_executors_do_not_deadlock() {
     init();
@@ -569,9 +731,10 @@ fn mixed_executors_do_not_deadlock() {
         r#"
 executors:
   - { name: "cpu", type: "ThreadPoolExecutor", num_threads: 3 }
+  - { name: "host", type: "DelegatingExecutor" }
 nodes:
   - { name: "a", kernel: "PassThroughKernel", executor: "cpu", input_ports: ["in"], output_ports: ["m1"] }
-  - { name: "b", kernel: "PassThroughKernel",                  input_ports: ["m1"], output_ports: ["m2"] }
+  - { name: "b", kernel: "PassThroughKernel", executor: "host", input_ports: ["m1"], output_ports: ["m2"] }
   - { name: "c", kernel: "PassThroughKernel", executor: "cpu", input_ports: ["m2"], output_ports: ["out"] }
 input_ports: ["in"]
 output_ports: ["out"]
@@ -582,7 +745,7 @@ output_ports: ["out"]
     graph.start().unwrap();
     let input = graph.input("in").unwrap();
 
-    // 逐个「送一个取一个」—— 每次都要跨越 池→主线程→池 三段
+    // 逐个「送一个取一个」—— 每次都要跨越 池→宿主委托→池 三段
     for i in 0..50i32 {
         input.send(Packet::new(i).at(Timestamp(i as i64))).unwrap();
         let p = poller
@@ -637,16 +800,14 @@ output_ports: ["oa", "ob"]
 
 // ---------------------------------------------------------------- 阻塞语义
 
-/// `wait_until_idle` 必须真的等到线程池干完,不能提前返回。
+/// `wait_until_idle` 必须真的等到默认线程池干完,不能提前返回。
 #[test]
-fn wait_until_idle_waits_for_pool() {
+fn wait_until_idle_waits_for_default_pool() {
     init();
     let graph = Graph::from_yaml(
         r#"
-executors:
-  - { name: "cpu", type: "ThreadPoolExecutor", num_threads: 2 }
 nodes:
-  - { name: "p", kernel: "PassThroughKernel", executor: "cpu", input_ports: ["in"], output_ports: ["out"] }
+  - { name: "p", kernel: "PassThroughKernel", input_ports: ["in"], output_ports: ["out"] }
 input_ports: ["in"]
 output_ports: ["out"]
 "#,
@@ -708,10 +869,8 @@ fn pause_and_resume() {
     init();
     let graph = Graph::from_yaml(
         r#"
-executors:
-  - { name: "cpu", type: "ThreadPoolExecutor", num_threads: 2 }
 nodes:
-  - { name: "p", kernel: "PassThroughKernel", executor: "cpu", input_ports: ["in"], output_ports: ["out"] }
+  - { name: "p", kernel: "PassThroughKernel", input_ports: ["in"], output_ports: ["out"] }
 input_ports: ["in"]
 output_ports: ["out"]
 "#,
@@ -769,10 +928,8 @@ fn close_is_called_exactly_once_under_concurrency() {
     for round in 0..30 {
         let graph = Graph::from_yaml(
             r#"
-executors:
-  - { name: "cpu", type: "ThreadPoolExecutor", num_threads: 4 }
 nodes:
-  - { name: "s", kernel: "SinkKernel", executor: "cpu", input_ports: ["in"], output_ports: [] }
+  - { name: "s", kernel: "SinkKernel", input_ports: ["in"], output_ports: [] }
 input_ports: ["in"]
 "#,
         )
@@ -807,12 +964,10 @@ fn ownership_conserved_under_concurrency() {
     {
         let graph = Graph::from_yaml(
             r#"
-executors:
-  - { name: "cpu", type: "ThreadPoolExecutor", num_threads: 4 }
 nodes:
-  - { name: "sp", kernel: "SplitKernel",       executor: "cpu", input_ports: ["in"], output_ports: ["a", "b"] }
-  - { name: "pa", kernel: "PassThroughKernel", executor: "cpu", input_ports: ["a"],  output_ports: ["oa"] }
-  - { name: "pb", kernel: "SinkKernel",        executor: "cpu", input_ports: ["b"],  output_ports: [] }
+  - { name: "sp", kernel: "SplitKernel",       input_ports: ["in"], output_ports: ["a", "b"] }
+  - { name: "pa", kernel: "PassThroughKernel", input_ports: ["a"],  output_ports: ["oa"] }
+  - { name: "pb", kernel: "SinkKernel",        input_ports: ["b"],  output_ports: [] }
 input_ports: ["in"]
 output_ports: ["oa"]
 "#,
@@ -842,11 +997,9 @@ fn multiple_host_threads_sending() {
     let graph = std::sync::Arc::new(
         Graph::from_yaml(
             r#"
-executors:
-  - { name: "cpu", type: "ThreadPoolExecutor", num_threads: 4 }
 nodes:
-  - { name: "a", kernel: "PassThroughKernel", executor: "cpu", input_ports: ["in1"], output_ports: ["o1"] }
-  - { name: "b", kernel: "PassThroughKernel", executor: "cpu", input_ports: ["in2"], output_ports: ["o2"] }
+  - { name: "a", kernel: "PassThroughKernel", input_ports: ["in1"], output_ports: ["o1"] }
+  - { name: "b", kernel: "PassThroughKernel", input_ports: ["in2"], output_ports: ["o2"] }
 input_ports: ["in1", "in2"]
 output_ports: ["o1", "o2"]
 "#,
@@ -904,10 +1057,8 @@ fn concurrent_send_to_same_port_is_safe() {
         let graph = std::sync::Arc::new(
             Graph::from_yaml(
                 r#"
-executors:
-  - { name: "cpu", type: "ThreadPoolExecutor", num_threads: 4 }
 nodes:
-  - { name: "p", kernel: "PassThroughKernel", executor: "cpu", input_ports: ["in"], output_ports: ["out"] }
+  - { name: "p", kernel: "PassThroughKernel", input_ports: ["in"], output_ports: ["out"] }
 input_ports: ["in"]
 output_ports: ["out"]
 "#,
@@ -965,10 +1116,8 @@ fn dropping_graph_with_busy_pool_is_clean() {
     for _ in 0..10 {
         let graph = Graph::from_yaml(
             r#"
-executors:
-  - { name: "cpu", type: "ThreadPoolExecutor", num_threads: 4 }
 nodes:
-  - { name: "p", kernel: "PassThroughKernel", executor: "cpu", input_ports: ["in"], output_ports: ["out"] }
+  - { name: "p", kernel: "PassThroughKernel", input_ports: ["in"], output_ports: ["out"] }
 input_ports: ["in"]
 output_ports: ["out"]
 "#,

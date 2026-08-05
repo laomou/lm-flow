@@ -223,18 +223,15 @@ output_ports: ["out"]
     );
 }
 
-/// 时间戳对齐在线程池下同样成立。
+/// 时间戳对齐在默认线程池下同样成立。
 #[test]
-fn alignment_holds_on_thread_pool() {
+fn alignment_holds_on_default_pool() {
     init();
     let graph = Graph::from_yaml(
         r#"
-executors:
-  - { name: "cpu", type: "ThreadPoolExecutor", num_threads: 4 }
 nodes:
   - name: "z"
     kernel: "ZipKernel"
-    executor: "cpu"
     input_ports: ["A:x", "B:y"]
     output_ports: ["out"]
 input_ports: ["x", "y"]

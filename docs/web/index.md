@@ -179,8 +179,8 @@ Notable capabilities:
 - **Executor control** — thread count, CPU affinity and real-time priority per executor, for
   pinning work on realtime or NUMA systems. Nodes that name no executor land on the engine-owned
   **default executor**, a thread pool sized to the CPU count. Declare your own
-  `DelegatingExecutor` and point nodes at it for host-thread execution instead (zero concurrency,
-  deterministic order, no GIL contention for Python kernels).
+  `DelegatingExecutor` and point nodes at it for serialized host-thread execution instead
+  (deterministic order; Python kernels on the same graph do not contend with each other for the GIL).
 
 Unsupported configuration is **rejected loudly** rather than ignored: if a field asks for
 something this version does not implement, graph construction fails. Silently doing less than

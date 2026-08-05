@@ -300,9 +300,11 @@ nodes:
   - { name: draw, kernel: Overlay, executor: "host" }
 ```
 
-A delegating executor owns no threads, so its tasks are only pumped while the host is inside a
-blocking call such as `lmflow_poller_next` or `lmflow_graph_wait_done` (or an explicit
-`pump_step`). Send without ever entering the engine and those nodes will not advance.
+A delegating executor owns no threads, so its tasks are only pumped while a host thread is inside a
+blocking call such as `lmflow_poller_next` or `lmflow_graph_wait_done`, or calls
+`lmflow_graph_pump_step`. Delegated tasks are serialized per graph even if several host threads
+enter concurrently, and multiple delegating executors are pumped fairly. Send without ever
+entering the engine and those nodes will not advance.
 
 ### Reset and re-run
 
