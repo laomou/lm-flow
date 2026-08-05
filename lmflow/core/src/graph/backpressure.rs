@@ -150,11 +150,10 @@ impl GraphInner {
         }
     }
 
-    /// `workers_idle + blocked staging` 只是一个瞬时快照,不能直接等同于死锁:
-    /// 下游队列里可能已有可消费数据,但对应节点的调度通知恰好与上游进入 blocked
-    /// staging 交错,此刻任务队列暂时为空。先全图重扫就绪性并重试刷新;若活动代数
-    /// 仍不变且 worker 仍空闲,才算稳定地没有进展。
-    pub(super) fn retry_backpressure_progress(&self) -> bool {
+    /// `workers_idle` 只是执行器快照,不能直接等同于图没有可推进工作:
+    /// 队列入队、blocked staging 恢复与下游调度通知可能交错,使任务队列暂时为空。
+    /// 先全图重扫就绪性并重试刷新;若活动代数仍不变且 worker 仍空闲,才算稳定。
+    pub(super) fn retry_idle_progress(&self) -> bool {
         let before = self.activity_gen();
         for node in 0..self.nodes.len() {
             self.schedule_node(node);

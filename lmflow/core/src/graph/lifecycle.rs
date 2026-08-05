@@ -367,15 +367,18 @@ impl GraphInner {
                     .copied()
                     .collect();
                 if !blocked.is_empty() {
-                    if self.retry_backpressure_progress() {
+                    if self.retry_idle_progress() {
                         continue;
                     }
                     let details = self.backpressure_stall_details(&blocked);
                     return Err(Error::Kernel(format!(
                         "wait_done: internal backpressure cannot make progress; blocked queues: [{}]. \
                          increase the input queue packet capacity or inspect downstream alignment",
-                        details.join("; ")
+                         details.join("; ")
                     )));
+                }
+                if self.retry_idle_progress() {
+                    continue;
                 }
                 // 空闲且未全关:再推一轮关流
                 if self.try_advance_closing() {
@@ -467,7 +470,7 @@ impl GraphInner {
                     .iter()
                     .copied()
                     .collect();
-                if !blocked.is_empty() && self.retry_backpressure_progress() {
+                if !blocked.is_empty() && self.retry_idle_progress() {
                     continue;
                 }
                 if self.is_idle() {
