@@ -83,13 +83,6 @@ jobs:
       # dry-run 会真打包并在解包出的副本里编一遍,等价于发版前的最后一道检查。
       - name: crate 仍可发布(publish --dry-run)
         run: cargo publish --dry-run
-      # 仓库内的完整路径:开 builtin-kernels 编 ../cpp 的 18 个内置 C++ 算子,
-      # 跑全部测试(含 C ABI / 内存记账 / CoW / 调度策略 …)。
-      - name: 带内置 C++ 算子(仓库内完整路径)
-        run: |
-          cargo clippy --features builtin-kernels --all-targets -- -D warnings
-          cargo build --features builtin-kernels --all-targets
-          timeout 600 cargo test --features builtin-kernels
       # 全局水位的**内存曲线**压测。此前水位只有功能测试(「撞到水位会转成背压」),
       # 没人验证过真实 RSS 是平的 —— 而「水位读数正常、内存仍单调增长」是可能的:
       # 实测把算子改成不释放包时,total_queued_bytes 依旧稳稳停在水位上,而 RSS
@@ -111,12 +104,16 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo build --release --features builtin-kernels --manifest-path core/Cargo.toml
+      - run: cmake -S .. -B /tmp/lmflow-external -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF
+        working-directory: lmflow
+      - run: cmake --build /tmp/lmflow-external --target flow_engine lmflow_kernels
+        working-directory: lmflow
       - name: header 声明与库导出符号对齐
         run: |
           decl=$(grep -oE "^[A-Za-z_][A-Za-z0-9_ *]*\blmflow_[a-z_0-9]+\(" include/lmflow/flow.h \
                  | grep -oE "lmflow_[a-z_0-9]+" | sort -u)
           syms=$(nm -g --defined-only core/target/release/liblmflow.a \
+                    /tmp/lmflow-external/liblmflow_kernels.a \
                  | grep -oE " T lmflow_[a-z_0-9]+" | grep -oE "lmflow_[a-z_0-9]+" | sort -u)
           missing=$(comm -23 <(echo "$decl") <(echo "$syms"))
           [ -z "$missing" ] || { echo "header 声明了但库里没有:"; echo "$missing"; exit 1; }
@@ -130,7 +127,8 @@ jobs:
           }
           EOF
           g++ -std=c++17 -Wall -Wextra -Werror -Iinclude \
-              /tmp/cpp_host.cc core/target/release/liblmflow.a \
+              /tmp/cpp_host.cc /tmp/lmflow-external/liblmflow_kernels.a \
+              core/target/release/liblmflow.a \
               -lpthread -ldl -lm -o /tmp/cpp_host
           /tmp/cpp_host
 
@@ -144,7 +142,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: configure + build + ctest
         run: |
-          cmake -B build -DCMAKE_BUILD_TYPE=Release
+          cmake -B build -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_SHARED_LIBS=OFF -DLMFLOW_BUILD_KERNELS=ON
           cmake --build build -j
           ctest --test-dir build --output-on-failure
       - name: install SDK + 最小外部工程消费(find_package)
@@ -156,17 +155,35 @@ jobs:
           project(lmflow_sdk_smoke LANGUAGES CXX)
           find_package(lmflow REQUIRED)
           add_executable(sdk_smoke main.cc)
-          target_link_libraries(sdk_smoke PRIVATE lmflow::core)
+          target_link_libraries(sdk_smoke PRIVATE lmflow::lmflow)
           EOF
           cat >/tmp/lmflow-sdk-consumer/main.cc <<'EOF'
           #include "lmflow/flow.h"
           int main() {
-            return lmflow_abi_version() == LMFLOW_ABI_VERSION ? 0 : 1;
+            lmflow_register_builtin_kernels();
+            return lmflow_registered_kernel_count() >= 18 ? 0 : 1;
           }
           EOF
           cmake -S /tmp/lmflow-sdk-consumer -B /tmp/ex -Dlmflow_DIR=/tmp/sdk/lib/cmake/lmflow
           cmake --build /tmp/ex
           /tmp/ex/sdk_smoke
+      - name: 动态完整库 + 纯 core + kernels 关闭
+        run: |
+          cmake -B build-shared -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_SHARED_LIBS=ON -DLMFLOW_BUILD_KERNELS=ON
+          cmake --build build-shared -j
+          test -f build-shared/liblmflow.so
+          test -f build-shared/liblmflow_core.so
+          nm -D --defined-only build-shared/liblmflow.so \
+            | grep -q ' lmflow_register_builtin_kernels$'
+          cmake -B build-core-only -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_SHARED_LIBS=ON -DLMFLOW_BUILD_KERNELS=OFF
+          cmake --build build-core-only -j
+          if nm -D --defined-only build-core-only/liblmflow.so \
+              | grep -q ' lmflow_register_builtin_kernels$'; then
+            echo "kernels 关闭后完整库仍导出了内置算子注册符号"
+            exit 1
+          fi
       - run: sudo apt-get update && sudo apt-get install -y ninja-build
       - name: 多配置生成器下 cargo profile 必须跟随 --config
         # 守一个**静默**的坑:`CMAKE_BUILD_TYPE` 只对单配置生成器有意义,而多配置生成器
@@ -185,7 +202,7 @@ jobs:
             | grep -q 'dev profile' \
             || { echo "Debug 下 cargo 没走 dev profile"; exit 1; }
           # 上面查的是给人看的 COMMENT;真实传给 cargo 的 flag 也必须在场。
-          grep -rq -- 'cargo build --release --features builtin-kernels' build-mc/CMakeFiles/ \
+          grep -rq -- 'cargo build --release' build-mc/CMakeFiles/ \
             || { echo "生成的构建文件里找不到带 --release 的 cargo 调用"; exit 1; }
           echo "多配置生成器下 cargo profile 与 --config 一致"
   # ================================ safety (memory / concurrency) ================================
@@ -201,8 +218,8 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@nightly
         with: { components: rust-src }
-      - name: TSan(Rust + C++ 混合,含 max_in_flight 并行路径)
-        run: RUSTFLAGS="-Zsanitizer=thread" timeout 1200 cargo +nightly test --features builtin-kernels -Zbuild-std --target x86_64-unknown-linux-gnu --lib --tests
+      - name: TSan 纯 Rust core
+        run: RUSTFLAGS="-Zsanitizer=thread" timeout 1200 cargo +nightly test -Zbuild-std --target x86_64-unknown-linux-gnu --lib --tests
 
   # ASan / Miri:辅助排查,暂不作门禁(build-std + C++ 侧易有误报,
   # Miri 也不完整支持线程与跨 FFI 的真实函数指针)。
@@ -214,8 +231,8 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@nightly
         with: { components: 'rust-src, miri' }
-      - name: ASan
-        run: RUSTFLAGS="-Zsanitizer=address" cargo +nightly test --features builtin-kernels -Zbuild-std --target x86_64-unknown-linux-gnu --lib --tests
+      - name: ASan core
+        run: RUSTFLAGS="-Zsanitizer=address" cargo +nightly test -Zbuild-std --target x86_64-unknown-linux-gnu --lib --tests
         continue-on-error: true
       - name: Miri(专查 FFI 里的 unsafe)
         run: cargo +nightly miri test --lib
@@ -259,14 +276,12 @@ jobs:
       - uses: actions/setup-python@v7
         with: { python-version: '3.11' }
 
-      - name: Rust + 内置 MSVC C++ 算子
+      - name: 纯 Rust core
         working-directory: lmflow/core
         run: |
           cargo fmt --all -- --check
           cargo clippy --all-targets -- -D warnings
           cargo test
-          cargo clippy --features builtin-kernels --all-targets -- -D warnings
-          cargo test --features builtin-kernels
 
       - name: MSVC 独立编译 C/C++ 公共头、算子与纯头测试
         shell: pwsh
@@ -299,14 +314,32 @@ jobs:
         shell: pwsh
         run: |
           $PSNativeCommandUseErrorActionPreference = $true
-          cmake -S . -B build-windows -A x64
+          cmake -S . -B build-windows -A x64 `
+            -DBUILD_SHARED_LIBS=OFF -DLMFLOW_BUILD_KERNELS=ON
           cmake --build build-windows --config Debug --parallel
           ctest --test-dir build-windows -C Debug --output-on-failure
           cmake --build build-windows --config Release --parallel
           ctest --test-dir build-windows -C Release --output-on-failure
           cmake --install build-windows --config Release --prefix "$env:RUNNER_TEMP\lmflow-sdk"
-          if (-not (Test-Path "$env:RUNNER_TEMP\lmflow-sdk\lib\lmflow.lib")) {
-            throw "installed SDK is missing lib/lmflow.lib"
+          if (-not (Test-Path "$env:RUNNER_TEMP\lmflow-sdk\lib\lmflow_core_static.lib")) {
+            throw "installed SDK is missing lib/lmflow_core_static.lib"
+          }
+          if (-not (Test-Path "$env:RUNNER_TEMP\lmflow-sdk\lib\lmflow_kernels.lib")) {
+            throw "installed SDK is missing lib/lmflow_kernels.lib"
+          }
+
+      - name: Windows 动态完整库
+        shell: pwsh
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          cmake -S . -B build-windows-shared -A x64 `
+            -DBUILD_SHARED_LIBS=ON -DLMFLOW_BUILD_KERNELS=ON -DLMFLOW_BUILD_TESTS=OFF
+          cmake --build build-windows-shared --config Release --parallel
+          if (-not (Test-Path "build-windows-shared\Release\lmflow.dll")) {
+            throw "shared build is missing lmflow.dll"
+          }
+          if (-not (Test-Path "build-windows-shared\Release\lmflow_core.dll")) {
+            throw "shared build is missing lmflow_core.dll"
           }
 
       - name: 已安装 SDK 可被外部 MSVC 工程消费
@@ -321,12 +354,13 @@ jobs:
           project(lmflow_sdk_smoke LANGUAGES CXX)
           find_package(lmflow REQUIRED)
           add_executable(sdk_smoke main.cc)
-          target_link_libraries(sdk_smoke PRIVATE lmflow::core)
+          target_link_libraries(sdk_smoke PRIVATE lmflow::lmflow)
           '@
           Set-Content -Path "$source\main.cc" -Value @'
           #include "lmflow/flow.h"
           int main() {
-            return lmflow_abi_version() == LMFLOW_ABI_VERSION ? 0 : 1;
+            lmflow_register_builtin_kernels();
+            return lmflow_registered_kernel_count() >= 18 ? 0 : 1;
           }
           '@
 
@@ -361,7 +395,13 @@ jobs:
           export CXX_aarch64_linux_android="$TOOL/aarch64-linux-android21-clang++"
           export AR_aarch64_linux_android="$TOOL/llvm-ar"
           export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$TOOL/aarch64-linux-android21-clang"
-          cargo build --features builtin-kernels --target aarch64-linux-android --manifest-path core/Cargo.toml
+          cmake -S .. -B /tmp/lmflow-android \
+            -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_LATEST_HOME/build/cmake/android.toolchain.cmake" \
+            -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-21 \
+            -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF \
+            -DLMFLOW_BUILD_KERNELS=ON -DLMFLOW_BUILD_TESTS=OFF \
+            -DLMFLOW_RUST_TARGET=aarch64-linux-android
+          cmake --build /tmp/lmflow-android --parallel
       # 鸿蒙/OpenHarmony 标准系统是 target_os=linux(rustc 已确认),与 Linux 走同一套代码路径,
       # 由 rust/external-host 门禁间接覆盖;其 SDK 不在 runner 上,故不单列交叉编译。
 
@@ -374,11 +414,17 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with: { targets: aarch64-apple-ios }
       # 原生 macOS:既验证 macOS 分支(QoS 优先级)能编,又让引擎真的在 macOS 上跑一遍
-      - name: macOS 原生 cargo test
-        run: cargo test --features builtin-kernels --manifest-path core/Cargo.toml
-      # iOS:交叉编译(Xcode 自带 iOS SDK,cc 经 xcrun 编 C++ 算子)
+      - name: macOS 原生 core 测试
+        run: cargo test --manifest-path core/Cargo.toml
+      # iOS:交叉编译纯 Rust core + CMake C++ kernels。
       - name: 交叉编译到 iOS
-        run: cargo build --release --features builtin-kernels --target aarch64-apple-ios --manifest-path core/Cargo.toml
+        run: |
+          cmake -S .. -B /tmp/lmflow-ios \
+            -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_SYSROOT=iphoneos \
+            -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_SHARED_LIBS=OFF -DLMFLOW_BUILD_KERNELS=ON \
+            -DLMFLOW_BUILD_TESTS=OFF -DLMFLOW_RUST_TARGET=aarch64-apple-ios
+          cmake --build /tmp/lmflow-ios --parallel
 
   # ================================ integration (OpenCV) ================================
 
@@ -392,11 +438,13 @@ jobs:
         with: { submodules: recursive }   # 下面 python 部分要编 pybind11 扩展
       - uses: dtolnay/rust-toolchain@stable
       - run: sudo apt-get update && sudo apt-get install -y libopencv-dev
-      - run: cargo build --release --features builtin-kernels --manifest-path lmflow/core/Cargo.toml
+      - run: cmake -S . -B build-opencv -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DLMFLOW_BUILD_KERNELS=ON -DLMFLOW_BUILD_TESTS=OFF
+      - run: cmake --build build-opencv --target flow_engine lmflow_kernels --parallel
       - name: 编译并运行 flow_cv.hpp 测试(含非连续 ROI 拷贝)
         run: |
           g++ -std=c++17 -Wall -Wextra -Werror -Ilmflow/include lmflow/cpp/tests/flow_cv_test.cc \
-              lmflow/core/target/release/liblmflow.a $(pkg-config --cflags --libs opencv4) \
+              build-opencv/liblmflow_kernels.a lmflow/core/target/release/liblmflow.a \
+              $(pkg-config --cflags --libs opencv4) \
               -lpthread -ldl -lm -o /tmp/flow_cv_test
           /tmp/flow_cv_test
       # 直接证明「Python numpy 图 → C++ OpenCV 算子 → 读回」是同一块内存:开 LMFLOW_WITH_CV_TEST

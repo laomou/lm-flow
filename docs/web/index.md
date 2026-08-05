@@ -111,7 +111,7 @@ ships a per-platform SDK tarball (Linux x86_64/aarch64, macOS arm64, iOS arm64, 
 
 ```cmake
 find_package(lmflow REQUIRED)
-target_link_libraries(my_app PRIVATE lmflow::core)
+target_link_libraries(my_app PRIVATE lmflow::lmflow)
 ```
 
 ```cpp

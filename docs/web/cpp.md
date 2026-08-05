@@ -22,7 +22,7 @@ iOS arm64, Android arm64:
 ```text
 lmflow-v0.3.0-linux-x86_64/
 ├── include/lmflow/   flow.h · flow.hpp · flow_cv.hpp · flow_platform_log.hpp
-└── lib/              liblmflow.a (static, self-contained — preferred) · liblmflow.so
+└── lib/              liblmflow_core.a · liblmflow_kernels.a · liblmflow.so
 ```
 
 The static library is self-contained and is the right choice for mobile embedding:
@@ -46,7 +46,7 @@ Consumers then need only:
 
 ```cmake
 find_package(lmflow REQUIRED)
-target_link_libraries(my_app PRIVATE lmflow::core)   # headers + liblmflow.a + system libs
+target_link_libraries(my_app PRIVATE lmflow::lmflow) # pure core + optional bundled kernels
 ```
 
 The imported target carries the include directory, the static library, and the system libraries it
@@ -56,14 +56,15 @@ needs, so nothing else has to be spelled out.
 
 ```bash
 cd lmflow/core
-cargo build --release --features builtin-kernels
-# → lmflow/core/target/release/liblmflow.{a,so}; headers are in lmflow/include/lmflow
+cmake -B build -DCMAKE_BUILD_TYPE=Release \
+  -DBUILD_SHARED_LIBS=ON -DLMFLOW_BUILD_KERNELS=ON
+cmake --build build
+# → build/liblmflow_core.so + build/liblmflow.so; headers are in lmflow/include/lmflow
 ```
 
-`builtin-kernels` is **off by default** — the default build is a pure-Rust engine with no C++ at
-all. C and C++ users generally want the feature on, since it is what provides the bundled kernels
-and `lmflow_register_builtin_kernels()`. The released SDK tarballs and the Python wheel are all
-built with it enabled.
+`LMFLOW_BUILD_KERNELS` controls the separate official C++ kernels component. It defaults to `ON`;
+set it to `OFF` for a pure-Rust native library without
+`lmflow_register_builtin_kernels()`. The core Cargo crate never compiles C++.
 
 ## ABI version checking
 

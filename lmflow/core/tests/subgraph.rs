@@ -3,12 +3,10 @@
 //! 核心断言:子图展开出的图与手写扁平图**行为等价**(同样的直通链),且运行时引擎
 //! 完全不感知子图 —— 展开是纯建图期变换。
 
-#![cfg(feature = "builtin-kernels")] // 用内置 C++ 算子:纯 Rust 构建(--no-default-features)时整文件跳过
-
 use lmflow::{Graph, Packet, State, Timestamp};
 
 fn init() {
-    lmflow::register_builtin_kernels();
+    lmflow::builtin::register_defaults();
 }
 
 /// 把一张直通图跑 10 个包,校验值与时间戳原样穿过。用于比对「子图展开 == 手写扁平」。
@@ -44,8 +42,8 @@ fn subgraph_expands_to_equivalent_pipeline() {
 subgraphs:
   PassPair:
     nodes:
-      - { name: a, kernel: PassThroughKernel, input_ports: ["sin"], output_ports: ["mid"] }
-      - { name: b, kernel: PassThroughKernel, input_ports: ["mid"], output_ports: ["sout"] }
+      - { name: a, kernel: PassThrough, input_ports: ["sin"], output_ports: ["mid"] }
+      - { name: b, kernel: PassThrough, input_ports: ["mid"], output_ports: ["sout"] }
     input_ports: ["sin"]
     output_ports: ["sout"]
 nodes:
@@ -67,7 +65,7 @@ fn nested_subgraph_expands() {
 subgraphs:
   Inner:
     nodes:
-      - { name: k, kernel: PassThroughKernel, input_ports: ["i"], output_ports: ["o"] }
+      - { name: k, kernel: PassThrough, input_ports: ["i"], output_ports: ["o"] }
     input_ports: ["i"]
     output_ports: ["o"]
   Outer:
@@ -95,8 +93,8 @@ fn subgraph_instantiated_twice_is_namespaced() {
 subgraphs:
   PassPair:
     nodes:
-      - { name: a, kernel: PassThroughKernel, input_ports: ["sin"], output_ports: ["m"] }
-      - { name: b, kernel: PassThroughKernel, input_ports: ["m"], output_ports: ["sout"] }
+      - { name: a, kernel: PassThrough, input_ports: ["sin"], output_ports: ["m"] }
+      - { name: b, kernel: PassThrough, input_ports: ["m"], output_ports: ["sout"] }
     input_ports: ["sin"]
     output_ports: ["sout"]
 nodes:
@@ -122,8 +120,8 @@ fn include_merges_subgraph_library_from_file() {
 subgraphs:
   PassPair:
     nodes:
-      - { name: a, kernel: PassThroughKernel, input_ports: ["sin"], output_ports: ["mid"] }
-      - { name: b, kernel: PassThroughKernel, input_ports: ["mid"], output_ports: ["sout"] }
+      - { name: a, kernel: PassThrough, input_ports: ["sin"], output_ports: ["mid"] }
+      - { name: b, kernel: PassThrough, input_ports: ["mid"], output_ports: ["sout"] }
     input_ports: ["sin"]
     output_ports: ["sout"]
 "#,
@@ -157,7 +155,7 @@ fn missing_include_file_is_rejected() {
         r#"
 include: ["nope.yml"]
 nodes:
-  - { name: p, kernel: PassThroughKernel, input_ports: ["in"], output_ports: ["out"] }
+  - { name: p, kernel: PassThrough, input_ports: ["in"], output_ports: ["out"] }
 input_ports: ["in"]
 output_ports: ["out"]
 "#,
@@ -178,7 +176,7 @@ fn include_in_text_is_rejected() {
         r#"
 include: ["lib.yml"]
 nodes:
-  - { name: p, kernel: PassThroughKernel, input_ports: ["in"], output_ports: ["out"] }
+  - { name: p, kernel: PassThrough, input_ports: ["in"], output_ports: ["out"] }
 input_ports: ["in"]
 output_ports: ["out"]
 "#,
@@ -201,8 +199,8 @@ executors:
 subgraphs:
   PassPair:
     nodes:
-      - { name: a, kernel: PassThroughKernel, executor: cpu, input_ports: ["sin"], output_ports: ["mid"] }
-      - { name: b, kernel: PassThroughKernel, input_ports: ["mid"], output_ports: ["sout"] }
+      - { name: a, kernel: PassThrough, executor: cpu, input_ports: ["sin"], output_ports: ["mid"] }
+      - { name: b, kernel: PassThrough, input_ports: ["mid"], output_ports: ["sout"] }
     input_ports: ["sin"]
     output_ports: ["sout"]
 nodes:
@@ -255,8 +253,8 @@ fn to_dot_plain_graph_has_no_namespace_clusters() {
     let graph = Graph::from_yaml(
         r#"
 nodes:
-  - { name: n1, kernel: PassThroughKernel, input_ports: ["in"], output_ports: ["mid"] }
-  - { name: n2, kernel: PassThroughKernel, input_ports: ["mid"], output_ports: ["out"] }
+  - { name: n1, kernel: PassThrough, input_ports: ["in"], output_ports: ["mid"] }
+  - { name: n2, kernel: PassThrough, input_ports: ["mid"], output_ports: ["out"] }
 input_ports: ["in"]
 output_ports: ["out"]
 "#,

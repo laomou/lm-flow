@@ -42,8 +42,8 @@ jobs:
           python -m pip install .          # scikit-build-core:cargo 引擎 + pybind11 扩展
           python -m pip install pdoc       # 顺带带来 markdown2 / pygments,供 build.py 用
       - name: rustdoc 生成 Rust API 文档
-        # 用默认(纯 Rust)feature:builtin-kernels 只在本仓库内可用,给 crates.io
-        # 用户展示他们调不到的函数属于误导。-D warnings 让失效的 intra-doc 链接直接失败。
+        # core 始终纯 Rust；官方 C++ kernels 由 CMake 独立构建，不进入 docs.rs crate。
+        # -D warnings 让失效的 intra-doc 链接直接失败。
         env:
           RUSTDOCFLAGS: -D warnings
         run: cargo doc --no-deps --manifest-path lmflow/core/Cargo.toml

@@ -1,8 +1,8 @@
 //! hello_world —— 最小可运行示例:两级直通管线。
 //!
 //! 拓扑:input1 → node1(PassThrough) → input2 → node2(PassThrough) → output2
-//! 算子是 C++ 写的(经 lmflow crate 的 build.rs 用 cc 编译链入),引擎与 host 是 Rust ——
-//! 一条 `cargo run` 即可跑通全链路。对应 C++ 版见 examples/cpp/hello_world。
+//! 使用 core 自带的纯 Rust `PassThrough` 算子，一条 `cargo run` 即可跑通。
+//! 对应 C++ 宿主版本见 examples/cpp/hello_world。
 
 use lmflow::{Graph, Packet, Timestamp};
 
@@ -13,11 +13,11 @@ use lmflow::{Graph, Packet, Timestamp};
 const CONFIG: &str = r#"
 nodes:
   - name: "node1"
-    kernel: "PassThroughKernel"
+    kernel: "PassThrough"
     input_ports: ["input1"]
     output_ports: ["input2"]
   - name: "node2"
-    kernel: "PassThroughKernel"
+    kernel: "PassThrough"
     input_ports: ["input2"]
     output_ports: ["output2"]
 input_ports: ["input1"]
@@ -25,9 +25,6 @@ output_ports: ["output2"]
 "#;
 
 fn main() -> lmflow::Result<()> {
-    // C++ 算子的注册:静态初始化可能被链接器裁剪,故显式聚合注册一次(见设计文档 §9)。
-    lmflow::register_builtin_kernels();
-
     let graph = Graph::from_yaml(CONFIG)?;
     let poller = graph.add_poller("output2")?;
     graph.start()?;

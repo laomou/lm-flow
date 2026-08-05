@@ -1,72 +1,152 @@
-# cmake/engine.cmake —— 公共基座:cargo 构建 Rust 引擎 → IMPORTED lmflow::core。
-# 由根 CMakeLists include;各子目录(cpp/tests、python)都用这个 target。
-# 需要调用方先 set 好:LMFLOW_ROOT(仓库根)、LMFLOW_SRC(lmflow/ 源码根)。
+# Cargo builds the pure Rust static core. CMake builds the optional C++ kernels
+# and exposes static/shared variants selected by BUILD_SHARED_LIBS.
 
-# cargo 的 profile 目录随构建配置变化。**不能在配置期读 `CMAKE_BUILD_TYPE`** ——
-# 那个变量只对**单配置**生成器(Unix Makefiles / 单配置 Ninja)有意义;多配置生成器
-# (Ninja Multi-Config、Visual Studio)的配置是**构建期**由 `--config` 决定的,配置期
-# 通常为空。原先的 `if(CMAKE_BUILD_TYPE MATCHES ...)` 在那类生成器下会静默退到 debug:
-#
-#   cmake -B b -G "Ninja Multi-Config" && cmake --build b --config Release --target flow_engine
-#   → cargo 实际建的是 `dev` profile(实测输出 "Finished `dev` profile [unoptimized]"),
-#     于是 C++ 侧按 Release 编、却链进一个**未优化的 debug 引擎**,且不给任何提示。
-#
-# 故改用生成器表达式,让 profile 跟着**实际构建的那个配置**走。单配置生成器行为不变。
 set(_lmflow_optimized "$<OR:$<CONFIG:Release>,$<CONFIG:RelWithDebInfo>,$<CONFIG:MinSizeRel>>")
 
-# 引擎 crate(lmflow)的 staticlib 落在它自己目录下。MSVC 不带 `lib` 前缀且后缀为
-# `.lib`;Unix / MinGW 使用 `liblmflow.a`。cargo 只有 dev / release 两档,故
-# RelWithDebInfo / MinSizeRel 都映到 release。
 if(MSVC)
-  set(LMFLOW_STATIC_LIBRARY_FILENAME "lmflow.lib")
+  set(LMFLOW_CORE_BUILD_FILENAME "lmflow.lib")
+  set(LMFLOW_CORE_INSTALL_FILENAME "lmflow_core_static.lib")
 else()
-  set(LMFLOW_STATIC_LIBRARY_FILENAME "liblmflow.a")
+  set(LMFLOW_CORE_BUILD_FILENAME "liblmflow.a")
+  set(LMFLOW_CORE_INSTALL_FILENAME "liblmflow_core.a")
 endif()
-set(LMFLOW_LIB "${LMFLOW_SRC}/core/target/$<IF:${_lmflow_optimized},release,debug>/${LMFLOW_STATIC_LIBRARY_FILENAME}")
-set(_lmflow_lib_debug "${LMFLOW_SRC}/core/target/debug/${LMFLOW_STATIC_LIBRARY_FILENAME}")
-set(_lmflow_lib_release "${LMFLOW_SRC}/core/target/release/${LMFLOW_STATIC_LIBRARY_FILENAME}")
+
+if(LMFLOW_RUST_TARGET)
+  set(_lmflow_rust_target_dir "${LMFLOW_SRC}/core/target/${LMFLOW_RUST_TARGET}")
+  set(_lmflow_rust_target_args --target "${LMFLOW_RUST_TARGET}")
+else()
+  set(_lmflow_rust_target_dir "${LMFLOW_SRC}/core/target")
+  set(_lmflow_rust_target_args)
+endif()
+set(LMFLOW_CORE_LIB
+    "${_lmflow_rust_target_dir}/$<IF:${_lmflow_optimized},release,debug>/${LMFLOW_CORE_BUILD_FILENAME}")
+set(_lmflow_core_debug "${_lmflow_rust_target_dir}/debug/${LMFLOW_CORE_BUILD_FILENAME}")
+set(_lmflow_core_release "${_lmflow_rust_target_dir}/release/${LMFLOW_CORE_BUILD_FILENAME}")
 
 find_program(CARGO cargo REQUIRED)
 find_package(Threads REQUIRED)
 
-# cargo 是权威编译器(CMake 不能直接编 Rust);这里只驱动它。build.rs 经 cc 顺带编
-# cpp/ 下的 C++ 算子,一并进 liblmflow.a。ALL:让 `cmake --build` 默认就出这个库。
-# 让 flow_engine **每次都调 cargo**(cargo 自己做增量,clean 时秒回)—— 否则 CMake 不追踪
-# .rs 变更、会复用陈旧的 .a(本地增量构建曾因此链到旧符号)。cargo 只在 .a 真变时更新它,
-# 故下游链接仍按需重链。
-# COMMAND_EXPAND_LISTS:让 `--release` 的生成器表达式在 Debug 下展开为**无参数**,
-# 而不是一个空字符串参数(cargo 会拒掉空参数)。
 add_custom_target(flow_engine ALL
-  BYPRODUCTS "${LMFLOW_LIB}"
-  COMMAND ${CARGO} build "$<${_lmflow_optimized}:--release>" --features builtin-kernels
+  BYPRODUCTS "${LMFLOW_CORE_LIB}"
+  COMMAND ${CARGO} build "$<${_lmflow_optimized}:--release>" ${_lmflow_rust_target_args}
   WORKING_DIRECTORY "${LMFLOW_SRC}/core"
-  COMMENT "cargo build ($<IF:${_lmflow_optimized},release,dev> profile) — Rust engine + C++ kernels → ${LMFLOW_STATIC_LIBRARY_FILENAME}"
+  COMMENT "cargo build ($<IF:${_lmflow_optimized},release,dev> profile) — pure Rust core"
   COMMAND_EXPAND_LISTS VERBATIM USES_TERMINAL)
 
-# 按配置分别给出产物位置(多配置生成器要靠 IMPORTED_LOCATION_<CONFIG> 选)。
-# 裸 IMPORTED_LOCATION 是兜底:单配置生成器未传 CMAKE_BUILD_TYPE 时用 debug。
-add_library(lmflow_core STATIC IMPORTED GLOBAL)
-set_target_properties(lmflow_core PROPERTIES
+add_library(lmflow_core_static STATIC IMPORTED GLOBAL)
+set_target_properties(lmflow_core_static PROPERTIES
   IMPORTED_CONFIGURATIONS "DEBUG;RELEASE"
-  IMPORTED_LOCATION_DEBUG "${_lmflow_lib_debug}"
-  IMPORTED_LOCATION_RELEASE "${_lmflow_lib_release}"
-  IMPORTED_LOCATION "${_lmflow_lib_debug}"
+  IMPORTED_LOCATION_DEBUG "${_lmflow_core_debug}"
+  IMPORTED_LOCATION_RELEASE "${_lmflow_core_release}"
+  IMPORTED_LOCATION "${_lmflow_core_debug}"
   MAP_IMPORTED_CONFIG_RELWITHDEBINFO Release
   MAP_IMPORTED_CONFIG_MINSIZEREL Release)
-target_include_directories(lmflow_core INTERFACE
+target_include_directories(lmflow_core_static INTERFACE
   "$<BUILD_INTERFACE:${LMFLOW_SRC}/include>"
   "$<INSTALL_INTERFACE:include>")
-target_link_libraries(lmflow_core INTERFACE Threads::Threads)
+target_link_libraries(lmflow_core_static INTERFACE Threads::Threads)
 if(WIN32)
-  # `cargo rustc --target x86_64-pc-windows-msvc -- --print native-static-libs`
-  # 给出的 Rust staticlib 系统依赖。顺序与 rustc 输出保持一致。
-  target_link_libraries(lmflow_core INTERFACE kernel32 ntdll userenv ws2_32 dbghelp)
+  target_link_libraries(lmflow_core_static INTERFACE kernel32 ntdll userenv ws2_32 dbghelp)
 else()
-  target_link_libraries(lmflow_core INTERFACE ${CMAKE_DL_LIBS} m)
+  target_link_libraries(lmflow_core_static INTERFACE ${CMAKE_DL_LIBS} m)
 endif()
 if(MSVC)
-  # installed target 的消费者也需要 `/MD`;这里只设置 INTERFACE 是因为 imported target
-  # 自身不编译。显式选项放在 CMake 默认 `/MDd` 之后,Debug 消费者也不会混入 debug CRT。
-  target_compile_options(lmflow_core INTERFACE /MD)
+  target_compile_options(lmflow_core_static INTERFACE /MD)
 endif()
-add_library(lmflow::core ALIAS lmflow_core)
+add_library(lmflow::core_static ALIAS lmflow_core_static)
+
+function(_lmflow_whole_archive target)
+  set(_libraries ${ARGN})
+  if(MSVC)
+    target_link_libraries(${target} PRIVATE ${_libraries})
+    foreach(_library IN LISTS _libraries)
+      target_link_options(${target} PRIVATE "/WHOLEARCHIVE:$<TARGET_FILE:${_library}>")
+    endforeach()
+  elseif(APPLE)
+    target_link_libraries(${target} PRIVATE ${_libraries})
+    foreach(_library IN LISTS _libraries)
+      target_link_options(${target} PRIVATE
+        "SHELL:-Wl,-force_load,$<TARGET_FILE:${_library}>")
+    endforeach()
+  else()
+    target_link_libraries(${target} PRIVATE
+      "-Wl,--whole-archive" ${_libraries} "-Wl,--no-whole-archive")
+  endif()
+endfunction()
+
+function(_lmflow_add_windows_exports target include_kernels)
+  if(NOT MSVC)
+    return()
+  endif()
+
+  file(STRINGS "${LMFLOW_SRC}/include/lmflow/flow.h" _lmflow_header_lines
+       REGEX "^[A-Za-z_][A-Za-z0-9_ *]*lmflow_[a-z_0-9]+\\(")
+  set(_lmflow_exports)
+  foreach(_line IN LISTS _lmflow_header_lines)
+    string(REGEX MATCH "lmflow_[a-z_0-9]+" _symbol "${_line}")
+    if(_symbol)
+      if(include_kernels OR NOT _symbol STREQUAL "lmflow_register_builtin_kernels")
+        list(APPEND _lmflow_exports "${_symbol}")
+      endif()
+    endif()
+  endforeach()
+  list(REMOVE_DUPLICATES _lmflow_exports)
+  list(SORT _lmflow_exports)
+
+  set(_def "${CMAKE_CURRENT_BINARY_DIR}/${target}.def")
+  file(WRITE "${_def}" "EXPORTS\n")
+  foreach(_symbol IN LISTS _lmflow_exports)
+    file(APPEND "${_def}" "  ${_symbol}\n")
+  endforeach()
+  target_link_options(${target} PRIVATE "/DEF:${_def}")
+endfunction()
+
+if(LMFLOW_BUILD_KERNELS)
+  file(GLOB _lmflow_kernel_sources CONFIGURE_DEPENDS
+       "${LMFLOW_SRC}/cpp/kernels/*.cc")
+  add_library(lmflow_kernels STATIC
+    ${_lmflow_kernel_sources}
+    "${LMFLOW_SRC}/cpp/abi_assert.cc")
+  set_target_properties(lmflow_kernels PROPERTIES POSITION_INDEPENDENT_CODE ON)
+  target_include_directories(lmflow_kernels PUBLIC
+    "$<BUILD_INTERFACE:${LMFLOW_SRC}/include>"
+    "$<INSTALL_INTERFACE:include>")
+  target_link_libraries(lmflow_kernels PUBLIC lmflow_core_static)
+  add_dependencies(lmflow_kernels flow_engine)
+  add_library(lmflow::kernels ALIAS lmflow_kernels)
+endif()
+
+if(BUILD_SHARED_LIBS)
+  add_library(lmflow_core_shared SHARED "${LMFLOW_ROOT}/cmake/lmflow_link.cc")
+  set_target_properties(lmflow_core_shared PROPERTIES
+    OUTPUT_NAME lmflow_core
+    WINDOWS_EXPORT_ALL_SYMBOLS ON)
+  add_dependencies(lmflow_core_shared flow_engine)
+  _lmflow_whole_archive(lmflow_core_shared lmflow_core_static)
+  _lmflow_add_windows_exports(lmflow_core_shared FALSE)
+  add_library(lmflow::core ALIAS lmflow_core_shared)
+
+  add_library(lmflow_complete SHARED "${LMFLOW_ROOT}/cmake/lmflow_link.cc")
+  set_target_properties(lmflow_complete PROPERTIES
+    OUTPUT_NAME lmflow
+    WINDOWS_EXPORT_ALL_SYMBOLS ON)
+  add_dependencies(lmflow_complete flow_engine)
+  if(LMFLOW_BUILD_KERNELS)
+    _lmflow_whole_archive(lmflow_complete lmflow_core_static lmflow_kernels)
+  else()
+    _lmflow_whole_archive(lmflow_complete lmflow_core_static)
+  endif()
+  _lmflow_add_windows_exports(lmflow_complete "${LMFLOW_BUILD_KERNELS}")
+else()
+  add_library(lmflow_core INTERFACE)
+  target_link_libraries(lmflow_core INTERFACE lmflow_core_static)
+  add_library(lmflow::core ALIAS lmflow_core)
+
+  add_library(lmflow_complete INTERFACE)
+  if(LMFLOW_BUILD_KERNELS)
+    target_link_libraries(lmflow_complete INTERFACE lmflow_kernels)
+  endif()
+  target_link_libraries(lmflow_complete INTERFACE lmflow_core_static)
+endif()
+
+add_library(lmflow::lmflow ALIAS lmflow_complete)

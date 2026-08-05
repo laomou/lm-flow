@@ -10,8 +10,6 @@ version = "0.0.0"
 edition = "2021"
 publish = false
 
-# 消费 lmflow crate(外部工程用 `cargo add lmflow`);这里走 path 依赖。
-# 本示例用内置 C++ 算子(PassThroughKernel),故显式开 builtin-kernels ——
-# 该 feature 默认关(引擎默认纯 Rust),且只在本仓库内可用。
+# 消费纯 Rust lmflow crate(外部工程用 `cargo add lmflow`);这里走 path 依赖。
 [dependencies]
-lmflow = { path = "../../../core", features = ["builtin-kernels"] }
+lmflow = { path = "../../../core" }

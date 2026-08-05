@@ -7,8 +7,6 @@
 //!  * 所有权守恒在并发下仍然成立;
 //!  * 混合执行器(一部分节点在池里、一部分交还宿主线程)不会死锁。
 
-#![cfg(feature = "builtin-kernels")] // 用内置 C++ 算子:纯 Rust 构建(--no-default-features)时整文件跳过
-
 use std::sync::atomic::{AtomicIsize, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Once};
 use std::time::Duration;
@@ -16,10 +14,11 @@ use std::time::Duration;
 use lmflow::{register_kernel, Graph, Kernel, KernelCtx, Packet, Timestamp};
 
 fn init() {
-    lmflow::register_builtin_kernels();
+    lmflow::builtin::register_defaults();
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
         register_kernel::<DelegatedSlowPass>("DelegatedSlowPass").unwrap();
+        register_kernel::<FiniteSource>("FiniteSource").unwrap();
     });
 }
 
@@ -36,6 +35,23 @@ impl Kernel for DelegatedSlowPass {
         std::thread::sleep(Duration::from_millis(5));
         DELEGATED_ACTIVE.fetch_sub(1, Ordering::SeqCst);
         cc.forward(0, 0)
+    }
+}
+
+#[derive(Default)]
+struct FiniteSource {
+    emitted: bool,
+}
+
+impl Kernel for FiniteSource {
+    fn process(&mut self, context: &mut KernelCtx) -> lmflow::Result<()> {
+        if self.emitted {
+            context.source_done();
+        } else {
+            context.emit(0, Packet::from_i64(1))?;
+            self.emitted = true;
+        }
+        Ok(())
     }
 }
 
@@ -65,7 +81,7 @@ fn pool_declared_but_unused_is_still_valid() {
 executors:
   - { name: "cpu", type: "ThreadPoolExecutor", num_threads: 2 }
 nodes:
-  - { name: "p", kernel: "PassThroughKernel", input_ports: ["in"], output_ports: ["out"] }
+  - { name: "p", kernel: "PassThrough", input_ports: ["in"], output_ports: ["out"] }
 input_ports: ["in"]
 output_ports: ["out"]
 "#,
@@ -123,9 +139,9 @@ fn all_nodes_on_default_pool_produce_correct_output() {
     let graph = Graph::from_yaml(
         r#"
 nodes:
-  - { name: "n1", kernel: "PassThroughKernel", input_ports: ["in"],  output_ports: ["m1"] }
-  - { name: "n2", kernel: "PassThroughKernel", input_ports: ["m1"], output_ports: ["m2"] }
-  - { name: "n3", kernel: "PassThroughKernel", input_ports: ["m2"], output_ports: ["out"] }
+  - { name: "n1", kernel: "PassThrough", input_ports: ["in"],  output_ports: ["m1"] }
+  - { name: "n2", kernel: "PassThrough", input_ports: ["m1"], output_ports: ["m2"] }
+  - { name: "n3", kernel: "PassThrough", input_ports: ["m2"], output_ports: ["out"] }
 input_ports: ["in"]
 output_ports: ["out"]
 "#,
@@ -164,7 +180,7 @@ fn default_pool_nodes_actually_run_off_the_host_thread() {
         let graph = Graph::from_yaml(
             r#"
 nodes:
-  - { name: "p", kernel: "PassThroughKernel", input_ports: ["in"], output_ports: ["out"] }
+  - { name: "p", kernel: "PassThrough", input_ports: ["in"], output_ports: ["out"] }
 input_ports: ["in"]
 output_ports: ["out"]
 "#,
@@ -203,7 +219,7 @@ fn default_pool_advances_without_host_pumping() {
     let graph = Graph::from_yaml(
         r#"
 nodes:
-  - { name: "p", kernel: "PassThroughKernel", input_ports: ["in"], output_ports: ["out"] }
+  - { name: "p", kernel: "PassThrough", input_ports: ["in"], output_ports: ["out"] }
 input_ports: ["in"]
 output_ports: ["out"]
 "#,
@@ -281,9 +297,9 @@ impl Placement {
         Graph::from_yaml(&format!(
             r#"
 {execs}nodes:
-  - {{ name: "n1", kernel: "PassThroughKernel", input_ports: ["in"], output_ports: ["m1"]{on_node} }}
-  - {{ name: "n2", kernel: "PassThroughKernel", input_ports: ["m1"], output_ports: ["m2"]{on_node} }}
-  - {{ name: "n3", kernel: "PassThroughKernel", input_ports: ["m2"], output_ports: ["out"]{on_node} }}
+  - {{ name: "n1", kernel: "PassThrough", input_ports: ["in"], output_ports: ["m1"]{on_node} }}
+  - {{ name: "n2", kernel: "PassThrough", input_ports: ["m1"], output_ports: ["m2"]{on_node} }}
+  - {{ name: "n3", kernel: "PassThrough", input_ports: ["m2"], output_ports: ["out"]{on_node} }}
 input_ports: ["in"]
 output_ports: ["out"]
 "#
@@ -441,7 +457,7 @@ fn default_executor_is_a_named_thread_pool() {
     let graph = Graph::from_yaml(
         r#"
 nodes:
-  - { name: "p", kernel: "PassThroughKernel", input_ports: ["in"], output_ports: ["out"] }
+  - { name: "p", kernel: "PassThrough", input_ports: ["in"], output_ports: ["out"] }
 input_ports: ["in"]
 output_ports: ["out"]
 "#,
@@ -467,7 +483,7 @@ fn own_pool_is_how_you_control_threads() {
 executors:
   - { name: "solo", type: "ThreadPoolExecutor", num_threads: 1 }
 nodes:
-  - { name: "p", kernel: "PassThroughKernel", executor: "solo", input_ports: ["in"], output_ports: ["out"] }
+  - { name: "p", kernel: "PassThrough", executor: "solo", input_ports: ["in"], output_ports: ["out"] }
 input_ports: ["in"]
 output_ports: ["out"]
 "#,
@@ -542,8 +558,8 @@ executors:
   - { name: "host_a", type: "DelegatingExecutor" }
   - { name: "host_b", type: "DelegatingExecutor" }
 nodes:
-  - { name: "a", kernel: "PassThroughKernel", executor: "host_a", input_ports: ["in_a"], output_ports: ["out_a"] }
-  - { name: "b", kernel: "PassThroughKernel", executor: "host_b", input_ports: ["in_b"], output_ports: ["out_b"] }
+  - { name: "a", kernel: "PassThrough", executor: "host_a", input_ports: ["in_a"], output_ports: ["out_a"] }
+  - { name: "b", kernel: "PassThrough", executor: "host_b", input_ports: ["in_b"], output_ports: ["out_b"] }
 input_ports: ["in_a", "in_b"]
 output_ports: ["out_a", "out_b"]
 "#,
@@ -648,7 +664,7 @@ fn rust_wakeup_callback_rearms_after_pump_drain() {
 executors:
   - { name: host, type: DelegatingExecutor }
 nodes:
-  - { name: pass, kernel: PassThroughKernel, executor: host, input_ports: [in], output_ports: [out] }
+  - { name: pass, kernel: PassThrough, executor: host, input_ports: [in], output_ports: [out] }
 input_ports: [in]
 output_ports: [out]
 "#,
@@ -683,7 +699,7 @@ fn rust_wakeup_callback_rearms_after_panic() {
 executors:
   - { name: host, type: DelegatingExecutor }
 nodes:
-  - { name: pass, kernel: PassThroughKernel, executor: host, input_ports: [in], output_ports: [out] }
+  - { name: pass, kernel: PassThrough, executor: host, input_ports: [in], output_ports: [out] }
 input_ports: [in]
 output_ports: [out]
 "#,
@@ -719,7 +735,7 @@ fn max_in_flight_on_default_pool_follows_its_thread_count() {
     let built = Graph::from_yaml(
         r#"
 nodes:
-  - { name: "p", kernel: "PassThroughKernel", input_ports: ["in"], output_ports: ["out"], max_in_flight: 4 }
+  - { name: "p", kernel: "PassThrough", input_ports: ["in"], output_ports: ["out"], max_in_flight: 4 }
 input_ports: ["in"]
 output_ports: ["out"]
 "#,
@@ -746,7 +762,7 @@ fn delegating_executor_rejects_thread_fields() {
 executors:
   - {{ name: "host", type: "DelegatingExecutor", {field} }}
 nodes:
-  - {{ name: "p", kernel: "PassThroughKernel", executor: "host", input_ports: ["in"], output_ports: ["out"] }}
+  - {{ name: "p", kernel: "PassThrough", executor: "host", input_ports: ["in"], output_ports: ["out"] }}
 input_ports: ["in"]
 output_ports: ["out"]
 "#
@@ -768,8 +784,8 @@ fn source_and_ordinary_node_may_share_single_thread_pool() {
 executors:
   - { name: "solo", type: "ThreadPoolExecutor", num_threads: 1 }
 nodes:
-  - { name: "src", kernel: "RangeSourceKernel", executor: "solo", input_ports: [], output_ports: ["mid"] }
-  - { name: "p", kernel: "PassThroughKernel", executor: "solo", input_ports: ["mid"], output_ports: ["out"] }
+  - { name: "src", kernel: "FiniteSource", executor: "solo", input_ports: [], output_ports: ["mid"] }
+  - { name: "p", kernel: "PassThrough", executor: "solo", input_ports: ["mid"], output_ports: ["out"] }
 output_ports: ["out"]
 "#,
     )
@@ -786,9 +802,9 @@ executors:
   - { name: "cpu", type: "ThreadPoolExecutor", num_threads: 3 }
   - { name: "host", type: "DelegatingExecutor" }
 nodes:
-  - { name: "a", kernel: "PassThroughKernel", executor: "cpu", input_ports: ["in"], output_ports: ["m1"] }
-  - { name: "b", kernel: "PassThroughKernel", executor: "host", input_ports: ["m1"], output_ports: ["m2"] }
-  - { name: "c", kernel: "PassThroughKernel", executor: "cpu", input_ports: ["m2"], output_ports: ["out"] }
+  - { name: "a", kernel: "PassThrough", executor: "cpu", input_ports: ["in"], output_ports: ["m1"] }
+  - { name: "b", kernel: "PassThrough", executor: "host", input_ports: ["m1"], output_ports: ["m2"] }
+  - { name: "c", kernel: "PassThrough", executor: "cpu", input_ports: ["m2"], output_ports: ["out"] }
 input_ports: ["in"]
 output_ports: ["out"]
 "#,
@@ -820,9 +836,9 @@ fn concurrent_fanout_branches() {
 executors:
   - { name: "cpu", type: "ThreadPoolExecutor", num_threads: 4 }
 nodes:
-  - { name: "sp", kernel: "SplitKernel",       executor: "cpu", input_ports: ["in"], output_ports: ["a", "b"] }
-  - { name: "pa", kernel: "PassThroughKernel", executor: "cpu", input_ports: ["a"],  output_ports: ["oa"] }
-  - { name: "pb", kernel: "PassThroughKernel", executor: "cpu", input_ports: ["b"],  output_ports: ["ob"] }
+  - { name: "sp", kernel: "PassThrough", executor: "cpu", input_ports: ["in"], output_ports: ["fan"] }
+  - { name: "pa", kernel: "PassThrough", executor: "cpu", input_ports: ["fan"], output_ports: ["oa"] }
+  - { name: "pb", kernel: "PassThrough", executor: "cpu", input_ports: ["fan"], output_ports: ["ob"] }
 input_ports: ["in"]
 output_ports: ["oa", "ob"]
 "#,
@@ -860,7 +876,7 @@ fn wait_until_idle_waits_for_default_pool() {
     let graph = Graph::from_yaml(
         r#"
 nodes:
-  - { name: "p", kernel: "PassThroughKernel", input_ports: ["in"], output_ports: ["out"] }
+  - { name: "p", kernel: "PassThrough", input_ports: ["in"], output_ports: ["out"] }
 input_ports: ["in"]
 output_ports: ["out"]
 "#,
@@ -895,7 +911,7 @@ fn poller_timeout_actually_times_out() {
 executors:
   - { name: "cpu", type: "ThreadPoolExecutor", num_threads: 1 }
 nodes:
-  - { name: "p", kernel: "PassThroughKernel", executor: "cpu", input_ports: ["in"], output_ports: ["out"] }
+  - { name: "p", kernel: "PassThrough", executor: "cpu", input_ports: ["in"], output_ports: ["out"] }
 input_ports: ["in"]
 output_ports: ["out"]
 "#,
@@ -923,7 +939,7 @@ fn pause_and_resume() {
     let graph = Graph::from_yaml(
         r#"
 nodes:
-  - { name: "p", kernel: "PassThroughKernel", input_ports: ["in"], output_ports: ["out"] }
+  - { name: "p", kernel: "PassThrough", input_ports: ["in"], output_ports: ["out"] }
 input_ports: ["in"]
 output_ports: ["out"]
 "#,
@@ -982,7 +998,7 @@ fn close_is_called_exactly_once_under_concurrency() {
         let graph = Graph::from_yaml(
             r#"
 nodes:
-  - { name: "s", kernel: "SinkKernel", input_ports: ["in"], output_ports: [] }
+  - { name: "s", kernel: "Sink", input_ports: ["in"], output_ports: [] }
 input_ports: ["in"]
 "#,
         )
@@ -1018,9 +1034,9 @@ fn ownership_conserved_under_concurrency() {
         let graph = Graph::from_yaml(
             r#"
 nodes:
-  - { name: "sp", kernel: "SplitKernel",       input_ports: ["in"], output_ports: ["a", "b"] }
-  - { name: "pa", kernel: "PassThroughKernel", input_ports: ["a"],  output_ports: ["oa"] }
-  - { name: "pb", kernel: "SinkKernel",        input_ports: ["b"],  output_ports: [] }
+  - { name: "sp", kernel: "PassThrough", input_ports: ["in"], output_ports: ["fan"] }
+  - { name: "pa", kernel: "PassThrough", input_ports: ["fan"], output_ports: ["oa"] }
+  - { name: "pb", kernel: "Sink", input_ports: ["fan"], output_ports: [] }
 input_ports: ["in"]
 output_ports: ["oa"]
 "#,
@@ -1051,8 +1067,8 @@ fn multiple_host_threads_sending() {
         Graph::from_yaml(
             r#"
 nodes:
-  - { name: "a", kernel: "PassThroughKernel", input_ports: ["in1"], output_ports: ["o1"] }
-  - { name: "b", kernel: "PassThroughKernel", input_ports: ["in2"], output_ports: ["o2"] }
+  - { name: "a", kernel: "PassThrough", input_ports: ["in1"], output_ports: ["o1"] }
+  - { name: "b", kernel: "PassThrough", input_ports: ["in2"], output_ports: ["o2"] }
 input_ports: ["in1", "in2"]
 output_ports: ["o1", "o2"]
 "#,
@@ -1111,7 +1127,7 @@ fn concurrent_send_to_same_port_is_safe() {
             Graph::from_yaml(
                 r#"
 nodes:
-  - { name: "p", kernel: "PassThroughKernel", input_ports: ["in"], output_ports: ["out"] }
+  - { name: "p", kernel: "PassThrough", input_ports: ["in"], output_ports: ["out"] }
 input_ports: ["in"]
 output_ports: ["out"]
 "#,
@@ -1170,7 +1186,7 @@ fn dropping_graph_with_busy_pool_is_clean() {
         let graph = Graph::from_yaml(
             r#"
 nodes:
-  - { name: "p", kernel: "PassThroughKernel", input_ports: ["in"], output_ports: ["out"] }
+  - { name: "p", kernel: "PassThrough", input_ports: ["in"], output_ports: ["out"] }
 input_ports: ["in"]
 output_ports: ["out"]
 "#,

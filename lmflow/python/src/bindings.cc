@@ -845,8 +845,17 @@ PYBIND11_MODULE(_lmflow, m) {
   m.attr("CLOSE_CANCELLED") = static_cast<int>(LMFLOW_CLOSE_CANCELLED);
 
   m.def("abi_version", &lmflow_abi_version);
-  m.def("register_builtin_kernels", [] { lmflow_register_builtin_kernels(); },
-        "Register the C++ builtin kernels (idempotent; call before building a graph)");
+  m.def(
+      "register_builtin_kernels",
+      [] {
+#if LMFLOW_HAS_BUILTIN_KERNELS
+        lmflow_register_builtin_kernels();
+#else
+        throw std::runtime_error(
+            "this lmflow extension was built with LMFLOW_BUILD_KERNELS=OFF");
+#endif
+      },
+      "Register the C++ builtin kernels (idempotent; call before building a graph)");
 #ifdef LMFLOW_WITH_CV_TEST
   m.def("register_cv_test_kernels", [] { lmflow_register_cv_test_kernels(); },
         "Test-only: register the CV kernel (CvInvertTest); present only when the extension is built with --with-cv-test");

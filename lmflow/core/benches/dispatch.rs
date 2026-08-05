@@ -73,7 +73,7 @@
 //! 不是过不过边界。
 //!
 //! 本组只用引擎自带的 Rust 默认算子(`PassThrough` / `Sink`),故**不需要
-//! `builtin-kernels` feature** —— 纯 Rust 配置下也能量引擎。
+//! 全程使用 core 自带的纯 Rust kernel，不依赖 C++ 工具链。
 //!
 //! 跑:在 `lmflow/core` 下 `cargo bench --bench dispatch`;报告在 `target/criterion/`。
 

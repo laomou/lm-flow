@@ -20,10 +20,10 @@ project(lmflow_hello_world LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# 已由上层(如某个聚合 CMakeLists)提供 lmflow::core 就直接用;否则自己获取:
+# 已由上层(如某个聚合 CMakeLists)提供 lmflow::lmflow 就直接用;否则自己获取:
 # 优先已装好的 SDK;仓库内直接构建、没装 SDK 时,回退到从源码构建引擎(仓库根,驱动 cargo)。
-# 两种情况最终都拿到 lmflow::core。
-if(NOT TARGET lmflow::core)
+# 两种情况最终都拿到 lmflow::lmflow。
+if(NOT TARGET lmflow::lmflow)
   find_package(lmflow QUIET)
   if(NOT lmflow_FOUND)
     message(STATUS "lmflow: 未找到已装 SDK —— 从源码构建引擎(仓库根,驱动 cargo)")
@@ -33,7 +33,7 @@ if(NOT TARGET lmflow::core)
 endif()
 
 add_executable(hello_world_host hello_world_host.cc)
-target_link_libraries(hello_world_host PRIVATE lmflow::core)  # 头 + liblmflow.a + 系统库
+target_link_libraries(hello_world_host PRIVATE lmflow::lmflow)
 
 # 源码构建(add_subdirectory)时:确保 cargo 先出库再链接。装了 SDK 时 flow_engine 不存在,跳过。
 if(TARGET flow_engine)
