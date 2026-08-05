@@ -37,6 +37,61 @@ fn tracked_packet(v: i32, ts: i64) -> Packet {
 // ---------------------------------------------------------------- 基本正确性
 
 #[test]
+fn graph_exposes_default_empty_executor_name() {
+    init();
+    let g = Graph::from_yaml(
+        r#"
+nodes:
+  - { name: "p", kernel: "PassThroughKernel", input_ports: ["in"], output_ports: ["out"] }
+input_ports: ["in"]
+output_ports: ["out"]
+"#,
+    )
+    .unwrap();
+    assert_eq!(g.executor_names(), vec![""]);
+}
+
+#[test]
+fn default_node_without_explicit_executor_runs_on_default_empty_executor() {
+    init();
+    let seen = std::sync::Arc::new(Mutex::new(Vec::<String>::new()));
+
+    let graph = Graph::from_yaml(
+        r#"
+nodes:
+  - { name: "p", kernel: "PassThroughKernel", input_ports: ["in"], output_ports: ["out"] }
+input_ports: ["in"]
+output_ports: ["out"]
+"#,
+    )
+    .unwrap();
+    let rec = seen.clone();
+    graph
+        .observe("out", move |_pkt| {
+            let name = std::thread::current()
+                .name()
+                .unwrap_or("(unnamed)")
+                .to_string();
+            rec.lock().expect("lock poisoned").push(name);
+        })
+        .unwrap();
+    graph.start().unwrap();
+    let input = graph.input("in").unwrap();
+    for i in 0..5i32 {
+        input.send(Packet::new(i).at(Timestamp(i as i64))).unwrap();
+    }
+    graph.close_all_inputs();
+    graph.wait_done_timeout(Duration::from_secs(30)).unwrap();
+
+    let names = seen.lock().expect("lock poisoned").clone();
+    assert_eq!(names.len(), 5, "observer should receive all 5 packets");
+    assert!(
+        names.iter().all(|n| n == "-0"),
+        "a node without an explicit executor should run on the default empty-name executor thread, actual: {names:?}"
+    );
+}
+
+#[test]
 fn pool_declared_but_unused_is_still_valid() {
     init();
     // 定义了池但没节点用 —— 合法(会有 WARN),不该报错
@@ -51,7 +106,7 @@ output_ports: ["out"]
 "#,
     )
     .unwrap();
-    assert_eq!(g.executor_names(), vec!["cpu"]);
+    assert_eq!(g.executor_names(), vec!["", "cpu"]);
 }
 
 #[test]

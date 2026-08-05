@@ -168,7 +168,10 @@ impl GraphInner {
         check_acyclic(&cfg, &edges, &back_edge_mask)?;
 
         // ---- 校验 5 + 建执行器 ----
-        let mut executors: Vec<ThreadPool> = Vec::new();
+        // 先补一个默认的空名执行器,让 `Graph::executor_names()` 与运行时的默认归属
+        // 都有一个可见、可索引、可提交任务的目标。未显式声明 `executor` 的节点
+        // 会绑定到它;显式声明时才落到 YAML 中的命名线程池。
+        let mut executors: Vec<ThreadPool> = vec![ThreadPool::new("", 1, Vec::new(), 0)];
         for e in &cfg.executors {
             if e.name.is_empty() {
                 return Err(Error::InvalidArg(
@@ -270,7 +273,7 @@ impl GraphInner {
                 (0..mif).map(|_| UnsafeCell::new(make_ctx())).collect();
 
             let executor = if n.executor.is_empty() {
-                None
+                Some(0)
             } else {
                 executors.iter().position(|p| p.name() == n.executor)
             };

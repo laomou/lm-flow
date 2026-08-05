@@ -782,7 +782,7 @@ pub struct Node {
     pub outputs: Vec<EdgeId>,
     pub in_ports: Arc<PortTable>,
     pub out_ports: Arc<PortTable>,
-    /// `None` = 宿主主线程(默认执行器,ADR #16);`Some(i)` = executors[i] 线程池
+    /// `None` = 默认宿主执行器(空名主线程执行器,ADR #16); `Some(i)` = executors[i] 线程池
     executor: Option<usize>,
     policy: InputPolicy,
     input_types: Vec<u64>,
