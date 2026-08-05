@@ -403,6 +403,16 @@ impl GraphInner {
                         inputs_open.join(", ")
                     )));
                 }
+                match self.remaining(deadline) {
+                    Some(duration) => self.wait_activity_since(before, duration),
+                    None => return Err(Error::Timeout),
+                }
+                if self.activity_gen() != before || !self.workers_idle() {
+                    continue;
+                }
+                if self.remaining(deadline).is_none() {
+                    return Err(Error::Timeout);
+                }
                 let stuck: Vec<&str> = (0..self.nodes.len())
                     .filter(|&n| {
                         !self.nodes[n]
