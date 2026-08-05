@@ -417,13 +417,25 @@ class Graph:
         Pool-only graphs also wake the loop on completion or failure, so no polling timer is used.
 
         The graph must eventually terminate: close its inputs, let a source call
-        :meth:`Context.source_done`, or call :meth:`cancel`.
+        :meth:`Context.source_done`, or call :meth:`cancel`. Cancelling the asyncio task cancels
+        the graph and waits for it to terminate before re-raising :class:`asyncio.CancelledError`.
         """
         loop = asyncio.get_running_loop()
         wakeup = asyncio.Event()
 
         def notify_loop() -> None:
             loop.call_soon_threadsafe(wakeup.set)
+
+        async def drive_until_terminated() -> None:
+            while True:
+                wakeup.clear()
+                while self.pump_step():
+                    pass
+                if self.state == GraphState.TERMINATED:
+                    return
+                if wakeup.is_set():
+                    continue
+                await wakeup.wait()
 
         self._g.set_wakeup_callback(notify_loop)
         try:
@@ -438,16 +450,18 @@ class Graph:
                     "run_async requires an initialized, running, draining, or terminated graph"
                 )
 
-            while True:
-                wakeup.clear()
-                while self.pump_step():
-                    pass
-                if self.state == GraphState.TERMINATED:
-                    self.wait_done()
-                    return
-                if wakeup.is_set():
+            await drive_until_terminated()
+            self.wait_done()
+        except asyncio.CancelledError:
+            self.cancel()
+            cleanup = asyncio.create_task(drive_until_terminated())
+            while not cleanup.done():
+                try:
+                    await asyncio.shield(cleanup)
+                except asyncio.CancelledError:
                     continue
-                await wakeup.wait()
+            await cleanup
+            raise
         finally:
             self._g.set_wakeup_callback(None)
 
