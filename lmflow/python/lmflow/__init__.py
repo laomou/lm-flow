@@ -72,6 +72,7 @@ from __future__ import annotations
 import os
 import sys
 import asyncio
+import warnings
 from typing import Any, Callable, Iterator, Sequence
 
 try:
@@ -409,7 +410,7 @@ class Graph:
         """
         return bool(self._g.pump_step())
 
-    async def run_async(self) -> None:
+    async def run_async(self, *, cancel_grace: float = 0.0) -> None:
         """Run the graph without blocking the current asyncio event loop.
 
         If the graph is initialized, this method starts it. Engine threads signal the loop through
@@ -417,13 +418,31 @@ class Graph:
         Pool-only graphs also wake the loop on completion or failure, so no polling timer is used.
 
         The graph must eventually terminate: close its inputs, let a source call
-        :meth:`Context.source_done`, or call :meth:`cancel`.
+        :meth:`Context.source_done`, or call :meth:`cancel`. Cancelling the asyncio task cancels the
+        graph and gives it up to ``cancel_grace`` seconds to terminate before re-raising
+        :class:`asyncio.CancelledError`. A second cancellation abandons that graceful wait
+        immediately. The default ``0.0`` re-raises without waiting; pass a positive grace when
+        termination before :meth:`reset` matters. :meth:`close` remains the final synchronous
+        cleanup fallback.
         """
+        if cancel_grace < 0:
+            raise ValueError("cancel_grace must be non-negative")
         loop = asyncio.get_running_loop()
         wakeup = asyncio.Event()
 
         def notify_loop() -> None:
             loop.call_soon_threadsafe(wakeup.set)
+
+        async def drive_until_terminated() -> None:
+            while True:
+                wakeup.clear()
+                while self.pump_step():
+                    pass
+                if self.state == GraphState.TERMINATED:
+                    return
+                if wakeup.is_set():
+                    continue
+                await wakeup.wait()
 
         self._g.set_wakeup_callback(notify_loop)
         try:
@@ -438,16 +457,41 @@ class Graph:
                     "run_async requires an initialized, running, draining, or terminated graph"
                 )
 
-            while True:
-                wakeup.clear()
-                while self.pump_step():
+            await drive_until_terminated()
+            self.wait_done()
+        except asyncio.CancelledError as cancelled:
+            self.cancel()
+            current = asyncio.current_task()
+            uncancel = getattr(current, "uncancel", None)
+            cleanup_coro = drive_until_terminated()
+            try:
+                cleanup = asyncio.create_task(cleanup_coro)
+            except RuntimeError:
+                cleanup_coro.close()
+                raise cancelled
+            try:
+                await asyncio.wait_for(asyncio.shield(cleanup), timeout=cancel_grace)
+            except asyncio.TimeoutError:
+                warnings.warn(
+                    "run_async cancellation grace expired before the graph terminated; "
+                    "Graph.close() will complete synchronous cleanup",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+                cleanup.cancel()
+                try:
+                    await cleanup
+                except asyncio.CancelledError:
                     pass
-                if self.state == GraphState.TERMINATED:
-                    self.wait_done()
-                    return
-                if wakeup.is_set():
-                    continue
-                await wakeup.wait()
+            except asyncio.CancelledError:
+                if uncancel is not None:
+                    uncancel()
+                cleanup.cancel()
+                try:
+                    await cleanup
+                except asyncio.CancelledError:
+                    pass
+            raise cancelled
         finally:
             self._g.set_wakeup_callback(None)
 
