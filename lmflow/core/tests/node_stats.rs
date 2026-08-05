@@ -178,6 +178,51 @@ fn total_us_is_consistent_with_processed() {
 }
 
 #[test]
+fn diagnostics_show_latency_percentiles() {
+    #[derive(Default)]
+    struct PercentileSlow;
+    impl Kernel for PercentileSlow {
+        fn process(&mut self, context: &mut KernelCtx) -> lmflow::Result<()> {
+            std::thread::sleep(Duration::from_millis(2));
+            context.forward(0, 0)
+        }
+    }
+    let _ = lmflow::register_kernel::<PercentileSlow>("PercentileSlow");
+    let graph = Graph::from_yaml(
+        r#"
+executors:
+  - { name: host, type: DelegatingExecutor }
+nodes:
+  - { name: slow, kernel: PercentileSlow, executor: host, input_ports: [in], output_ports: [out] }
+input_ports: [in]
+output_ports: [out]
+"#,
+    )
+    .unwrap();
+    let output = graph.add_poller("out").unwrap();
+    graph.start().unwrap();
+    for timestamp in 0..3 {
+        graph
+            .input("in")
+            .unwrap()
+            .send(Packet::from_i64(timestamp).at(Timestamp(timestamp)))
+            .unwrap();
+        output.next().expect("slow node should emit");
+    }
+    graph.close_all_inputs();
+    graph.wait_done_timeout(Duration::from_secs(2)).unwrap();
+
+    let diagnostics = graph.to_dot_with_view(DotView::Diagnostics);
+    assert!(diagnostics.contains("\\nlat p50 "), "{diagnostics}");
+    assert!(diagnostics.contains(" · p95 "), "{diagnostics}");
+    assert!(diagnostics.contains(" · p99 "), "{diagnostics}");
+    assert!(
+        !graph.to_dot_compact().contains("\\nlat p50 "),
+        "percentiles should stay in the diagnostics view"
+    );
+}
+
+#[test]
 fn dot_with_stats_annotates_and_keeps_structure() {
     // 精确断言 peakQ 需要同步执行 —— 见 CHAIN_SYNC 的说明。
     let g = run_chain_of(CHAIN_SYNC, 3);

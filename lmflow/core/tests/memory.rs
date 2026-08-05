@@ -13,7 +13,7 @@ use std::ffi::c_void;
 use std::sync::atomic::{AtomicIsize, Ordering};
 
 use lmflow::packet::{dtype, BufferData, Builtin};
-use lmflow::{Graph, Packet, Timestamp};
+use lmflow::{DotView, Graph, Packet, Timestamp};
 
 /// 外部 payload 的存活数。创建 +1,drop_fn 被调 -1。
 static ALIVE: AtomicIsize = AtomicIsize::new(0);
@@ -386,6 +386,15 @@ output_ports: ["out"]
         Some(Builtin::Buffer(b)) => assert_eq!(b.bytes[0], 0xFF, "should be inverted in place"),
         _ => panic!("not a buffer packet"),
     }
+    let dot = graph.to_dot_with_view(DotView::Diagnostics);
+    let inverter = dot
+        .lines()
+        .find(|line| line.contains("label=\"inv\\n"))
+        .expect("inverter node should be rendered");
+    assert!(
+        !inverter.contains("\\nCoW "),
+        "linear exclusive mutation should report no CoW copies:\n{inverter}"
+    );
 
     graph.close_all_inputs();
     graph.wait_done().unwrap();
@@ -435,6 +444,15 @@ output_ports: ["oa", "ob"]
         }
         _ => panic!("not a buffer packet"),
     }
+    let dot = graph.to_dot_with_view(DotView::Diagnostics);
+    let inverter = dot
+        .lines()
+        .find(|line| line.contains("label=\"inv\\n"))
+        .expect("inverter node should be rendered");
+    assert!(
+        inverter.contains("\\nCoW 1× / 8B (+1× / 8B)"),
+        "the actual copying node should own the CoW cost:\n{inverter}"
+    );
 }
 
 /// 多次穿过管线不应累积内存(引用计数必须真的降回去)。
