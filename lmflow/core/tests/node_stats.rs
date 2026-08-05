@@ -11,21 +11,38 @@ use std::time::Duration;
 
 use lmflow::{DotView, Graph, Kernel, KernelCtx, Packet, Timestamp};
 
-static RUNNING_GATE: (Mutex<bool>, Condvar) = (Mutex::new(false), Condvar::new());
+static RUNNING_STATE_GATE: (Mutex<bool>, Condvar) = (Mutex::new(false), Condvar::new());
+static EXECUTOR_QUEUE_GATE: (Mutex<bool>, Condvar) = (Mutex::new(false), Condvar::new());
 
 struct RunningGateGuard;
 
 impl RunningGateGuard {
     fn hold() -> Self {
-        *RUNNING_GATE.0.lock().unwrap() = false;
+        *RUNNING_STATE_GATE.0.lock().unwrap() = false;
         Self
     }
 }
 
 impl Drop for RunningGateGuard {
     fn drop(&mut self) {
-        *RUNNING_GATE.0.lock().unwrap() = true;
-        RUNNING_GATE.1.notify_all();
+        *RUNNING_STATE_GATE.0.lock().unwrap() = true;
+        RUNNING_STATE_GATE.1.notify_all();
+    }
+}
+
+struct ExecutorQueueGateGuard;
+
+impl ExecutorQueueGateGuard {
+    fn hold() -> Self {
+        *EXECUTOR_QUEUE_GATE.0.lock().unwrap() = false;
+        Self
+    }
+}
+
+impl Drop for ExecutorQueueGateGuard {
+    fn drop(&mut self) {
+        *EXECUTOR_QUEUE_GATE.0.lock().unwrap() = true;
+        EXECUTOR_QUEUE_GATE.1.notify_all();
     }
 }
 
@@ -34,7 +51,7 @@ struct DotRunning;
 
 impl Kernel for DotRunning {
     fn process(&mut self, context: &mut KernelCtx) -> lmflow::Result<()> {
-        let (lock, wake) = &RUNNING_GATE;
+        let (lock, wake) = &RUNNING_STATE_GATE;
         let mut released = lock.lock().unwrap();
         while !*released {
             released = wake.wait(released).unwrap();
@@ -50,6 +67,20 @@ struct DotError;
 impl Kernel for DotError {
     fn process(&mut self, _context: &mut KernelCtx) -> lmflow::Result<()> {
         Err(lmflow::Error::Kernel("intentional DOT state error".into()))
+    }
+}
+
+#[derive(Default)]
+struct DotQueued;
+
+impl Kernel for DotQueued {
+    fn process(&mut self, _context: &mut KernelCtx) -> lmflow::Result<()> {
+        let (lock, wake) = &EXECUTOR_QUEUE_GATE;
+        let mut released = lock.lock().unwrap();
+        while !*released {
+            released = wake.wait(released).unwrap();
+        }
+        Ok(())
     }
 }
 
@@ -205,6 +236,88 @@ fn dot_with_stats_annotates_and_keeps_structure() {
         count(&stats, "[label="),
         "节点数不应因统计模式改变"
     );
+}
+
+#[test]
+fn dot_marks_saturated_executor_and_lists_queued_nodes() {
+    let _ = lmflow::register_kernel::<DotQueued>("DotQueued");
+    let gate = ExecutorQueueGateGuard::hold();
+    let graph = Graph::from_yaml(
+        r#"
+executors:
+  - { name: solo, num_threads: 1 }
+nodes:
+  - { name: busy, kernel: DotQueued, executor: solo, input_ports: [busy_in], output_ports: [] }
+  - { name: queued_a, kernel: DotQueued, executor: solo, input_ports: [a_in], output_ports: [] }
+  - { name: queued_b, kernel: DotQueued, executor: solo, input_ports: [b_in], output_ports: [] }
+input_ports: [busy_in, a_in, b_in]
+"#,
+    )
+    .unwrap();
+    graph.start().unwrap();
+    graph
+        .input("busy_in")
+        .unwrap()
+        .send(Packet::from_i64(1).at(Timestamp(0)))
+        .unwrap();
+
+    let running_deadline = std::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        let dot = graph.to_dot_with_stats();
+        if dot.contains("queued 0 · running 1/1") {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < running_deadline,
+            "busy node never occupied the single executor thread"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+
+    graph
+        .input("a_in")
+        .unwrap()
+        .send(Packet::from_i64(1).at(Timestamp(0)))
+        .unwrap();
+    graph
+        .input("b_in")
+        .unwrap()
+        .send(Packet::from_i64(1).at(Timestamp(0)))
+        .unwrap();
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        let dot = graph.to_dot_with_stats();
+        if dot.contains("queued 2 · running 1/1") {
+            assert!(dot.contains("fillcolor=\"#ffe4b5\""), "{dot}");
+            assert!(dot.contains("queue: queued_a (1), queued_b (1)"), "{dot}");
+            assert!(dot.contains("wait "), "{dot}");
+            assert!(dot.contains("exec "), "{dot}");
+            assert!(dot.contains("legend_executor_hot"), "{dot}");
+            let sustained_deadline = std::time::Instant::now() + Duration::from_secs(2);
+            loop {
+                let sustained = graph.to_dot_with_stats();
+                if sustained.contains("fillcolor=\"#ffd6d6\"") {
+                    break;
+                }
+                assert!(
+                    std::time::Instant::now() < sustained_deadline,
+                    "持续排队超过 1 秒应标红:\n{sustained}"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "executor never reached saturated snapshot"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+
+    drop(gate);
+    graph.close_all_inputs();
+    graph.wait_done_timeout(Duration::from_secs(2)).unwrap();
 }
 
 #[test]

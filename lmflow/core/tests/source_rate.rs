@@ -227,6 +227,78 @@ fn source_yield_on_non_source_is_an_error() {
 }
 
 #[test]
+fn dot_shows_source_wait_reason_remaining_time_and_yield_count() {
+    reg();
+    let graph = Graph::from_yaml(
+        r#"
+nodes:
+  - { name: source, kernel: CooperativeSource, input_ports: [], output_ports: [] }
+"#,
+    )
+    .unwrap();
+    graph.start().unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let dot = graph.to_dot_with_stats();
+        if dot.contains("WAITING_SOURCE ·") && dot.contains("remaining · source_yield\\nyield 1×")
+        {
+            assert!(
+                dot.contains("legend_state_waiting_source"),
+                "state legend should explain WAITING_SOURCE:\n{dot}"
+            );
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "source never entered WAITING_SOURCE"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+
+    graph
+        .wait_done_timeout(Duration::from_secs(2))
+        .expect("source should wake and finish");
+}
+
+#[test]
+fn dot_distinguishes_rate_wait_from_source_yield() {
+    reg();
+    let graph = Graph::from_yaml(
+        r#"
+nodes:
+  - { name: source, kernel: RateCounter, input_ports: [], output_ports: [out],
+      rate: 5.0, options: { count: 2 } }
+output_ports: [out]
+"#,
+    )
+    .unwrap();
+    let output = graph.add_poller("out").unwrap();
+    graph.start().unwrap();
+    output
+        .next_timeout(Duration::from_secs(1))
+        .expect("source should emit its first packet");
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let dot = graph.to_dot_with_stats();
+        if dot.contains("WAITING_SOURCE ·") && dot.contains("remaining · rate\\nyield 0×") {
+            assert!(!dot.contains("rate + source_yield"), "{dot}");
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "rate-limited source never entered WAITING_SOURCE"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+
+    graph
+        .wait_done_timeout(Duration::from_secs(2))
+        .expect("rate-limited source should finish");
+}
+
+#[test]
 fn cancel_clears_a_long_source_yield_and_allows_reset() {
     #[derive(Default)]
     struct YieldOnce {

@@ -309,6 +309,9 @@ impl GraphInner {
             }
             node.source_done.store(false, Ordering::SeqCst);
             node.source_waiting.store(false, Ordering::SeqCst);
+            node.source_wait_reason.store(0, Ordering::Relaxed);
+            node.source_wake_deadline_us.store(0, Ordering::Relaxed);
+            node.source_yield_count.store(0, Ordering::Relaxed);
             node.source_wake_generation.fetch_add(1, Ordering::SeqCst);
             *node.last_fire.lock().expect("last_fire lock poisoned") = None;
             // 逐槽复位 Context:此刻 in_flight==0,与 start/Drop 同为「独占相」,无并发。

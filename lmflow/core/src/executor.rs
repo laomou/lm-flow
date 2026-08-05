@@ -29,6 +29,11 @@ enum Task {
     WakeSource(NodeId, u64),
 }
 
+struct QueuedTask {
+    enqueued_at: Instant,
+    task: Task,
+}
+
 struct DelayedTask {
     deadline: Instant,
     task: Task,
@@ -36,7 +41,7 @@ struct DelayedTask {
 
 #[derive(Default)]
 struct QueueState {
-    ready: VecDeque<Task>,
+    ready: VecDeque<QueuedTask>,
     delayed: Vec<DelayedTask>,
 }
 
@@ -46,46 +51,93 @@ pub(crate) struct ExecutorStatsSnapshot {
     pub running: usize,
     pub peak_queued: usize,
     pub completed: u64,
+    pub total_wait_us: u64,
+    pub total_execution_us: u64,
+    pub queued_for_us: u64,
 }
 
-#[derive(Default)]
 struct ExecutorStats {
+    epoch: Instant,
     queued: AtomicUsize,
     running: AtomicUsize,
     peak_queued: AtomicUsize,
     completed: AtomicU64,
+    total_wait_us: AtomicU64,
+    total_execution_us: AtomicU64,
+    queued_since_us: AtomicU64,
+}
+
+impl Default for ExecutorStats {
+    fn default() -> Self {
+        Self {
+            epoch: Instant::now(),
+            queued: AtomicUsize::new(0),
+            running: AtomicUsize::new(0),
+            peak_queued: AtomicUsize::new(0),
+            completed: AtomicU64::new(0),
+            total_wait_us: AtomicU64::new(0),
+            total_execution_us: AtomicU64::new(0),
+            queued_since_us: AtomicU64::new(0),
+        }
+    }
 }
 
 impl ExecutorStats {
     fn enqueued(&self) {
-        let queued = self.queued.fetch_add(1, Ordering::Relaxed) + 1;
+        let before = self.queued.fetch_add(1, Ordering::Relaxed);
+        let queued = before + 1;
+        if before == 0 {
+            self.queued_since_us.store(
+                duration_micros(self.epoch.elapsed()).saturating_add(1),
+                Ordering::Relaxed,
+            );
+        }
         self.peak_queued.fetch_max(queued, Ordering::Relaxed);
     }
 
-    fn started(&self) {
-        self.queued.fetch_sub(1, Ordering::Relaxed);
+    fn started(&self, wait: Duration) {
+        let before = self.queued.fetch_sub(1, Ordering::Relaxed);
+        if before == 1 {
+            self.queued_since_us.store(0, Ordering::Relaxed);
+        }
         self.running.fetch_add(1, Ordering::Relaxed);
+        self.total_wait_us
+            .fetch_add(duration_micros(wait), Ordering::Relaxed);
     }
 
-    fn completed(&self) {
+    fn completed(&self, execution: Duration) {
         self.running.fetch_sub(1, Ordering::Relaxed);
         self.completed.fetch_add(1, Ordering::Relaxed);
+        self.total_execution_us
+            .fetch_add(duration_micros(execution), Ordering::Relaxed);
     }
 
     fn dropped(&self, count: usize) {
-        let _ = self
+        let before = self
             .queued
             .try_update(Ordering::Relaxed, Ordering::Relaxed, |queued| {
                 Some(queued.saturating_sub(count))
-            });
+            })
+            .unwrap_or_else(|queued| queued);
+        if before <= count {
+            self.queued_since_us.store(0, Ordering::Relaxed);
+        }
     }
 
     fn snapshot(&self) -> ExecutorStatsSnapshot {
+        let queued_since = self.queued_since_us.load(Ordering::Relaxed);
         ExecutorStatsSnapshot {
             queued: self.queued.load(Ordering::Relaxed),
             running: self.running.load(Ordering::Relaxed),
             peak_queued: self.peak_queued.load(Ordering::Relaxed),
             completed: self.completed.load(Ordering::Relaxed),
+            total_wait_us: self.total_wait_us.load(Ordering::Relaxed),
+            total_execution_us: self.total_execution_us.load(Ordering::Relaxed),
+            queued_for_us: if queued_since == 0 {
+                0
+            } else {
+                duration_micros(self.epoch.elapsed()).saturating_sub(queued_since.saturating_sub(1))
+            },
         }
     }
 
@@ -94,7 +146,14 @@ impl ExecutorStats {
         self.running.store(0, Ordering::Relaxed);
         self.peak_queued.store(0, Ordering::Relaxed);
         self.completed.store(0, Ordering::Relaxed);
+        self.total_wait_us.store(0, Ordering::Relaxed);
+        self.total_execution_us.store(0, Ordering::Relaxed);
+        self.queued_since_us.store(0, Ordering::Relaxed);
     }
+}
+
+fn duration_micros(duration: Duration) -> u64 {
+    duration.as_micros().min(u64::MAX as u128) as u64
 }
 
 struct Shared {
@@ -106,7 +165,7 @@ struct Shared {
 
 impl Shared {
     /// 取一个任务;返回 `None` 表示「已关停且队列排空」,工作线程可以退出。
-    fn take(&self) -> Option<Task> {
+    fn take(&self) -> Option<QueuedTask> {
         let mut queue = self.queue.lock().unwrap_or_else(|e| e.into_inner());
         loop {
             let now = Instant::now();
@@ -116,10 +175,14 @@ impl Shared {
                 .is_some_and(|delayed| delayed.deadline <= now)
             {
                 let delayed = queue.delayed.remove(0);
-                queue.ready.push_back(delayed.task);
+                queue.ready.push_back(QueuedTask {
+                    enqueued_at: now,
+                    task: delayed.task,
+                });
+                self.stats.enqueued();
             }
             if let Some(task) = queue.ready.pop_front() {
-                self.stats.started();
+                self.stats.started(task.enqueued_at.elapsed());
                 return Some(task);
             }
             if self.stop.load(Ordering::SeqCst) {
@@ -303,7 +366,10 @@ impl ThreadPool {
         if self.shared.stop.load(Ordering::SeqCst) {
             return false;
         }
-        queue.ready.push_back(Task::Run(node));
+        queue.ready.push_back(QueuedTask {
+            enqueued_at: Instant::now(),
+            task: Task::Run(node),
+        });
         self.shared.stats.enqueued();
         drop(queue);
         self.shared.cv.notify_one();
@@ -317,7 +383,11 @@ impl ThreadPool {
         }
         let task = Task::WakeSource(node, generation);
         if delay.is_zero() {
-            queue.ready.push_back(task);
+            queue.ready.push_back(QueuedTask {
+                enqueued_at: Instant::now(),
+                task,
+            });
+            self.shared.stats.enqueued();
         } else {
             let now = Instant::now();
             let mut bounded_delay = delay;
@@ -332,7 +402,6 @@ impl ThreadPool {
                 .partition_point(|delayed| delayed.deadline <= deadline);
             queue.delayed.insert(index, DelayedTask { deadline, task });
         }
-        self.shared.stats.enqueued();
         drop(queue);
         self.shared.cv.notify_one();
         true
@@ -344,15 +413,34 @@ impl ThreadPool {
 
     pub fn clear_delayed(&self) {
         let mut queue = self.shared.queue.lock().unwrap_or_else(|e| e.into_inner());
-        let count = queue.delayed.len();
         queue.delayed.clear();
-        self.shared.stats.dropped(count);
         drop(queue);
         self.shared.cv.notify_all();
     }
 
     pub(crate) fn stats(&self) -> ExecutorStatsSnapshot {
         self.shared.stats.snapshot()
+    }
+
+    pub(crate) fn has_pending_work(&self) -> bool {
+        let queue = self.shared.queue.lock().unwrap_or_else(|e| e.into_inner());
+        !queue.ready.is_empty()
+            || !queue.delayed.is_empty()
+            || self.shared.stats.running.load(Ordering::Relaxed) != 0
+    }
+
+    pub(crate) fn queued_nodes(&self) -> Vec<NodeId> {
+        self.shared
+            .queue
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .ready
+            .iter()
+            .filter_map(|task| match task.task {
+                Task::Run(node) => Some(node),
+                Task::WakeSource(_, _) => None,
+            })
+            .collect()
     }
 
     pub fn reset_stats(&self) {
@@ -390,11 +478,12 @@ fn worker(shared: Arc<Shared>, graph: Weak<GraphInner>) {
     while let Some(task) = shared.take() {
         // upgrade 失败 = 图已销毁。此时丢弃任务是正确的:节点本身已不存在。
         let Some(graph) = graph.upgrade() else { break };
-        match task {
+        let started = Instant::now();
+        match task.task {
             Task::Run(node) => graph.run_node_on_worker(node),
             Task::WakeSource(node, generation) => graph.wake_source_on_worker(node, generation),
         }
-        shared.stats.completed();
+        shared.stats.completed(started.elapsed());
         graph.executor_task_completed();
     }
 }
@@ -427,7 +516,7 @@ fn worker(shared: Arc<Shared>, graph: Weak<GraphInner>) {
 /// 就只是又一个执行器,派任务的地方无需为它开特例。
 pub struct DelegatingExecutor {
     name: String,
-    queue: Mutex<VecDeque<NodeId>>,
+    queue: Mutex<VecDeque<QueuedTask>>,
     stats: ExecutorStats,
 }
 
@@ -448,10 +537,11 @@ impl DelegatingExecutor {
     /// 宿主线程不由引擎拉起,也无从 join。拆图时队里的残留由 `GraphInner::drop`
     /// 的兜底关流负责(与线程池 `submit` 失败后的善后同理)。
     pub fn submit(&self, node: NodeId) -> bool {
-        self.queue
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .push_back(node);
+        let mut queue = self.queue.lock().unwrap_or_else(|e| e.into_inner());
+        queue.push_back(QueuedTask {
+            enqueued_at: Instant::now(),
+            task: Task::Run(node),
+        });
         self.stats.enqueued();
         true
     }
@@ -462,23 +552,44 @@ impl DelegatingExecutor {
 
     /// 弹一个待办交给宿主线程跑;`None` = 队列空。
     pub fn take(&self) -> Option<NodeId> {
-        let node = self
-            .queue
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .pop_front();
-        if node.is_some() {
-            self.stats.started();
+        let mut queue = self.queue.lock().unwrap_or_else(|e| e.into_inner());
+        let task = queue.pop_front();
+        if let Some(task) = task {
+            self.stats.started(task.enqueued_at.elapsed());
+            if let Task::Run(node) = task.task {
+                return Some(node);
+            }
         }
-        node
+        None
     }
 
-    pub fn complete(&self) {
-        self.stats.completed();
+    pub fn complete(&self, execution: Duration) {
+        self.stats.completed(execution);
     }
 
     pub(crate) fn stats(&self) -> ExecutorStatsSnapshot {
         self.stats.snapshot()
+    }
+
+    pub(crate) fn has_pending_work(&self) -> bool {
+        !self
+            .queue
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_empty()
+            || self.stats.running.load(Ordering::Relaxed) != 0
+    }
+
+    pub(crate) fn queued_nodes(&self) -> Vec<NodeId> {
+        self.queue
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .filter_map(|task| match task.task {
+                Task::Run(node) => Some(node),
+                Task::WakeSource(_, _) => None,
+            })
+            .collect()
     }
 
     /// 清空队列(`reset` 用:上一轮的残留不能带进下一轮)。
@@ -602,9 +713,9 @@ impl Executor {
         }
     }
 
-    pub fn complete_delegated(&self) {
+    pub fn complete_delegated(&self, execution: Duration) {
         if let Self::Delegating(d) = self {
-            d.complete();
+            d.complete(execution);
         }
     }
 
@@ -612,6 +723,20 @@ impl Executor {
         match self {
             Self::Pool(p) => p.stats(),
             Self::Delegating(d) => d.stats(),
+        }
+    }
+
+    pub(crate) fn has_pending_work(&self) -> bool {
+        match self {
+            Self::Pool(p) => p.has_pending_work(),
+            Self::Delegating(d) => d.has_pending_work(),
+        }
+    }
+
+    pub(crate) fn queued_nodes(&self) -> Vec<NodeId> {
+        match self {
+            Self::Pool(p) => p.queued_nodes(),
+            Self::Delegating(d) => d.queued_nodes(),
         }
     }
 

@@ -715,10 +715,6 @@ class Graph {
   }
 
   int state() const { return static_cast<int>(lmflow_graph_state(g_)); }
-  std::string dump() const {
-    const char* s = lmflow_graph_dump(g_);
-    return s ? s : "";
-  }
   std::string to_dot_view(int view) const {
     const char* s = lmflow_graph_to_dot_view(g_, static_cast<LMFlowDotView>(view));
     if (!s || s[0] == '\0') check(LMFLOW_ERR_INVALID_ARG, "to_dot_view");
@@ -728,43 +724,12 @@ class Graph {
     const char* s = lmflow_graph_last_error(g_);
     return s ? s : "";
   }
-  size_t queue_depth(const std::string& p) const {
-    return lmflow_graph_queue_depth(g_, p.c_str());
-  }
   uint64_t dropped_count(const std::string& p) const {
     return lmflow_graph_dropped_count(g_, p.c_str());
   }
   int64_t counter_value(const std::string& n) const {
     return lmflow_graph_counter_value(g_, n.c_str());
   }
-  size_t total_queued() const { return lmflow_graph_total_queued(g_); }
-  std::vector<std::string> node_names() const {
-    std::vector<std::string> v;
-    for (size_t i = 0, n = lmflow_graph_num_nodes(g_); i < n; ++i) {
-      v.emplace_back(lmflow_graph_node_name(g_, i));
-    }
-    return v;
-  }
-  py::dict node_stats(size_t i) const {
-    LMFlowNodeStats st{};
-    st.struct_size = sizeof(st);
-    if (!lmflow_graph_node_stats(g_, i, &st)) throw py::index_error("node index out of range");
-    py::dict d;
-    d["node_name"] = st.node_name;
-    d["kernel_name"] = st.kernel_name;
-    d["running"] = st.running;
-    d["running_for_us"] = st.running_for_us;
-    d["processed"] = st.processed;
-    d["errors"] = st.errors;
-    d["total_process_us"] = st.total_process_us;
-    d["max_process_us"] = st.max_process_us;
-    d["packets_in"] = st.packets_in;
-    d["packets_out"] = st.packets_out;
-    d["peak_queue_depth"] = st.peak_queue_depth;
-    d["queued"] = st.queued;
-    return d;
-  }
-
   /// 宿主侧分配引擎缓冲:返回 (packet, 可写 numpy 视图)。
   py::tuple new_buffer(const std::vector<int64_t>& shape, const py::object& dtype);
 
@@ -1073,14 +1038,9 @@ PYBIND11_MODULE(_lmflow, m) {
            "input queue to drain.")
       .def("new_buffer", &Graph::new_buffer, py::arg("shape"), py::arg("dtype"))
       .def_property_readonly("state", &Graph::state)
-      .def("dump", &Graph::dump)
       .def("to_dot_view", &Graph::to_dot_view, py::arg("view"))
       .def("last_error", &Graph::last_error)
-      .def("queue_depth", &Graph::queue_depth)
       .def("dropped_count", &Graph::dropped_count)
       .def("counter_value", &Graph::counter_value)
-      .def("total_queued", &Graph::total_queued)
-      .def("node_names", &Graph::node_names)
-      .def("node_stats", &Graph::node_stats)
       .def("close", &Graph::close);
 }

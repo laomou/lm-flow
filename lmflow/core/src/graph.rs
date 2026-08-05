@@ -205,6 +205,8 @@ impl Graph {
         self.inner.shared.cancel();
         for node in &self.inner.nodes {
             node.source_waiting.store(false, Ordering::SeqCst);
+            node.source_wait_reason.store(0, Ordering::Relaxed);
+            node.source_wake_deadline_us.store(0, Ordering::Relaxed);
             node.source_wake_generation.fetch_add(1, Ordering::SeqCst);
         }
         for executor in &self.inner.executors {
@@ -455,6 +457,19 @@ pub struct NodeStatsSnapshot {
     /// 下游入队时观察到的队列深度峰值(高水位)
     pub peak_queue_depth: usize,
     pub queued: usize,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct ExecutorStatsSnapshot {
+    pub queued: usize,
+    pub running: usize,
+    pub peak_queued: usize,
+    pub completed: u64,
+    pub total_wait_us: u64,
+    pub total_execution_us: u64,
+    pub queued_for_us: u64,
+    pub saturated: bool,
+    pub queued_nodes: Vec<String>,
 }
 
 /// 节点单个输入口的队列与背压统计快照。

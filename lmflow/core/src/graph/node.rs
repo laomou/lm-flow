@@ -217,8 +217,21 @@ pub(super) struct NodeSched {
     pub(super) blocked_flush: Option<BlockedFlush>,
     /// 是否已有线程在做刷新 —— 保证刷新按序、串行(否则并发刷新会打乱下游顺序)。
     pub(super) flushing: bool,
-    /// Source 本次调用刷新完成后，延迟多久再唤醒。
-    pub(super) source_reschedule: Option<std::time::Duration>,
+    /// Source 本次调用刷新完成后，如何延迟唤醒。
+    pub(super) source_reschedule: Option<SourceReschedule>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SourceWaitReason {
+    Rate,
+    Yield,
+    RateAndYield,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(super) struct SourceReschedule {
+    pub(super) delay: std::time::Duration,
+    pub(super) reason: SourceWaitReason,
 }
 impl NodeSched {
     pub(super) fn new(max_in_flight: usize) -> Self {
@@ -353,6 +366,12 @@ pub struct Node {
     pub(super) source_done: AtomicBool,
     /// Source 正在协作式等待下一次唤醒；等待期间不可再次认领。
     pub(super) source_waiting: AtomicBool,
+    /// 当前 Source 等待原因。0=无，1=rate，2=source_yield，3=两者共同约束。
+    pub(super) source_wait_reason: AtomicUsize,
+    /// 当前计划唤醒时刻(相对 graph epoch 的微秒 + 1)；0=尚未排入延迟队列。
+    pub(super) source_wake_deadline_us: AtomicI64,
+    /// 内核主动调用 source_yield 的累计次数。
+    pub(super) source_yield_count: AtomicU64,
     /// Source 唤醒代次。reset/取消后旧延迟任务会因代次不匹配而失效。
     pub(super) source_wake_generation: AtomicU64,
     /// 每个输入口的**时间戳边界**:保证「不会再有时间戳 < bound 的包到来」。

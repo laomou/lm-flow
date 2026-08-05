@@ -493,7 +493,9 @@ output_ports: [out]
             g.wait_done(timeout=5.0)
             self.assertEqual([p.as_int() for p in out], [0, 1, 2, 3, 4])
             # 展开后内部节点被命名空间化为 p/a、p/b
-            self.assertEqual(g.node_names(), ["p/a", "p/b"])
+            dot = g.to_dot()
+            self.assertIn("p/a", dot)
+            self.assertIn("p/b", dot)
 
     def test_back_edge_feedback_loop(self):
         # 反馈自环:out 经 back_edge 回灌;out(t)=in(t)+out(t-1)。输入关闭后正常终止。
@@ -959,7 +961,7 @@ output_ports: [out]
 
 
 class TestIntrospection(unittest.TestCase):
-    def test_stats_counters_and_dump(self):
+    def test_counters_and_diagnostics_dot(self):
         with graph(
             """
 nodes:
@@ -976,14 +978,11 @@ input_ports: [in]
 
             self.assertEqual(g.counter_value("collected"), 7)
             self.assertEqual(g.counter_value("closed_normally"), 1, "close called exactly once and with normal termination")
-            st = g.node_stats(0)
-            self.assertEqual(st["node_name"], "c")
-            self.assertEqual(st["kernel_name"], "TCollect")
-            self.assertEqual(st["processed"], 7)
-            self.assertEqual(st["errors"], 0)
-            self.assertFalse(st["running"])
-            self.assertIn("node", g.dump())
-            self.assertEqual(g.node_names(), ["c"])
+            dot = g.to_dot(lmflow.DotView.DIAGNOSTICS)
+            self.assertIn("c", dot)
+            self.assertIn("TCollect", dot)
+            self.assertIn("7 pkts", dot)
+            self.assertIn("CLOSED", dot)
 
     def test_to_dot_exports_graphviz(self):
         # 纯拓扑快照:digraph 头 + 子图命名空间还原成 cluster + 执行器落位标注。
@@ -1037,7 +1036,9 @@ output_ports: [out]
             g.pause()
             for i in range(10):
                 inp.send(i, ts=i)
-            self.assertEqual(g.queue_depth("in"), 2)
+            diagnostics = g.to_dot(lmflow.DotView.DIAGNOSTICS)
+            self.assertIn("queue 2/unbounded", diagnostics)
+            self.assertIn("dropped +8", diagnostics)
             self.assertEqual(g.dropped_count("in"), 8, "dropped packets must be observable")
             g.resume()
             g.wait_until_idle(timeout=5.0)
