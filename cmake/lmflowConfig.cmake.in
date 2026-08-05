@@ -1,26 +1,72 @@
 @PACKAGE_INIT@
 
-# lmflow 原生 SDK 的 CMake 配置。消费者:
-#   find_package(lmflow REQUIRED)
-#   target_link_libraries(my_app PRIVATE lmflow::core)
-# 即拿到公共头 + 平台对应的 lmflow staticlib + 所需系统库。
-
 include(CMakeFindDependencyMacro)
 find_dependency(Threads)
 
-if(NOT TARGET lmflow::core)
-  add_library(lmflow::core STATIC IMPORTED)
-  set_target_properties(lmflow::core PROPERTIES
-    IMPORTED_LOCATION "${PACKAGE_PREFIX_DIR}/lib/@LMFLOW_STATIC_LIBRARY_FILENAME@"
+if(NOT TARGET lmflow::core_static)
+  add_library(lmflow::core_static STATIC IMPORTED)
+  set_target_properties(lmflow::core_static PROPERTIES
+    IMPORTED_LOCATION "${PACKAGE_PREFIX_DIR}/lib/@LMFLOW_CORE_INSTALL_FILENAME@"
     INTERFACE_INCLUDE_DIRECTORIES "${PACKAGE_PREFIX_DIR}/include")
-  target_link_libraries(lmflow::core INTERFACE Threads::Threads)
+  target_link_libraries(lmflow::core_static INTERFACE Threads::Threads)
   if(WIN32)
-    target_link_libraries(lmflow::core INTERFACE kernel32 ntdll userenv ws2_32 dbghelp)
+    target_link_libraries(lmflow::core_static INTERFACE kernel32 ntdll userenv ws2_32 dbghelp)
   else()
-    target_link_libraries(lmflow::core INTERFACE ${CMAKE_DL_LIBS} m)
+    target_link_libraries(lmflow::core_static INTERFACE ${CMAKE_DL_LIBS} m)
   endif()
   if(MSVC)
-    target_compile_options(lmflow::core INTERFACE /MD)
+    target_compile_options(lmflow::core_static INTERFACE /MD)
+  endif()
+endif()
+
+if(@LMFLOW_BUILD_KERNELS@ AND NOT TARGET lmflow::kernels)
+  add_library(lmflow::kernels STATIC IMPORTED)
+  set_target_properties(lmflow::kernels PROPERTIES
+    IMPORTED_LOCATION "${PACKAGE_PREFIX_DIR}/lib/@CMAKE_STATIC_LIBRARY_PREFIX@lmflow_kernels@CMAKE_STATIC_LIBRARY_SUFFIX@"
+    INTERFACE_INCLUDE_DIRECTORIES "${PACKAGE_PREFIX_DIR}/include")
+  target_link_libraries(lmflow::kernels INTERFACE lmflow::core_static)
+endif()
+
+if(@BUILD_SHARED_LIBS@)
+  if(NOT TARGET lmflow::core)
+    add_library(lmflow::core SHARED IMPORTED)
+    if(WIN32)
+      set_target_properties(lmflow::core PROPERTIES
+        IMPORTED_LOCATION "${PACKAGE_PREFIX_DIR}/bin/lmflow_core@CMAKE_SHARED_LIBRARY_SUFFIX@"
+        IMPORTED_IMPLIB "${PACKAGE_PREFIX_DIR}/lib/lmflow_core@CMAKE_IMPORT_LIBRARY_SUFFIX@")
+    else()
+      set_target_properties(lmflow::core PROPERTIES
+        IMPORTED_LOCATION "${PACKAGE_PREFIX_DIR}/lib/@CMAKE_SHARED_LIBRARY_PREFIX@lmflow_core@CMAKE_SHARED_LIBRARY_SUFFIX@")
+    endif()
+    set_target_properties(lmflow::core PROPERTIES
+      INTERFACE_INCLUDE_DIRECTORIES "${PACKAGE_PREFIX_DIR}/include")
+  endif()
+
+  if(NOT TARGET lmflow::lmflow)
+    add_library(lmflow::lmflow SHARED IMPORTED)
+    if(WIN32)
+      set_target_properties(lmflow::lmflow PROPERTIES
+        IMPORTED_LOCATION "${PACKAGE_PREFIX_DIR}/bin/lmflow@CMAKE_SHARED_LIBRARY_SUFFIX@"
+        IMPORTED_IMPLIB "${PACKAGE_PREFIX_DIR}/lib/lmflow@CMAKE_IMPORT_LIBRARY_SUFFIX@")
+    else()
+      set_target_properties(lmflow::lmflow PROPERTIES
+        IMPORTED_LOCATION "${PACKAGE_PREFIX_DIR}/lib/@CMAKE_SHARED_LIBRARY_PREFIX@lmflow@CMAKE_SHARED_LIBRARY_SUFFIX@")
+    endif()
+    set_target_properties(lmflow::lmflow PROPERTIES
+      INTERFACE_INCLUDE_DIRECTORIES "${PACKAGE_PREFIX_DIR}/include")
+  endif()
+else()
+  if(NOT TARGET lmflow::core)
+    add_library(lmflow::core INTERFACE IMPORTED)
+    target_link_libraries(lmflow::core INTERFACE lmflow::core_static)
+  endif()
+
+  if(NOT TARGET lmflow::lmflow)
+    add_library(lmflow::lmflow INTERFACE IMPORTED)
+    if(@LMFLOW_BUILD_KERNELS@)
+      target_link_libraries(lmflow::lmflow INTERFACE lmflow::kernels)
+    endif()
+    target_link_libraries(lmflow::lmflow INTERFACE lmflow::core_static)
   endif()
 endif()
 

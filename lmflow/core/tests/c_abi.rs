@@ -4,11 +4,33 @@
 //! `LMFlowPacket` 裸结构体,不碰任何 Rust 侧便利 API —— 因为外部 C/C++/Python
 //! 宿主看到的就只有这些。`examples/cpp/hello_world/hello_world_host.cc` 的逻辑与此一致。
 
-#![cfg(feature = "builtin-kernels")] // 用内置 C++ 算子:纯 Rust 构建(--no-default-features)时整文件跳过
-
 use std::ffi::{c_char, c_void, CStr, CString};
+use std::sync::Once;
 
 use lmflow::ffi::*;
+use lmflow::packet::type_id;
+use lmflow::{register_kernel, Kernel, KernelContract, KernelCtx};
+
+#[derive(Default)]
+struct CAbiI64Pass;
+
+impl Kernel for CAbiI64Pass {
+    fn get_contract(contract: &mut KernelContract) {
+        contract.input_type(0, type_id::I64);
+        contract.output_type(0, type_id::I64);
+    }
+
+    fn process(&mut self, context: &mut KernelCtx) -> lmflow::Result<()> {
+        context.forward(0, 0)
+    }
+}
+
+fn register_test_kernels() {
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        register_kernel::<CAbiI64Pass>("CAbiI64Pass").unwrap();
+    });
+}
 
 fn cs(s: &str) -> CString {
     CString::new(s).unwrap()
@@ -28,7 +50,7 @@ unsafe extern "C" fn drop_boxed_i32(p: *mut c_void) {
 fn make_int_packet(v: i32, ts: i64) -> LMFlowPacket {
     LMFlowPacket {
         payload: Box::into_raw(Box::new(v)) as *mut c_void,
-        type_id: 0, // 不声明类型 —— 与 PassThroughKernel 的 SetAny 契约相容
+        type_id: 0, // 不声明类型 —— 与 PassThrough 的 SetAny 契约相容
         timestamp: ts,
         owner: std::ptr::null_mut(),
         drop_fn: Some(drop_boxed_i32),
@@ -40,11 +62,11 @@ fn make_int_packet(v: i32, ts: i64) -> LMFlowPacket {
 const CONFIG: &str = r#"
 nodes:
   - name: "n1"
-    kernel: "PassThroughKernel"
+    kernel: "PassThrough"
     input_ports: ["in"]
     output_ports: ["mid"]
   - name: "n2"
-    kernel: "PassThroughKernel"
+    kernel: "PassThrough"
     input_ports: ["mid"]
     output_ports: ["out"]
 input_ports: ["in"]
@@ -103,12 +125,12 @@ fn custom_type_descriptor_registration_is_strict_and_queryable() {
 
 #[test]
 fn bounded_poller_exposes_drop_policy_and_watermark_accounting() {
-    lmflow::register_builtin_kernels();
+    lmflow::builtin::register_defaults();
     unsafe {
         let graph = lmflow_graph_new();
         let yaml = cs(r#"
 nodes:
-  - { name: pass, kernel: PassThroughKernel, input_ports: [in], output_ports: [out] }
+  - { name: pass, kernel: PassThrough, input_ports: [in], output_ports: [out] }
 input_ports: [in]
 output_ports: [out]
 "#);
@@ -144,7 +166,7 @@ output_ports: [out]
 /// 与 examples/cpp/hello_world/hello_world_host.cc 等价的完整流程。
 #[test]
 fn full_pipeline_through_c_abi() {
-    lmflow::register_builtin_kernels();
+    lmflow::builtin::register_defaults();
     unsafe {
         let g = lmflow_graph_new();
         assert!(!g.is_null());
@@ -220,14 +242,14 @@ fn full_pipeline_through_c_abi() {
 
 #[test]
 fn c_abi_can_pump_a_delegating_executor() {
-    lmflow::register_builtin_kernels();
+    lmflow::builtin::register_defaults();
     unsafe {
         let graph = lmflow_graph_new();
         let yaml = cs(r#"
 executors:
   - { name: host, type: DelegatingExecutor }
 nodes:
-  - { name: pass, kernel: PassThroughKernel, executor: host, input_ports: [in], output_ports: [out] }
+  - { name: pass, kernel: PassThrough, executor: host, input_ports: [in], output_ports: [out] }
 input_ports: [in]
 output_ports: [out]
 "#);
@@ -263,7 +285,7 @@ fn c_abi_wakeup_callback_coalesces_delegated_tasks() {
         WAKES.fetch_add(1, Ordering::SeqCst);
     }
 
-    lmflow::register_builtin_kernels();
+    lmflow::builtin::register_defaults();
     WAKES.store(0, Ordering::SeqCst);
     unsafe {
         let graph = lmflow_graph_new();
@@ -271,7 +293,7 @@ fn c_abi_wakeup_callback_coalesces_delegated_tasks() {
 executors:
   - { name: host, type: DelegatingExecutor }
 nodes:
-  - { name: pass, kernel: PassThroughKernel, executor: host, input_ports: [in], output_ports: [out] }
+  - { name: pass, kernel: PassThrough, executor: host, input_ports: [in], output_ports: [out] }
 input_ports: [in]
 output_ports: [out]
 "#);
@@ -509,7 +531,7 @@ fn null_pointers_do_not_crash() {
 /// 绝不 use-after-free。这守卫的是 Python/C++ 宿主先销毁 graph、后用 input/poller 的场景。
 #[test]
 fn handles_stay_safe_after_graph_free() {
-    lmflow::register_builtin_kernels();
+    lmflow::builtin::register_defaults();
     unsafe {
         let g = lmflow_graph_new();
         let yaml = cs(CONFIG);
@@ -598,7 +620,7 @@ fn to_dot_on_uninitialized_graph_is_valid_empty_digraph() {
 
 #[test]
 fn introspection_through_c_abi() {
-    lmflow::register_builtin_kernels();
+    lmflow::builtin::register_defaults();
     unsafe {
         let g = lmflow_graph_new();
         let yaml = cs(CONFIG);
@@ -692,7 +714,7 @@ fn introspection_through_c_abi() {
         assert!(last_error().contains("invalid DOT view"));
         assert_eq!(
             CStr::from_ptr(st.kernel_name).to_str().unwrap(),
-            "PassThroughKernel"
+            "PassThrough"
         );
 
         let mut queue_stats = LMFlowInputQueueStats {
@@ -733,7 +755,7 @@ fn introspection_through_c_abi() {
 
 #[test]
 fn observer_receives_packets() {
-    lmflow::register_builtin_kernels();
+    lmflow::builtin::register_defaults();
 
     // 用 Mutex 而非 static mut:后者创建共享引用本身就是坏实践
     static SEEN: std::sync::Mutex<Vec<i32>> = std::sync::Mutex::new(Vec::new());
@@ -786,14 +808,15 @@ fn log_callback_receives_engine_messages() {
         assert!(!msg.is_null());
         COUNT.fetch_add(1, Ordering::SeqCst);
     }
-    lmflow::register_builtin_kernels();
+    lmflow::builtin::register_defaults();
+    register_test_kernels();
     unsafe {
         lmflow_set_log_callback(Some(sink), std::ptr::null_mut());
         let g = lmflow_graph_new();
         // 让算子报错,从而触发引擎记录错误日志
         let y = cs(r#"
 nodes:
-  - { name: "s", kernel: "ScaleKernel", input_ports: ["in"], output_ports: ["out"], options: { factor: 2 } }
+  - { name: "s", kernel: "CAbiI64Pass", input_ports: ["in"], output_ports: ["out"] }
 input_ports: ["in"]
 output_ports: ["out"]
 "#);

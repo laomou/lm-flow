@@ -1,6 +1,5 @@
-# cmake/install-sdk.cmake —— 安装原生 SDK:公共头 + 平台 staticlib + find_package 配置。
-# 由根 CMakeLists include(在定义好 lmflow_core / LMFLOW_LIB 之后)。头在 lmflow/ 源码下,
-# 配置模板在仓库根 cmake/。
+# Install the native SDK: public headers, pure Rust core, optional kernels, and
+# the complete shared library selected by BUILD_SHARED_LIBS.
 
 install(FILES
     "${LMFLOW_SRC}/include/lmflow/flow.h"
@@ -8,7 +7,23 @@ install(FILES
     "${LMFLOW_SRC}/include/lmflow/flow_cv.hpp"
     "${LMFLOW_SRC}/include/lmflow/flow_platform_log.hpp"
     DESTINATION include/lmflow)
-install(FILES "${LMFLOW_LIB}" DESTINATION lib)
+
+# Cargo owns the pure Rust archive, so install it as a file rather than a CMake target.
+install(FILES "${LMFLOW_CORE_LIB}"
+    DESTINATION lib
+    RENAME "${LMFLOW_CORE_INSTALL_FILENAME}")
+
+if(LMFLOW_BUILD_KERNELS)
+  install(TARGETS lmflow_kernels
+      ARCHIVE DESTINATION lib)
+endif()
+
+if(BUILD_SHARED_LIBS)
+  install(TARGETS lmflow_core_shared lmflow_complete
+      RUNTIME DESTINATION bin
+      LIBRARY DESTINATION lib
+      ARCHIVE DESTINATION lib)
+endif()
 
 include(CMakePackageConfigHelpers)
 configure_package_config_file(

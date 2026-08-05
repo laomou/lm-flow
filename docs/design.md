@@ -362,7 +362,7 @@ LMFLOW_REGISTER_KERNEL(PassThroughKernel)    // 或 LMFLOW_REGISTER_KERNEL_AS(T,
   C++(`flow.hpp`)、Python(pybind11)、Rust(`trait Kernel`)三条路都汇入同一个
   `kernel::register`,引擎不知道算子是什么语言写的。内置的 18 个 C++ 算子因此只是**捆绑的
   算子库**、不是引擎的一部分 —— 它们放在 crate 之外(`lmflow/cpp/`,见 §11),**不随发布的
-  crate 分发**;由 `builtin-kernels` feature(**默认关**)编入,只在本仓库内可用。
+  crate 分发**；由 CMake 构建为独立 `lmflow::kernels` 组件。
 - **引擎自带默认 Rust 算子**(`src/builtin.rs`,建图时 `Graph::from_config` 自动注册一次、
   零 C++、任何配置下都在)—— **刻意只有两个**,且都纯结构性、零 payload 假设:
   `PassThrough`(直通接线)与 `Sink`(只消费,让分支自行终结;计 `sink.packets`)。
@@ -1291,20 +1291,22 @@ cc.emit(0, packet)
 
 ## 10. 构建与集成
 
-**Rust/C++ 部分:cargo 主导**
+**Rust core 与 C++ kernels 分离构建**
 
-- `lmflow`(`lmflow/core/`):`crate-type = ["lib", "staticlib", "cdylib"]`。
-  `lib` 给仓库内 Rust host/测试(不过 FFI);`staticlib`/`cdylib` 给外部宿主。
-- `build.rs` **默认什么都不做**(纯 Rust);开 `builtin-kernels` 才用 `cc` 编 `../cpp/*.cc`
-  (算子 + ABI 断言)并链入。build.rs 看不到 `#[cfg(feature)]`,故读 cargo 注入的
-  `CARGO_FEATURE_BUILTIN_KERNELS` 环境变量;`../cpp` 不存在(= 从 crates.io 装的)时给出
-  明确报错而非一堆找不到文件。仓库内 CMake / Python / 移动端 / CI 都显式带该 feature。
+- `lmflow`(`lmflow/core/`):`crate-type = ["lib", "staticlib"]`。
+  `lib` 给 Rust host/测试；`staticlib` 是 CMake 合成纯 core/完整动态库的唯一原料。
+- `lmflow/core` 没有 `build.rs`、没有 C++ build dependency，也没有 kernels feature。
+- CMake 构建纯 Rust `lmflow::core_static`、可选 `lmflow::kernels`，并按
+  `BUILD_SHARED_LIBS` 组合 `lmflow::core` 与统一消费目标 `lmflow::lmflow`。
+- 引擎语义、C ABI、内存、策略和并发测试全部使用 Rust 测试 kernels，留在
+  `lmflow/core/tests`；官方 C++ kernels 由 CMake/C++ 与 Python 端到端测试覆盖。
 - 示例宿主:`cargo run --manifest-path lmflow/examples/rust/hello_world/Cargo.toml`。
 - C ABI 的验证:Rust 集成测试直接 `unsafe` 调 `extern "C"` 函数,无需 C 语言 `main`。
 
-**Python 部分:破例引入 CMake**(ADR #4)
+**Python 部分由同一 CMake 编排**(ADR #4)
 
-- `pyproject.toml`(scikit-build-core)→ CMake 编 pybind11 模块 → 链 `liblmflow`。
+- `pyproject.toml`(scikit-build-core)→ CMake 编 pybind11 模块 → 静态链接
+  `lmflow::core_static` 与 `lmflow::kernels`。
 - 两步:`cargo build` 出库 → `pip install -e .` 编扩展。
 - 外部 C++ 宿主:自带构建系统,链 `liblmflow` + `include/`,不进本仓库构建。
 
@@ -1320,13 +1322,11 @@ lm-flow/                          仓库根
 ├── lmflow/                       第一方源码
 │   ├── core/                     引擎 crate `lmflow`(包名=库名=lmflow → liblmflow.a)
 │   │   │                         **默认纯 Rust**:不编译也不捆绑任何 C++
-│   │   ├── build.rs              可选地用 cc 编 ../cpp(仅 builtin-kernels feature,默认关)
 │   │   ├── Cargo.toml · Cargo.lock
 │   │   ├── src/                  timestamp / packet / edge / node / graph / scheduler / ffi /
 │   │   │                         kernel_api(Rust 算子糖)/ builtin(自带默认 Rust 算子)…
-│   │   ├── tests/                abi_layout.rs · rust_kernel.rs(纯 Rust,两种配置都跑)
-│   │   │                         其余 11 个集成测试带 #![cfg(feature = "builtin-kernels")]
-│   │   └── benches/              throughput.rs(Criterion,required-features)
+│   │   ├── tests/                纯 Rust 单元/集成测试
+│   │   └── benches/              dispatch.rs(纯 Rust Criterion)
 │   ├── include/                  公共头(消费者 #include "lmflow/xxx.h")
 │   │   └── lmflow/
 │   │       ├── flow.h            C ABI —— 唯一稳定接口(权威定义)
@@ -1678,7 +1678,7 @@ Debug 三个配置做 `ninja -n` 干跑,断言 profile 与 `--config` 一致,并
 **验证覆盖上的边界**
 
 - **Windows/MSVC 已进入原生 CI**,不再只是交叉 `cargo check`:同一 job 运行纯 Rust 与
-  `builtin-kernels` 全套测试,用 `cl.exe` 独立编译 C11/C++17 公共头、18 个算子、ABI
+  纯 Rust core 测试，并用 `cl.exe` 独立编译 C11/C++17 公共头、18 个算子、ABI
   断言和纯头测试;再用 Visual Studio 生成器分别构建/测试 Debug 与 Release、安装 SDK,
   通过临时最小外部工程验证 `find_package(lmflow)`、静态链接与 ABI 版本,最后构建并运行
   Python 扩展。为此 CMake 按 MSVC 产物名选择 `lmflow.lib`,传播 rustc 实测给出的

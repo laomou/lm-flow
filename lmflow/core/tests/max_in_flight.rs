@@ -6,8 +6,6 @@
 //!
 //! 用一个「按时间戳反向睡眠」的算子构造「完成顺序 ≠ 时间戳顺序」,专门压这两点。
 
-#![cfg(feature = "builtin-kernels")] // 用内置 C++ 算子:纯 Rust 构建(--no-default-features)时整文件跳过
-
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
@@ -15,7 +13,7 @@ use std::time::Duration;
 use lmflow::{Graph, Packet, Timestamp};
 
 fn init() {
-    lmflow::register_builtin_kernels();
+    lmflow::builtin::register_defaults();
 }
 
 /// 需要一个可重入的、耗时可控的 Python/C++ 算子。这里用 Rust 侧的自定义 C 回调注册一个
@@ -217,7 +215,7 @@ fn max_in_flight_on_single_threaded_executor_is_rejected() {
 executors:
   - { name: "host", type: "DelegatingExecutor" }
 nodes:
-  - { name: "s", kernel: "PassThroughKernel", executor: "host", input_ports: ["in"], output_ports: ["out"], max_in_flight: 4 }
+  - { name: "s", kernel: "PassThrough", executor: "host", input_ports: ["in"], output_ports: ["out"], max_in_flight: 4 }
 input_ports: ["in"]
 output_ports: ["out"]
 "#,
@@ -232,7 +230,7 @@ output_ports: ["out"]
 executors:
   - { name: "solo", type: "ThreadPoolExecutor", num_threads: 1 }
 nodes:
-  - { name: "s", kernel: "PassThroughKernel", input_ports: ["in"], output_ports: ["out"], executor: "solo", max_in_flight: 4 }
+  - { name: "s", kernel: "PassThrough", input_ports: ["in"], output_ports: ["out"], executor: "solo", max_in_flight: 4 }
 input_ports: ["in"]
 output_ports: ["out"]
 "#,

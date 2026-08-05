@@ -73,7 +73,7 @@ pub fn registered_names() -> Vec<String> {
 }
 
 /// 「算子未注册」的统一报错 —— 必须列出可用名字,否则用户无从下手
-/// (常见原因是忘了调 register_builtin_kernels,或算子名拼错)。
+/// (常见原因是对应 kernel 组件尚未注册，或算子名拼错)。
 fn not_registered(name: &str) -> Error {
     Error::NotFound(format!(
         "kernel `{name}` not registered. registered: [{}]",

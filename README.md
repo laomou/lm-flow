@@ -30,7 +30,7 @@ First-party source lives under `lmflow/`; build files and the vendored submodule
 lm-flow/
 ├── lmflow/                    All first-party source
 │   ├── core/                  Engine — the `lmflow` crate, **pure Rust** (package = lib = lmflow → liblmflow.a)
-│   │   ├── build.rs           Optionally compiles ../cpp via `cc` (feature `builtin-kernels`, off by default)
+│   │   ├── build.rs           Repository-only Rust test path for bundled C++ kernels
 │   │   ├── Cargo.toml · Cargo.lock
 │   │   └── src/ · tests/ · benches/
 │   ├── include/lmflow/        Public headers — flow.h (C ABI, only stable interface) · flow.hpp (C++ kernel sugar) · flow_cv.hpp · flow_platform_log.hpp
@@ -89,8 +89,8 @@ register_kernel::<Double>("Double")?;          // your own kernel
 let g = Graph::from_yaml(yaml)?;               // `PassThrough` / `Sink` need no registration
 ```
 
-The published crate is the **pure-Rust engine**. The 18 bundled C++ kernels live outside it and are
-not distributed with it — see the `builtin-kernels` feature below if you build from this repo.
+The published crate is the **pure-Rust engine**. The 18 bundled C++ kernels are a separate CMake
+component and are never compiled by the core crate.
 
 Working in this repo instead (the engine crate is `lmflow/core`):
 
@@ -99,10 +99,11 @@ cd lmflow/core
 cargo build     # pure-Rust engine, no C++ compiled
 cargo test      # unit tests + ABI layout + Rust-kernel tests
 
-# The 18 bundled C++ kernels live outside the crate (lmflow/cpp) — opt in explicitly:
-cargo build --features builtin-kernels
-cargo test  --features builtin-kernels   # full suite (C ABI / memory / policies / …)
-cargo bench --features builtin-kernels   # Criterion throughput → target/criterion/
+# C++ kernels are built and tested through the root CMake project:
+cd ../..
+cmake -B build -DLMFLOW_BUILD_KERNELS=ON
+cmake --build build
+ctest --test-dir build
 ```
 
 Python:
@@ -176,38 +177,51 @@ C/C++ and mobile hosts don't use pip — they use the **headers + library** dire
 ```text
 lmflow-v0.3.0-linux-x86_64/
 ├── include/lmflow/   flow.h · flow.hpp · flow_cv.hpp · flow_platform_log.hpp
-└── lib/       liblmflow.a (static, self-contained, preferred) · liblmflow.so (shared)
+└── lib/       liblmflow_core.a · liblmflow_kernels.a · liblmflow.so
 ```
 
 ```bash
-# Link the static library (recommended, especially for mobile embedding):
-g++ -std=c++17 -Iinclude my_host.cc lib/liblmflow.a -lpthread -ldl -lm -o my_host
+# Link the static components (recommended, especially for mobile embedding):
+g++ -std=c++17 -Iinclude my_host.cc \
+  lib/liblmflow_kernels.a lib/liblmflow_core.a -lpthread -ldl -lm -o my_host
 ```
 
-Or build one yourself locally:
+Or build the native SDK locally:
 
 ```bash
-cd lmflow/core
-cargo build --release --features builtin-kernels   # → lmflow/core/target/release/liblmflow.{a,so}
-# the headers live under lmflow/include/lmflow
+cmake -B build -DCMAKE_BUILD_TYPE=Release \
+  -DBUILD_SHARED_LIBS=ON -DLMFLOW_BUILD_KERNELS=ON
+cmake --build build
 ```
 
 ### Build & consume with CMake
 
-CMake is the top-level build for the C++/native side; it lives at the repo root and **drives cargo** (which builds the Rust engine + C++ kernels into `liblmflow`), builds the C++ examples/tests, and installs a `find_package` config:
+CMake is the top-level build for the C++/native side. Cargo builds the pure Rust core, while
+CMake builds the optional bundled C++ kernels and combines them for native consumers:
 
 ```bash
-cmake -B build -DCMAKE_BUILD_TYPE=Release
+cmake -B build -DCMAKE_BUILD_TYPE=Release \
+  -DBUILD_SHARED_LIBS=ON \
+  -DLMFLOW_BUILD_KERNELS=ON
 cmake --build build
 ctest --test-dir build                       # flow.hpp test; CV test if OpenCV is present
 cmake --install build --prefix /opt/lmflow   # → headers + lib + lib/cmake/lmflow
 ```
 
-Consumers then just:
+The switches are independent:
+
+- `BUILD_SHARED_LIBS=ON`: install `liblmflow_core.so` and the complete `liblmflow.so`.
+- `BUILD_SHARED_LIBS=OFF`: expose static CMake targets backed by `liblmflow_core.a` and, when enabled, `liblmflow_kernels.a`.
+- `LMFLOW_BUILD_KERNELS=ON` (default): include the 18 bundled C++ kernels in `lmflow::lmflow`.
+- `LMFLOW_BUILD_KERNELS=OFF`: build a pure Rust engine only; `lmflow_register_builtin_kernels` is unavailable.
+
+Consumers choose the desired boundary:
 
 ```cmake
 find_package(lmflow REQUIRED)
-target_link_libraries(my_app PRIVATE lmflow::core)   # headers + liblmflow.a + system libs
+target_link_libraries(my_app PRIVATE lmflow::lmflow)     # core + optional bundled kernels
+# target_link_libraries(my_app PRIVATE lmflow::core)     # selected pure-core variant
+# target_link_libraries(my_app PRIVATE lmflow::core_static)
 ```
 
 > Rust developers use `cargo` in `lmflow/core`; Python users just `pip install lm-lmflow` (prebuilt wheels). The wheel is built by **scikit-build-core driving this same root CMake** (`-DLMFLOW_BUILD_PYTHON=ON`), so there is one build definition, not three.

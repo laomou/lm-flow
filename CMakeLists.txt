@@ -13,8 +13,8 @@ set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreadedDLL")
 
 project(lmflow VERSION 0.3.0 LANGUAGES CXX)
 
-# 引擎是 Rust crate(lmflow/core),cargo 权威构建(build.rs 经 cc 顺带编 lmflow/cpp
-# 算子 → liblmflow)。本 CMake(仓库根)驱动 cargo,并拥有 C++/Python 侧。
+# 引擎是纯 Rust crate(lmflow/core),Cargo 产 core staticlib；CMake 单独编译
+# lmflow/cpp/kernels，并按开关组合原生 SDK 与 Python 扩展。
 # **各组件的构建规则在各自文件夹的 CMakeLists**,根文件只做:公共基座 + 编排 + SDK 安装。
 #
 # 用法:
@@ -30,6 +30,8 @@ set(LMFLOW_SRC  "${LMFLOW_ROOT}/lmflow")          # 源码根:core/(含 cpp/ inc
 option(LMFLOW_BUILD_TESTS  "Build C++ tests"                          ON)
 option(LMFLOW_BUILD_PYTHON "Build the pybind11 Python extension"      OFF)
 option(LMFLOW_WITH_CV_TEST "Compile the CV test kernel into _lmflow"  OFF)
+option(LMFLOW_BUILD_KERNELS "Build and link the bundled C++ kernels"   ON)
+set(LMFLOW_RUST_TARGET "" CACHE STRING "Optional Rust target triple for cross-compiling the core")
 
 include("${LMFLOW_ROOT}/cmake/engine.cmake")     # → lmflow::core(cargo 驱动)
 

@@ -32,7 +32,7 @@
 lm-flow/
 ├── lmflow/                    第一方源码
 │   ├── core/                  引擎 —— `lmflow` crate,**纯 Rust**(包名=库名=lmflow → liblmflow.a)
-│   │   ├── build.rs           可选地用 cc 编 ../cpp(feature builtin-kernels,默认关)
+│   │   ├── build.rs           仓库内 Rust 测试专用的 C++ kernels 构建路径
 │   │   ├── Cargo.toml · Cargo.lock
 │   │   └── src/ · tests/ · benches/
 │   ├── include/lmflow/        公共头 —— flow.h(C ABI,唯一稳定接口)· flow.hpp(C++ 算子糖层)· flow_cv.hpp · flow_platform_log.hpp
@@ -90,8 +90,8 @@ register_kernel::<Double>("Double")?;          // 自己的算子
 let g = Graph::from_yaml(yaml)?;               // 自带的 `PassThrough` / `Sink` 无需注册
 ```
 
-发布出去的 crate 是**纯 Rust 引擎**;18 个内置 C++ 算子在 crate 之外、不随它分发 ——
-在本仓库里构建才有(见下面的 `builtin-kernels` feature)。
+发布出去的 crate 是**纯 Rust 引擎**；18 个官方 C++ kernels 是独立 CMake 组件，
+core crate 永远不会编译它们。
 
 在本仓库里开发(引擎 crate 在 `lmflow/core`):
 
@@ -100,10 +100,11 @@ cd lmflow/core
 cargo build     # 纯 Rust 引擎,不编任何 C++
 cargo test      # 单测 + ABI 布局 + Rust 算子测试
 
-# 18 个内置 C++ 算子在 crate 之外(lmflow/cpp),要显式开:
-cargo build --features builtin-kernels
-cargo test  --features builtin-kernels   # 全量套件(C ABI / 内存 / 策略 …)
-cargo bench --features builtin-kernels   # Criterion 吞吐 → target/criterion/
+# C++ kernels 通过仓库根 CMake 构建和测试：
+cd ../..
+cmake -B build -DLMFLOW_BUILD_KERNELS=ON
+cmake --build build
+ctest --test-dir build
 ```
 
 Python:
@@ -179,38 +180,51 @@ C/C++ 或移动端宿主不走 pip —— 直接用**头文件 + 库**。每个 
 ```text
 lmflow-v0.3.0-linux-x86_64/
 ├── include/lmflow/   flow.h · flow.hpp · flow_cv.hpp · flow_platform_log.hpp
-└── lib/       liblmflow.a(静态,完整,首选)· liblmflow.so(动态)
+└── lib/       liblmflow_core.a · liblmflow_kernels.a · liblmflow.so
 ```
 
 ```bash
-# 链静态库(推荐,尤其移动端嵌入):
-g++ -std=c++17 -Iinclude my_host.cc lib/liblmflow.a -lpthread -ldl -lm -o my_host
+# 链静态组件(推荐,尤其移动端嵌入):
+g++ -std=c++17 -Iinclude my_host.cc \
+  lib/liblmflow_kernels.a lib/liblmflow_core.a -lpthread -ldl -lm -o my_host
 ```
 
-本地自己出一份也行:
+本地自己构建原生 SDK：
 
 ```bash
-cd lmflow/core
-cargo build --release --features builtin-kernels   # → lmflow/core/target/release/liblmflow.{a,so}
-# 头文件在 lmflow/include/lmflow 下
+cmake -B build -DCMAKE_BUILD_TYPE=Release \
+  -DBUILD_SHARED_LIBS=ON -DLMFLOW_BUILD_KERNELS=ON
+cmake --build build
 ```
 
 ### 用 CMake 构建与消费
 
-C++/原生侧的顶层构建是 CMake,它在仓库根,**驱动 cargo**(由 cargo 把 Rust 引擎 + C++ 算子编成 `liblmflow`),再编 C++ 示例/测试,并安装出 `find_package` 配置:
+C++/原生侧的顶层构建是 CMake。Cargo 只构建纯 Rust core，CMake 单独构建可选的
+官方 C++ kernels，并为原生消费者完成组合：
 
 ```bash
-cmake -B build -DCMAKE_BUILD_TYPE=Release
+cmake -B build -DCMAKE_BUILD_TYPE=Release \
+  -DBUILD_SHARED_LIBS=ON \
+  -DLMFLOW_BUILD_KERNELS=ON
 cmake --build build
 ctest --test-dir build                       # flow.hpp 测试;装了 OpenCV 则含 CV 测试
 cmake --install build --prefix /opt/lmflow   # → headers + lib + lib/cmake/lmflow
 ```
 
-消费者只需:
+两个开关互相独立：
+
+- `BUILD_SHARED_LIBS=ON`：安装纯 core 的 `liblmflow_core.so` 和完整的 `liblmflow.so`。
+- `BUILD_SHARED_LIBS=OFF`：静态目标由 `liblmflow_core.a` 与可选的 `liblmflow_kernels.a` 组成。
+- `LMFLOW_BUILD_KERNELS=ON`（默认）：`lmflow::lmflow` 包含 18 个官方 C++ kernels。
+- `LMFLOW_BUILD_KERNELS=OFF`：只构建纯 Rust 引擎，不提供 `lmflow_register_builtin_kernels`。
+
+消费者按边界选择：
 
 ```cmake
 find_package(lmflow REQUIRED)
-target_link_libraries(my_app PRIVATE lmflow::core)   # 头 + liblmflow.a + 系统库
+target_link_libraries(my_app PRIVATE lmflow::lmflow)     # core + 可选官方 kernels
+# target_link_libraries(my_app PRIVATE lmflow::core)     # 当前静态/动态纯 core
+# target_link_libraries(my_app PRIVATE lmflow::core_static)
 ```
 
 > Rust 开发者在 `lmflow/core` 里用 `cargo`;Python 用户直接 `pip install lm-lmflow`(预编 wheel)。

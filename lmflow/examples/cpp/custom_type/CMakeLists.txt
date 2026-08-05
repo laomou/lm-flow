@@ -15,7 +15,7 @@ project(lmflow_custom_type LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-if(NOT TARGET lmflow::core)
+if(NOT TARGET lmflow::lmflow)
   find_package(lmflow QUIET)
   if(NOT lmflow_FOUND)
     message(STATUS "lmflow: 未找到已装 SDK —— 从源码构建引擎(仓库根,驱动 cargo)")
@@ -25,7 +25,7 @@ if(NOT TARGET lmflow::core)
 endif()
 
 add_executable(custom_type_host custom_type_host.cc)
-target_link_libraries(custom_type_host PRIVATE lmflow::core)
+target_link_libraries(custom_type_host PRIVATE lmflow::lmflow)
 
 if(TARGET flow_engine)
   add_dependencies(custom_type_host flow_engine)

@@ -45,11 +45,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { name: linux-x86_64,  os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
-          - { name: linux-aarch64, os: ubuntu-latest, target: aarch64-unknown-linux-gnu, apt: gcc-aarch64-linux-gnu g++-aarch64-linux-gnu }
-          - { name: macos-arm64,   os: macos-latest,  target: aarch64-apple-darwin }
-          - { name: ios-arm64,     os: macos-latest,  target: aarch64-apple-ios }
-          - { name: android-arm64, os: ubuntu-latest, target: aarch64-linux-android, ndk: true }
+          - { name: linux-x86_64,  os: ubuntu-latest, target: x86_64-unknown-linux-gnu, shared: "ON" }
+          - { name: linux-aarch64, os: ubuntu-latest, target: aarch64-unknown-linux-gnu, apt: gcc-aarch64-linux-gnu g++-aarch64-linux-gnu, shared: "ON" }
+          - { name: macos-arm64,   os: macos-latest,  target: aarch64-apple-darwin, shared: "ON" }
+          - { name: ios-arm64,     os: macos-latest,  target: aarch64-apple-ios, ios: true, shared: "OFF" }
+          - { name: android-arm64, os: ubuntu-latest, target: aarch64-linux-android, ndk: true, shared: "OFF" }
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -69,19 +69,49 @@ jobs:
             echo "AR_aarch64_linux_android=$TOOL/llvm-ar" >> $GITHUB_ENV
             echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$TOOL/aarch64-linux-android21-clang" >> $GITHUB_ENV
           fi
-      - name: 构建静态+动态库
-        run: cargo build --release --features builtin-kernels --target ${{ matrix.target }} --manifest-path lmflow/core/Cargo.toml
-      - name: 打包 SDK(头文件 + 库)
+      - name: 配置并构建原生 SDK
+        run: |
+          ARGS=(
+            -S .
+            -B build-native
+            -DCMAKE_BUILD_TYPE=Release
+            -DLMFLOW_BUILD_TESTS=OFF
+            -DLMFLOW_BUILD_KERNELS=ON
+            -DBUILD_SHARED_LIBS=${{ matrix.shared }}
+            -DLMFLOW_RUST_TARGET=${{ matrix.target }}
+          )
+          if [ "${{ matrix.target }}" = "aarch64-unknown-linux-gnu" ]; then
+            ARGS+=(-DCMAKE_CXX_COMPILER=aarch64-linux-gnu-g++)
+          fi
+          if [ "${{ matrix.ndk }}" = "true" ]; then
+            ARGS+=(
+              -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_LATEST_HOME/build/cmake/android.toolchain.cmake"
+              -DANDROID_ABI=arm64-v8a
+              -DANDROID_PLATFORM=android-21
+            )
+          fi
+          if [ "${{ matrix.ios }}" = "true" ]; then
+            ARGS+=(
+              -DCMAKE_SYSTEM_NAME=iOS
+              -DCMAKE_OSX_SYSROOT=iphoneos
+              -DCMAKE_OSX_ARCHITECTURES=arm64
+            )
+          fi
+          cmake "${ARGS[@]}"
+          cmake --build build-native --config Release --parallel
+          cmake --install build-native --config Release --prefix sdk
+      - name: 打包 SDK
         run: |
           VER="${{ github.ref_name }}"
           PKG="lmflow-${VER}-${{ matrix.name }}"
-          mkdir -p "$PKG/include/lmflow" "$PKG/lib"
-          cp lmflow/include/lmflow/*.h lmflow/include/lmflow/*.hpp "$PKG/include/lmflow/"
+          mv sdk "$PKG"
           cp LICENSE README.md "$PKG/"
-          OUT="lmflow/core/target/${{ matrix.target }}/release"
-          cp "$OUT/liblmflow.a" "$PKG/lib/"                 # 静态库:完整,首选(移动端也用它)
-          cp "$OUT"/liblmflow.so "$PKG/lib/" 2>/dev/null || true    # 桌面 Linux/Android 动态库
-          cp "$OUT"/liblmflow.dylib "$PKG/lib/" 2>/dev/null || true # macOS 动态库
+          test -f "$PKG/lib/liblmflow_core.a"
+          test -f "$PKG/lib/liblmflow_kernels.a"
+          if [ "${{ matrix.shared }}" = "ON" ]; then
+            test -f "$PKG/lib/liblmflow.so" || test -f "$PKG/lib/liblmflow.dylib"
+            test -f "$PKG/lib/liblmflow_core.so" || test -f "$PKG/lib/liblmflow_core.dylib"
+          fi
           tar czf "$PKG.tar.gz" "$PKG"
           ls -l "$PKG.tar.gz"
       - uses: actions/upload-artifact@v7

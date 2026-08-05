@@ -13,41 +13,23 @@ readme = "README.md"
 keywords = ["dataflow", "graph", "pipeline", "realtime", "ffi"]
 categories = ["concurrency", "multimedia"]
 
-[features]
-# 默认纯 Rust:发布出去的 crate 不含、也不编译任何 C++(`cargo add lmflow` 无需 C++ 工具链)。
-default = []
-# 编译并链入 ../cpp/kernels/ 的 18 个内置 C++ 算子。**仅在 lm-flow 仓库内可用** ——
-# 那些源码在 crate 目录之外,不随发布的 crate 分发(cargo 只打包包目录内的文件);
-# 仓库内的 CMake / Python / 移动端 / CI 都显式带 `--features builtin-kernels`。
-builtin-kernels = []
-
 [lib]
 name = "lmflow"
 # lib   : 仓库内 Rust host / 测试直接依赖(不过 FFI),外部 `use lmflow::`
-# staticlib / cdylib : 供外部 C/C++ host 链接(liblmflow.a / liblmflow.so)
-crate-type = ["lib", "staticlib", "cdylib"]
+# staticlib : CMake 合成纯 core 动态库与完整 lmflow 动态库的唯一原料。
+crate-type = ["lib", "staticlib"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_yaml = "0.9"
 serde_json = "1"
 
-[build-dependencies]
-cc = "1"
-
 [dev-dependencies]
-# 仅基准用(不进发布库/wheel)。见 benches/throughput.rs。
+# 仅基准用(不进发布库/wheel)。
 criterion = { version = "0.5", features = ["html_reports"] }
-
-[[bench]]
-name = "throughput"
-harness = false
-# 基准跑的是内置 C++ 算子链,故需要 builtin-kernels(默认关,即默认不编 bench)。
-#(不能只靠文件内 #![cfg]:criterion_main! 生成的 main 会一起消失 → E0601)。
-required-features = ["builtin-kernels"]
 
 [[bench]]
 name = "dispatch"
 harness = false
 # 只用引擎自带的 Rust 默认算子(PassThrough / Sink)→ **不需要任何 feature**,
-# 纯 Rust 配置下也能量引擎派发成本。测量口径见文件头注释。
+# 量引擎派发成本。测量口径见文件头注释。

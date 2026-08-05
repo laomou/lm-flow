@@ -75,10 +75,8 @@
 //!
 //! # Beyond this crate
 //!
-//! The lm-flow repository also carries 18 built-in C++ kernels (`../cpp/kernels/`), compiled in by
-//! the `builtin-kernels` feature. That feature is **off by default and only usable inside the
-//! repository**: those sources live outside the crate directory, so they are not distributed with
-//! the published crate.
+//! The lm-flow repository also carries 18 optional C++ kernels (`../cpp/kernels/`). They are built
+//! separately by CMake as `lmflow::kernels`; this crate never compiles or bundles C++.
 //!
 //! Full documentation, including the C/C++ and Python interfaces:
 //! <https://laomou.github.io/lm-flow/>. The authoritative design document — scheduling model,
@@ -107,40 +105,3 @@ pub use kernel_api::{register_kernel, Kernel, KernelContract, KernelCtx};
 pub use packet::{BufferData, Builtin, InteropType, Packet};
 pub use status::{Error, Result};
 pub use timestamp::Timestamp;
-
-#[cfg(feature = "builtin-kernels")]
-extern "C" {
-    /// 由 `../cpp/kernels/register.cc` 提供:显式聚合注册内置 C++ 算子的实现。
-    ///
-    /// 用显式函数而非静态初始化,是因为静态初始化对象在静态库中可能被链接器裁剪
-    /// (见 docs/design.md §14 风险登记)。C ABI 的 `lmflow_register_builtin_kernels`
-    /// 由下方 Rust 包装导出(这样它也能出现在 cdylib 的动态导出表里)。
-    fn lmflow_register_builtin_kernels_impl();
-}
-
-/// Register the built-in C++ kernels. **Idempotent** — only the first call takes effect.
-///
-/// Must be called before [`Graph::from_yaml`], otherwise graph construction reports an
-/// unregistered kernel.
-///
-/// Only exists under the `builtin-kernels` feature (**off by default**, and only usable inside the
-/// lm-flow repository); otherwise register your own Rust kernels with [`register_kernel`].
-#[cfg(feature = "builtin-kernels")]
-pub fn register_builtin_kernels() {
-    use std::sync::Once;
-    static ONCE: Once = Once::new();
-    ONCE.call_once(|| unsafe { lmflow_register_builtin_kernels_impl() });
-}
-
-/// C ABI: register the built-in kernels (see `include/lmflow/flow.h`). This is the exported
-/// wrapper around [`register_builtin_kernels`] — defined in Rust and `#[no_mangle]`-exported so it
-/// appears in the symbol table of both the static library and the cdylib, matching the declaration
-/// in `flow.h`.
-///
-/// # Safety
-/// Takes no arguments and no pointers, and is internally idempotent. Safe to call from any thread.
-#[cfg(feature = "builtin-kernels")]
-#[no_mangle]
-pub unsafe extern "C" fn lmflow_register_builtin_kernels() {
-    register_builtin_kernels();
-}
