@@ -4,6 +4,7 @@ use std::sync::{Arc, Condvar, Mutex, Weak};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use crate::config::StatsLevel;
 use crate::graph::{GraphInner, NodeId};
 
 use super::platform::{pin_current_thread_to, set_current_thread_rt_priority};
@@ -16,7 +17,7 @@ enum Task {
 }
 
 struct QueuedTask {
-    enqueued_at: Instant,
+    enqueued_at: Option<Instant>,
     task: Task,
 }
 
@@ -51,13 +52,14 @@ impl Shared {
             {
                 let delayed = queue.delayed.remove(0);
                 queue.ready.push_back(QueuedTask {
-                    enqueued_at: now,
+                    enqueued_at: self.stats.full().then_some(now),
                     task: delayed.task,
                 });
                 self.stats.enqueued();
             }
             if let Some(task) = queue.ready.pop_front() {
-                self.stats.started(task.enqueued_at.elapsed());
+                self.stats
+                    .started(task.enqueued_at.map(|enqueued_at| enqueued_at.elapsed()));
                 return Some(task);
             }
             if self.stop.load(Ordering::SeqCst) {
@@ -91,6 +93,16 @@ pub struct ThreadPool {
 
 impl ThreadPool {
     pub fn new(name: &str, num_threads: usize, affinity: Vec<usize>, priority: i32) -> Self {
+        Self::new_with_stats(name, num_threads, affinity, priority, StatsLevel::Full)
+    }
+
+    pub(crate) fn new_with_stats(
+        name: &str,
+        num_threads: usize,
+        affinity: Vec<usize>,
+        priority: i32,
+        stats_level: StatsLevel,
+    ) -> Self {
         Self {
             name: name.to_string(),
             num_threads: num_threads.max(1),
@@ -100,7 +112,7 @@ impl ThreadPool {
                 queue: Mutex::new(QueueState::default()),
                 cv: Condvar::new(),
                 stop: AtomicBool::new(false),
-                stats: ExecutorStats::default(),
+                stats: ExecutorStats::new(stats_level),
             }),
             threads: Mutex::new(Vec::new()),
         }
@@ -168,7 +180,7 @@ impl ThreadPool {
             return false;
         }
         queue.ready.push_back(QueuedTask {
-            enqueued_at: Instant::now(),
+            enqueued_at: self.shared.stats.full().then(Instant::now),
             task: Task::Run(node),
         });
         self.shared.stats.enqueued();
@@ -189,7 +201,7 @@ impl ThreadPool {
         let task = Task::WakeSource(node, generation);
         if delay.is_zero() {
             queue.ready.push_back(QueuedTask {
-                enqueued_at: Instant::now(),
+                enqueued_at: self.shared.stats.full().then(Instant::now),
                 task,
             });
             self.shared.stats.enqueued();
@@ -293,12 +305,14 @@ fn worker(shared: Arc<Shared>, graph: Weak<GraphInner>) {
         let Some(graph) = graph.upgrade() else {
             break;
         };
-        let started = Instant::now();
+        let started = shared.stats.full().then(Instant::now);
         match task.task {
             Task::Run(node) => graph.run_node_on_worker(node),
             Task::WakeSource(node, generation) => graph.wake_source_on_worker(node, generation),
         }
-        shared.stats.completed(started.elapsed());
+        shared
+            .stats
+            .completed(started.map(|started| started.elapsed()));
         graph.executor_task_completed();
     }
 }

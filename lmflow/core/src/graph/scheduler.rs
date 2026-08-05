@@ -195,10 +195,12 @@ impl GraphInner {
                 .peak_bytes
                 .fetch_max(queued_bytes, Ordering::Relaxed);
             // 高水位:depth 本就为软限告警算好了,这里顺手 fetch_max —— 定位积压节点。
-            self.nodes[node]
-                .stats
-                .peak_queue_depth
-                .fetch_max(depth, Ordering::Relaxed);
+            if self.basic_stats() {
+                self.nodes[node]
+                    .stats
+                    .peak_queue_depth
+                    .fetch_max(depth, Ordering::Relaxed);
+            }
             drop(q);
             // 入队后,该口不会再来 <= 最后这个包时间戳的数据
             if let Some(last) = packets.last() {
@@ -418,7 +420,9 @@ impl GraphInner {
                         let Some(p) = q.pop_front() else { break };
                         node.input_queue_bytes[port].fetch_sub(p.byte_size(), Ordering::SeqCst);
                         self.shared.on_dequeue(p.byte_size());
-                        node.stats.packets_in.fetch_add(1, Ordering::Relaxed);
+                        if self.basic_stats() {
+                            node.stats.packets_in.fetch_add(1, Ordering::Relaxed);
+                        }
                         ctx.input_batches[port].push(p);
                     }
                     q.len() // 顺手读,省一次同一把锁的再获取(ADR #36)
@@ -445,7 +449,9 @@ impl GraphInner {
                 if let Some(p) = popped {
                     node.input_queue_bytes[port].fetch_sub(p.byte_size(), Ordering::SeqCst);
                     self.shared.on_dequeue(p.byte_size());
-                    node.stats.packets_in.fetch_add(1, Ordering::Relaxed);
+                    if self.basic_stats() {
+                        node.stats.packets_in.fetch_add(1, Ordering::Relaxed);
+                    }
                     ctx.inputs[port] = Some(p);
                 }
                 ctx.inputs_done[port] =
@@ -466,7 +472,9 @@ impl GraphInner {
                 if let Some(p) = popped {
                     node.input_queue_bytes[port].fetch_sub(p.byte_size(), Ordering::SeqCst);
                     self.shared.on_dequeue(p.byte_size());
-                    node.stats.packets_in.fetch_add(1, Ordering::Relaxed);
+                    if self.basic_stats() {
+                        node.stats.packets_in.fetch_add(1, Ordering::Relaxed);
+                    }
                     ctx.inputs[port] = Some(p);
                 }
                 ctx.inputs_done[port] =
@@ -496,7 +504,9 @@ impl GraphInner {
             if let Some(p) = popped {
                 node.input_queue_bytes[port].fetch_sub(p.byte_size(), Ordering::SeqCst);
                 self.shared.on_dequeue(p.byte_size());
-                node.stats.packets_in.fetch_add(1, Ordering::Relaxed);
+                if self.basic_stats() {
+                    node.stats.packets_in.fetch_add(1, Ordering::Relaxed);
+                }
                 ctx.inputs[port] = Some(p);
             }
             node.advance_bound(port, ts.next_allowed_in_stream());
@@ -556,10 +566,10 @@ impl GraphInner {
             Some((index, n)) => {
                 self.delegated_cursor
                     .store(index.wrapping_add(1), Ordering::Relaxed);
-                let started = Instant::now();
+                let started = self.full_stats().then(Instant::now);
                 self.run_node(n);
                 self.in_flight.fetch_sub(1, Ordering::SeqCst);
-                self.executors[index].complete_delegated(started.elapsed());
+                self.executors[index].complete_delegated(started.map(|started| started.elapsed()));
                 self.notify_activity();
                 true
             }
@@ -710,7 +720,9 @@ impl GraphInner {
                 } else if let Err(e) = self.check_output_types(n, slot) {
                     self.on_node_error(n, slot, e)
                 } else {
-                    node.stats.processed.fetch_add(1, Ordering::Relaxed);
+                    if self.basic_stats() {
+                        node.stats.processed.fetch_add(1, Ordering::Relaxed);
+                    }
                     true
                 }
             }
@@ -949,17 +961,19 @@ impl GraphInner {
     /// 并记录耗时以便定位卡死。可被并发调用(不同槽),故 `process` 必须可重入。
     pub(super) fn call_kernel(&self, n: NodeId, slot: usize, phase: KernelPhase) -> i32 {
         let node = &self.nodes[n];
-        crate::packet::begin_cow_copy_scope();
+        if self.full_stats() {
+            crate::packet::begin_cow_copy_scope();
+        }
         // 直接交出 UnsafeCell 内部指针:不构造 Rust 引用,故与回调内
         // 从该指针造出的 `&mut Context` 不冲突(该槽此刻由本调用独占持有)。
         let ctx_ptr = node.ctxs[slot].get() as *mut c_void;
         // 记账全走原子:改造前这里每次调用要拿 2 次 running_timing 锁 + 1 次 stats 锁
         // (再加 run_node 里的 processed 一次)。R1 要求「调算子时不持任何引擎锁」——
         // 原子天然满足,也顺带把 4 对 mutex 从每包热路径上去掉了。
-        // 计时可关(见 `GraphConfig::stats_timing`):`Instant::now()` + 末尾的 `elapsed()`
-        // 是**每次 process 两次**时钟读,本机约 43 ns、占单跳派发成本约 15%。
+        // 仅 full 统计读取时钟:`Instant::now()` + 末尾的 `elapsed()` 是每次
+        // process 两次时钟读。
         // 一次时钟读两用:既作本次耗时起点,也作「本节点开始在跑」的时刻。
-        let started = if self.timing {
+        let started = if self.full_stats() {
             Some(Instant::now())
         } else {
             None
@@ -984,12 +998,14 @@ impl GraphInner {
                 KernelPhase::Close => node.kernel.close(ctx_ptr),
             }
         };
-        let cow = crate::packet::end_cow_copy_scope();
-        if matches!(phase, KernelPhase::Process) {
-            node.stats
-                .cow_copies
-                .fetch_add(cow.copies, Ordering::Relaxed);
-            node.stats.cow_bytes.fetch_add(cow.bytes, Ordering::Relaxed);
+        if self.full_stats() {
+            let cow = crate::packet::end_cow_copy_scope();
+            if matches!(phase, KernelPhase::Process) {
+                node.stats
+                    .cow_copies
+                    .fetch_add(cow.copies, Ordering::Relaxed);
+                node.stats.cow_bytes.fetch_add(cow.bytes, Ordering::Relaxed);
+            }
         }
 
         // 归零时**不清** started_us:读侧按 in_flight > 0 判断是否在跑,

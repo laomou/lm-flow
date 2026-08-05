@@ -35,7 +35,7 @@
 //! | `sink/pool4` | ~4000 ns | ~400 ns | **±13~25%,不可归因** |
 //! | `enqueue_only_paused` | ~80~100 ns | — | 跑间漂移大,只作数量级参照 |
 //!
-//! `stats/timing_{on,off}/depth16` 是同一条链只差 `stats_timing` 的 **A/B**:
+//! `stats/{full,basic,off}/depth16` 是同一条链只差统计级别的 **A/B**:
 //! 4188 → 3281 ns/包(**-21.7%**),即每节点省约 53 ns —— 与「每次回调两次
 //! `Instant::now()`、单次 now()+elapsed 约 43 ns」的预测吻合,也反过来验证了
 //! 「静态数原语次数 × 单独测单价」这套估算方法。
@@ -90,15 +90,12 @@ const BATCH: u64 = 256;
 /// `pool > 0` 时全部节点挂线程池,否则显式用委托执行器(交还宿主线程)。
 /// `max_queue_size` 调大,批量喂入不撞全局软水位(那会转成输入口背压,污染测量)。
 fn sink_chain_yaml(depth: usize, pool: usize) -> String {
-    sink_chain_yaml_timing(depth, pool, true)
+    sink_chain_yaml_stats(depth, pool, "basic")
 }
 
-/// 同上,但可关掉每次回调的计时(`stats_timing`)—— 用来量那两次 `Instant::now()` 的代价。
-fn sink_chain_yaml_timing(depth: usize, pool: usize, timing: bool) -> String {
-    let mut s = String::from("max_queue_size: 1000000\n");
-    if !timing {
-        s += "stats_timing: false\n";
-    }
+/// 同上，但允许选择运行时统计级别。
+fn sink_chain_yaml_stats(depth: usize, pool: usize, stats: &str) -> String {
+    let mut s = format!("max_queue_size: 1000000\nstats: {stats}\n");
     if pool > 0 {
         s += &format!(
             "executors:\n  - {{ name: \"cpu\", type: \"ThreadPoolExecutor\", num_threads: {pool} }}\n"
@@ -195,17 +192,16 @@ fn bench_enqueue_only(c: &mut Criterion) {
     g.finish();
 }
 
-/// 计时开关的代价:同一条链,只差 `stats_timing`。差值 = 每次回调两次
-/// `Instant::now()` 的成本(本机单次 now()+elapsed 约 43 ns)。
-fn bench_timing_cost(c: &mut Criterion) {
+/// 三级统计的成本：full 额外包含时钟、百分位、CoW 和执行器耗时，off 则连吞吐原子也跳过。
+fn bench_stats_cost(c: &mut Criterion) {
     let mut g = c.benchmark_group("dispatch");
     g.throughput(Throughput::Elements(BATCH));
-    for (label, timing) in [("timing_on", true), ("timing_off", false)] {
-        let graph = Graph::from_yaml(&sink_chain_yaml_timing(16, 0, timing)).unwrap();
+    for level in ["full", "basic", "off"] {
+        let graph = Graph::from_yaml(&sink_chain_yaml_stats(16, 0, level)).unwrap();
         graph.start().unwrap();
         let input = graph.input("in").unwrap();
         let ts = Cell::new(0i64);
-        g.bench_function(format!("stats/{label}/depth16"), |b| {
+        g.bench_function(format!("stats/{level}/depth16"), |b| {
             b.iter(|| {
                 for _ in 0..BATCH {
                     let t = ts.get();
@@ -225,6 +221,6 @@ criterion_group!(
     benches,
     bench_enqueue_only,
     bench_dispatch,
-    bench_timing_cost
+    bench_stats_cost
 );
 criterion_main!(benches);

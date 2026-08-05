@@ -66,7 +66,7 @@ Topology, threading and flow-control policy are configuration, not code:
 | `rate` | source pacing in Hz; the engine guarantees the interval, so the kernel needs no timing code |
 | `back_edges` | turn an input port into a latest-value register that is excluded from readiness, termination and alignment — this is what lets a topology contain a cycle |
 | `subgraphs` / `type` / `include` | reusable subgraphs, inlined at graph-build time |
-| `watchdog_ms`, `stats_timing`, `max_queued_*` | slow-callback warnings, per-callback timing, global watermarks |
+| `watchdog_ms`, `stats`, `max_queued_*` | slow-callback warnings, tiered runtime diagnostics, global watermarks |
 
 `Graph::reset()` puts a terminated graph back to a startable state while keeping already-opened
 kernel instances alive, so an expensive one-off such as loading a model is not repeated per run.

@@ -2,12 +2,13 @@ use std::collections::VecDeque;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+use crate::config::StatsLevel;
 use crate::graph::NodeId;
 
 use super::stats::{ExecutorStats, ExecutorStatsSnapshot};
 
 struct QueuedTask {
-    enqueued_at: Instant,
+    enqueued_at: Option<Instant>,
     node: NodeId,
 }
 
@@ -23,10 +24,14 @@ pub struct DelegatingExecutor {
 
 impl DelegatingExecutor {
     pub fn new(name: &str) -> Self {
+        Self::new_with_stats(name, StatsLevel::Full)
+    }
+
+    pub(crate) fn new_with_stats(name: &str, stats_level: StatsLevel) -> Self {
         Self {
             name: name.to_string(),
             queue: Mutex::new(VecDeque::new()),
-            stats: ExecutorStats::default(),
+            stats: ExecutorStats::new(stats_level),
         }
     }
 
@@ -38,7 +43,7 @@ impl DelegatingExecutor {
     pub fn submit(&self, node: NodeId) -> bool {
         let mut queue = self.queue.lock().unwrap_or_else(|error| error.into_inner());
         queue.push_back(QueuedTask {
-            enqueued_at: Instant::now(),
+            enqueued_at: self.stats.full().then(Instant::now),
             node,
         });
         self.stats.enqueued();
@@ -56,11 +61,12 @@ impl DelegatingExecutor {
     pub fn take(&self) -> Option<NodeId> {
         let mut queue = self.queue.lock().unwrap_or_else(|error| error.into_inner());
         let task = queue.pop_front()?;
-        self.stats.started(task.enqueued_at.elapsed());
+        self.stats
+            .started(task.enqueued_at.map(|enqueued_at| enqueued_at.elapsed()));
         Some(task.node)
     }
 
-    pub fn complete(&self, execution: Duration) {
+    pub fn complete(&self, execution: Option<Duration>) {
         self.stats.completed(execution);
     }
 

@@ -8,6 +8,7 @@
 use super::{
     latency_bucket_upper_us, DotView, GraphInner, InputPolicy, NodeStats, LATENCY_BUCKETS,
 };
+use crate::config::StatsLevel;
 use std::sync::atomic::Ordering;
 
 const NODE_LABEL_CHARS: usize = 24;
@@ -781,8 +782,9 @@ impl GraphInner {
                 },
             );
             out.push_str(&format!(
-                "  graph [labelloc=t, label=\"state {:?} · {} · {} · queued {}/{} packets\\n{}\\n{}\"];\n",
+                "  graph [labelloc=t, label=\"state {:?} · stats {} · {} · {} · queued {}/{} packets\\n{}\\n{}\"];\n",
                 self.state(),
+                self.stats_level.as_str(),
                 snapshot,
                 interval_label,
                 self.shared.total_queued(),
@@ -801,7 +803,7 @@ impl GraphInner {
         let mut layout_keys = vec![(0usize, 0usize); self.nodes.len()];
         let mut tree = Ns::default();
         // 热力图基准:全图最大平均延迟(0 则退化为不上色)。
-        let max_avg_us = if with_stats {
+        let max_avg_us = if with_stats && self.stats_level == StatsLevel::Full {
             self.nodes
                 .iter()
                 .enumerate()
@@ -940,9 +942,16 @@ impl GraphInner {
                         n.source_yield_count.load(Ordering::Relaxed),
                     ));
                 }
-                if diagnostics || processed > 0 || active_or_abnormal {
+                if self.stats_level != StatsLevel::Off
+                    && (diagnostics || processed > 0 || active_or_abnormal)
+                {
+                    let timing = if self.stats_level == StatsLevel::Full {
+                        format!(" · {} avg", duration_us_f64(avg))
+                    } else {
+                        " · timing n/a".to_string()
+                    };
                     extra.push_str(&format!(
-                        " · {} pkts (+{} · {}) · {} avg\\nin {} (+{}) / out {} (+{})",
+                        " · {} pkts (+{} · {}){}\\nin {} (+{}) / out {} (+{})",
                         processed,
                         delta.processed,
                         rate_per_second(
@@ -952,14 +961,14 @@ impl GraphInner {
                                 .expect("statistics interval exists")
                                 .elapsed_us,
                         ),
-                        duration_us_f64(avg),
+                        timing,
                         packets_in,
                         delta.packets_in,
                         packets_out,
                         delta.packets_out,
                     ));
                 }
-                if diagnostics {
+                if diagnostics && self.stats_level == StatsLevel::Full {
                     let histogram = if delta.latency_buckets.iter().any(|count| *count > 0) {
                         &delta.latency_buckets
                     } else {
@@ -994,7 +1003,9 @@ impl GraphInner {
                         ));
                     }
                 }
-                if diagnostics || peak_queue_depth > 0 || peak_bytes > 0 {
+                if self.stats_level != StatsLevel::Off
+                    && (diagnostics || peak_queue_depth > 0 || peak_bytes > 0)
+                {
                     extra.push_str(&format!(" · peakQ {} / {}B", peak_queue_depth, peak_bytes,));
                 }
                 if queued_bytes > 0 || block_events > 0 || blocked_ports > 0 {
@@ -1051,8 +1062,10 @@ impl GraphInner {
                         ));
                     }
                 }
-                // 按平均延迟上色:绿(快)→ 红(慢)。执行器配色让位给热力图。
-                fill = heat_color(avg, max_avg_us);
+                if self.stats_level == StatsLevel::Full {
+                    // 按平均延迟上色:绿(快)→ 红(慢)。执行器配色让位给热力图。
+                    fill = heat_color(avg, max_avg_us);
+                }
             }
             let pressure_path = with_stats
                 && analysis
@@ -1087,13 +1100,18 @@ impl GraphInner {
                 state_penwidth,
                 executor_group,
                 escape_dot(&format!(
-                    "{} ({}) on {}: state {}, processed {}, avg {}, in {}, out {}, errors {}, CoW {} copies / {}, hotspot rank {}, pressure path {}",
+                    "{} ({}) on {}: state {}, stats {}, processed {}, avg {}, in {}, out {}, errors {}, CoW {} copies / {}, hotspot rank {}, pressure path {}",
                     n.name,
                     n.kernel_name,
                     exec,
                     node_state.label(),
+                    self.stats_level.as_str(),
                     n.stats.processed.load(Ordering::Relaxed),
-                    duration_us_f64(avg_process_us(&n.stats)),
+                    if self.stats_level == StatsLevel::Full {
+                        duration_us_f64(avg_process_us(&n.stats))
+                    } else {
+                        "n/a".to_string()
+                    },
                     n.stats.packets_in.load(Ordering::Relaxed),
                     n.stats.packets_out.load(Ordering::Relaxed),
                     n.stats.errors.load(Ordering::Relaxed),
@@ -1312,7 +1330,7 @@ impl GraphInner {
                     } else {
                         "white"
                     };
-                    let runtime = if with_stats {
+                    let runtime = if with_stats && self.stats_level == StatsLevel::Full {
                         format!(
                             "\\nqueued {} · running {}/1 · peak {} · done {}\\nwait {} · exec {}{}{}",
                             stats.queued,
@@ -1326,6 +1344,13 @@ impl GraphInner {
                                 stats.queued_for_us,
                                 stats.queued,
                             ),
+                            executor_queue_nodes_label(&stats.queued_nodes),
+                        )
+                    } else if with_stats {
+                        format!(
+                            "\\nqueued {} · running {}/1 · detailed stats n/a{}",
+                            stats.queued,
+                            stats.running,
                             executor_queue_nodes_label(&stats.queued_nodes),
                         )
                     } else {
@@ -1372,7 +1397,7 @@ impl GraphInner {
                 } else {
                     COLORS[i % COLORS.len()]
                 };
-                let runtime = if with_stats {
+                let runtime = if with_stats && self.stats_level == StatsLevel::Full {
                     format!(
                         "\\nqueued {} · running {}/{} · peak {} · done {}\\nwait {} · exec {}{}{}",
                         stats.queued,
@@ -1383,6 +1408,14 @@ impl GraphInner {
                         duration_us(stats.total_wait_us),
                         duration_us(stats.total_execution_us),
                         executor_load_label(stats.saturated, stats.queued_for_us, stats.queued),
+                        executor_queue_nodes_label(&stats.queued_nodes),
+                    )
+                } else if with_stats {
+                    format!(
+                        "\\nqueued {} · running {}/{} · detailed stats n/a{}",
+                        stats.queued,
+                        stats.running,
+                        ex.num_threads(),
                         executor_queue_nodes_label(&stats.queued_nodes),
                     )
                 } else {

@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Instant;
 
-use crate::config::GraphConfig;
+use crate::config::{GraphConfig, StatsLevel};
 use crate::context::{Context, Options};
 use crate::executor::{DelegatingExecutor, Executor, ThreadPool, DEFAULT_EXECUTOR_NAME};
 use crate::kernel::{Contract, KernelInstance, PortTable};
@@ -32,6 +32,16 @@ use super::{
 
 impl GraphInner {
     pub(super) fn build(cfg: GraphConfig) -> Result<Self> {
+        let configured_stats = cfg.stats.unwrap_or_else(|| {
+            cfg.stats_timing.map_or(StatsLevel::Basic, |enabled| {
+                if enabled {
+                    StatsLevel::Full
+                } else {
+                    StatsLevel::Basic
+                }
+            })
+        });
+        let stats_level = cfg.effective_stats_level();
         let mut edges: Vec<Edge> = Vec::new();
         let mut edge_by_name: BTreeMap<String, EdgeId> = BTreeMap::new();
 
@@ -174,7 +184,7 @@ impl GraphInner {
         // 因此 `default` 是**保留名**,写了报错;否则图里会同时出现两个 `default`。
         // 节点侧 `executor` 留空即归默认执行器,归一化到同一个名字。于是默认执行器和
         // 其它执行器完全同构 —— 有名字、可索引、可提交任务,派任务时无需为它开特例。
-        let mut executors: Vec<Executor> = vec![Executor::Pool(default_thread_pool())];
+        let mut executors: Vec<Executor> = vec![Executor::Pool(default_thread_pool(stats_level))];
         for e in &cfg.executors {
             if e.name.is_empty() {
                 return Err(Error::InvalidArg(
@@ -195,7 +205,7 @@ impl GraphInner {
                     e.name
                 )));
             }
-            executors.push(build_executor(&e.name, e)?);
+            executors.push(build_executor(&e.name, e, stats_level)?);
         }
         let known: Vec<&str> = executors.iter().map(|p| p.name()).collect();
         for (idx, n) in cfg.nodes.iter().enumerate() {
@@ -352,16 +362,13 @@ impl GraphInner {
             }
         }
 
-        // 计时开关:watchdog 依赖单次耗时,故 `watchdog_ms > 0` 时**强制开启** ——
-        // 否则 watchdog 会静默失效,那正是本项目反复拒绝的失败模式。
-        let timing = shared.config.stats_timing || shared.config.watchdog_ms > 0;
-        if !shared.config.stats_timing && shared.config.watchdog_ms > 0 {
+        if configured_stats != StatsLevel::Full && shared.config.watchdog_ms > 0 {
             runtime::log_info(
-                "stats_timing=false is overridden to true because watchdog_ms > 0 (the watchdog needs per-call timing)",
+                "stats is overridden to full because watchdog_ms > 0 (the watchdog needs per-call timing)",
             );
-        } else if !timing {
+        } else if stats_level != StatsLevel::Full {
             runtime::log_info(
-                "stats_timing=false: per-call timing is off -- total_process_us / max_process_us / running_for_us stay 0, and the DOT latency heat map degenerates to one colour",
+                "stats is not full: per-call timing, latency percentiles, CoW copies, and executor timing are disabled",
             );
         }
 
@@ -390,7 +397,7 @@ impl GraphInner {
             epoch: Instant::now(),
             run_started_us: AtomicI64::new(0),
             dot_intervals: Mutex::new(super::dot::DotIntervalBaselines::default()),
-            timing,
+            stats_level,
         })
     }
 }
@@ -411,18 +418,22 @@ fn exec_name(n: &str) -> &str {
 ///
 /// 不绑核、不设实时优先级,也不可配 —— 那些是场景相关的调优,宿主想控制就自己声明一个
 /// 具名池(或具名 `DelegatingExecutor`),把节点用 `executor:` 指过去。
-fn default_thread_pool() -> ThreadPool {
+fn default_thread_pool(stats_level: StatsLevel) -> ThreadPool {
     let n = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(1);
-    ThreadPool::new(DEFAULT_EXECUTOR_NAME, n, Vec::new(), 0)
+    ThreadPool::new_with_stats(DEFAULT_EXECUTOR_NAME, n, Vec::new(), 0, stats_level)
 }
 
 /// 按 `type` 建一个执行器。空 `type` 视作 `ThreadPoolExecutor`(历史默认)。
 ///
 /// `DelegatingExecutor` 不拥有线程,故 `num_threads`/`affinity`/`priority` 对它没有意义 ——
 /// 写了就报错,不静默忽略(与「未知值明确拒掉」同规矩)。
-fn build_executor(name: &str, e: &crate::config::ExecutorConfig) -> Result<Executor> {
+fn build_executor(
+    name: &str,
+    e: &crate::config::ExecutorConfig,
+    stats_level: StatsLevel,
+) -> Result<Executor> {
     if e.r#type == "DelegatingExecutor" {
         for (field, set) in [
             ("num_threads", e.num_threads != 0),
@@ -437,13 +448,17 @@ fn build_executor(name: &str, e: &crate::config::ExecutorConfig) -> Result<Execu
                 )));
             }
         }
-        return Ok(Executor::Delegating(DelegatingExecutor::new(name)));
+        return Ok(Executor::Delegating(DelegatingExecutor::new_with_stats(
+            name,
+            stats_level,
+        )));
     }
-    Ok(Executor::Pool(ThreadPool::new(
+    Ok(Executor::Pool(ThreadPool::new_with_stats(
         name,
         e.num_threads,
         e.affinity.clone(),
         e.priority,
+        stats_level,
     )))
 }
 

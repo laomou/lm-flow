@@ -1,6 +1,8 @@
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
+use crate::config::StatsLevel;
+
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct ExecutorStatsSnapshot {
     pub queued: usize,
@@ -13,6 +15,7 @@ pub(crate) struct ExecutorStatsSnapshot {
 }
 
 pub(super) struct ExecutorStats {
+    full: bool,
     epoch: Instant,
     queued: AtomicUsize,
     running: AtomicUsize,
@@ -25,7 +28,14 @@ pub(super) struct ExecutorStats {
 
 impl Default for ExecutorStats {
     fn default() -> Self {
+        Self::new(StatsLevel::Full)
+    }
+}
+
+impl ExecutorStats {
+    pub(super) fn new(level: StatsLevel) -> Self {
         Self {
+            full: level == StatsLevel::Full,
             epoch: Instant::now(),
             queued: AtomicUsize::new(0),
             running: AtomicUsize::new(0),
@@ -36,11 +46,16 @@ impl Default for ExecutorStats {
             queued_since_us: AtomicU64::new(0),
         }
     }
-}
 
-impl ExecutorStats {
+    pub(super) fn full(&self) -> bool {
+        self.full
+    }
+
     pub(super) fn enqueued(&self) {
         let before = self.queued.fetch_add(1, Ordering::Relaxed);
+        if !self.full {
+            return;
+        }
         let queued = before + 1;
         if before == 0 {
             self.queued_since_us.store(
@@ -51,21 +66,28 @@ impl ExecutorStats {
         self.peak_queued.fetch_max(queued, Ordering::Relaxed);
     }
 
-    pub(super) fn started(&self, wait: Duration) {
+    pub(super) fn started(&self, wait: Option<Duration>) {
         let before = self.queued.fetch_sub(1, Ordering::Relaxed);
-        if before == 1 {
+        if self.full && before == 1 {
             self.queued_since_us.store(0, Ordering::Relaxed);
         }
         self.running.fetch_add(1, Ordering::Relaxed);
-        self.total_wait_us
-            .fetch_add(duration_micros(wait), Ordering::Relaxed);
+        if let Some(wait) = wait {
+            self.total_wait_us
+                .fetch_add(duration_micros(wait), Ordering::Relaxed);
+        }
     }
 
-    pub(super) fn completed(&self, execution: Duration) {
+    pub(super) fn completed(&self, execution: Option<Duration>) {
         self.running.fetch_sub(1, Ordering::Relaxed);
+        if !self.full {
+            return;
+        }
         self.completed.fetch_add(1, Ordering::Relaxed);
-        self.total_execution_us
-            .fetch_add(duration_micros(execution), Ordering::Relaxed);
+        if let Some(execution) = execution {
+            self.total_execution_us
+                .fetch_add(duration_micros(execution), Ordering::Relaxed);
+        }
     }
 
     pub(super) fn dropped(&self, count: usize) {
@@ -75,7 +97,7 @@ impl ExecutorStats {
                 Some(queued.saturating_sub(count))
             })
             .unwrap_or_else(|queued| queued);
-        if before <= count {
+        if self.full && before <= count {
             self.queued_since_us.store(0, Ordering::Relaxed);
         }
     }
@@ -89,7 +111,7 @@ impl ExecutorStats {
             completed: self.completed.load(Ordering::Relaxed),
             total_wait_us: self.total_wait_us.load(Ordering::Relaxed),
             total_execution_us: self.total_execution_us.load(Ordering::Relaxed),
-            queued_for_us: if queued_since == 0 {
+            queued_for_us: if !self.full || queued_since == 0 {
                 0
             } else {
                 duration_micros(self.epoch.elapsed()).saturating_sub(queued_since.saturating_sub(1))

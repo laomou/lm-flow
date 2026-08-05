@@ -565,10 +565,12 @@ impl GraphInner {
         input_ts: Timestamp,
     ) {
         if !packets.is_empty() {
-            self.nodes[n]
-                .stats
-                .packets_out
-                .fetch_add(packets.len() as u64, Ordering::Relaxed);
+            if self.basic_stats() {
+                self.nodes[n]
+                    .stats
+                    .packets_out
+                    .fetch_add(packets.len() as u64, Ordering::Relaxed);
+            }
             self.dispatch(edge, packets);
             self.schedule_consumers(edge);
             return;
