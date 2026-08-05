@@ -5,7 +5,9 @@
 //! 与 `mod.rs` 里的并发核心放在一起只会让后者更难审。本模块是 `graph` 的子模块,
 //! 故仍可访问 `Node` / `GraphInner` 的私有字段。
 
-use super::{DotView, GraphInner, InputPolicy, NodeStats};
+use super::{
+    latency_bucket_upper_us, DotView, GraphInner, InputPolicy, NodeStats, LATENCY_BUCKETS,
+};
 use std::sync::atomic::Ordering;
 
 const NODE_LABEL_CHARS: usize = 24;
@@ -21,6 +23,9 @@ struct DotNodeCounters {
     total_us: i64,
     packets_in: u64,
     packets_out: u64,
+    latency_buckets: [u64; LATENCY_BUCKETS],
+    cow_copies: u64,
+    cow_bytes: u64,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -63,6 +68,11 @@ impl DotInterval {
             total_us: current.total_us.saturating_sub(previous.total_us),
             packets_in: current.packets_in.saturating_sub(previous.packets_in),
             packets_out: current.packets_out.saturating_sub(previous.packets_out),
+            latency_buckets: std::array::from_fn(|bucket| {
+                current.latency_buckets[bucket].saturating_sub(previous.latency_buckets[bucket])
+            }),
+            cow_copies: current.cow_copies.saturating_sub(previous.cow_copies),
+            cow_bytes: current.cow_bytes.saturating_sub(previous.cow_bytes),
         }
     }
 
@@ -255,6 +265,34 @@ fn executor_load_label(saturated: bool, queued_for_us: u64, queued: usize) -> St
 
 fn duration_us_f64(value: f64) -> String {
     duration_us(value.max(0.0).round().min(u64::MAX as f64) as u64)
+}
+
+fn latency_percentile_us(buckets: &[u64; LATENCY_BUCKETS], percentile: u64) -> Option<u64> {
+    let total = buckets.iter().copied().sum::<u64>();
+    if total == 0 {
+        return None;
+    }
+    let target = total.saturating_mul(percentile).div_ceil(100).max(1);
+    let mut cumulative = 0u64;
+    for (bucket, count) in buckets.iter().copied().enumerate() {
+        cumulative = cumulative.saturating_add(count);
+        if cumulative >= target {
+            return Some(latency_bucket_upper_us(bucket));
+        }
+    }
+    Some(latency_bucket_upper_us(LATENCY_BUCKETS - 1))
+}
+
+fn byte_size(value: u64) -> String {
+    if value < 1024 {
+        format!("{value}B")
+    } else if value < 1024 * 1024 {
+        format!("{:.1}KiB", value as f64 / 1024.0)
+    } else if value < 1024 * 1024 * 1024 {
+        format!("{:.1}MiB", value as f64 / (1024.0 * 1024.0))
+    } else {
+        format!("{:.2}GiB", value as f64 / (1024.0 * 1024.0 * 1024.0))
+    }
 }
 
 fn rate_per_second(count: u64, elapsed_us: u64) -> String {
@@ -463,6 +501,11 @@ impl GraphInner {
                 total_us: node.stats.total_us.load(Ordering::Relaxed),
                 packets_in: node.stats.packets_in.load(Ordering::Relaxed),
                 packets_out: node.stats.packets_out.load(Ordering::Relaxed),
+                latency_buckets: std::array::from_fn(|bucket| {
+                    node.stats.latency_buckets[bucket].load(Ordering::Relaxed)
+                }),
+                cow_copies: node.stats.cow_copies.load(Ordering::Relaxed),
+                cow_bytes: node.stats.cow_bytes.load(Ordering::Relaxed),
             })
             .collect();
         let ports = self
@@ -916,6 +959,41 @@ impl GraphInner {
                         delta.packets_out,
                     ));
                 }
+                if diagnostics {
+                    let histogram = if delta.latency_buckets.iter().any(|count| *count > 0) {
+                        &delta.latency_buckets
+                    } else {
+                        &interval
+                            .as_ref()
+                            .expect("statistics interval exists")
+                            .current
+                            .nodes[i]
+                            .latency_buckets
+                    };
+                    if let (Some(p50), Some(p95), Some(p99)) = (
+                        latency_percentile_us(histogram, 50),
+                        latency_percentile_us(histogram, 95),
+                        latency_percentile_us(histogram, 99),
+                    ) {
+                        extra.push_str(&format!(
+                            "\\nlat p50 {} · p95 {} · p99 {}",
+                            duration_us(p50),
+                            duration_us(p95),
+                            duration_us(p99),
+                        ));
+                    }
+                    let cow_copies = st.cow_copies.load(Ordering::Relaxed);
+                    let cow_bytes = st.cow_bytes.load(Ordering::Relaxed);
+                    if cow_copies > 0 {
+                        extra.push_str(&format!(
+                            "\\nCoW {}× / {} (+{}× / {})",
+                            cow_copies,
+                            byte_size(cow_bytes),
+                            delta.cow_copies,
+                            byte_size(delta.cow_bytes),
+                        ));
+                    }
+                }
                 if diagnostics || peak_queue_depth > 0 || peak_bytes > 0 {
                     extra.push_str(&format!(" · peakQ {} / {}B", peak_queue_depth, peak_bytes,));
                 }
@@ -1009,7 +1087,7 @@ impl GraphInner {
                 state_penwidth,
                 executor_group,
                 escape_dot(&format!(
-                    "{} ({}) on {}: state {}, processed {}, avg {}, in {}, out {}, errors {}, hotspot rank {}, pressure path {}",
+                    "{} ({}) on {}: state {}, processed {}, avg {}, in {}, out {}, errors {}, CoW {} copies / {}, hotspot rank {}, pressure path {}",
                     n.name,
                     n.kernel_name,
                     exec,
@@ -1019,6 +1097,8 @@ impl GraphInner {
                     n.stats.packets_in.load(Ordering::Relaxed),
                     n.stats.packets_out.load(Ordering::Relaxed),
                     n.stats.errors.load(Ordering::Relaxed),
+                    n.stats.cow_copies.load(Ordering::Relaxed),
+                    byte_size(n.stats.cow_bytes.load(Ordering::Relaxed)),
                     analysis
                         .as_ref()
                         .and_then(|analysis| analysis.node_ranks[i])
@@ -1375,6 +1455,9 @@ impl GraphInner {
             out.push_str(
                 "    legend_executor_hot [shape=box, style=filled, fillcolor=\"#ffd6d6\", color=\"#d62728\", penwidth=2, label=\"EXECUTOR SATURATED\\nred >1s queued · orange shorter\"];\n",
             );
+            out.push_str(
+                "    legend_latency_cow [shape=box, style=filled, fillcolor=white, color=\"#555555\", label=\"lat p50/p95/p99\\nwindowed process latency\\nCoW copies / bytes\\nactual payload duplication\"];\n",
+            );
             out.push_str("  }\n");
         }
 
@@ -1522,5 +1605,22 @@ impl GraphInner {
                 .filter(|&port| is_empty_open(port))
                 .collect(),
         }
+    }
+}
+
+#[cfg(test)]
+mod percentile_tests {
+    use super::*;
+
+    #[test]
+    fn percentile_uses_histogram_upper_bounds() {
+        let mut buckets = [0u64; LATENCY_BUCKETS];
+        buckets[0] = 5;
+        buckets[3] = 4;
+        buckets[10] = 1;
+        assert_eq!(latency_percentile_us(&buckets, 50), Some(1));
+        assert_eq!(latency_percentile_us(&buckets, 95), Some(1024));
+        assert_eq!(latency_percentile_us(&buckets, 99), Some(1024));
+        assert_eq!(latency_percentile_us(&[0; LATENCY_BUCKETS], 99), None);
     }
 }

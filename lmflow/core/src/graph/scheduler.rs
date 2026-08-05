@@ -949,6 +949,7 @@ impl GraphInner {
     /// 并记录耗时以便定位卡死。可被并发调用(不同槽),故 `process` 必须可重入。
     pub(super) fn call_kernel(&self, n: NodeId, slot: usize, phase: KernelPhase) -> i32 {
         let node = &self.nodes[n];
+        crate::packet::begin_cow_copy_scope();
         // 直接交出 UnsafeCell 内部指针:不构造 Rust 引用,故与回调内
         // 从该指针造出的 `&mut Context` 不冲突(该槽此刻由本调用独占持有)。
         let ctx_ptr = node.ctxs[slot].get() as *mut c_void;
@@ -983,6 +984,13 @@ impl GraphInner {
                 KernelPhase::Close => node.kernel.close(ctx_ptr),
             }
         };
+        let cow = crate::packet::end_cow_copy_scope();
+        if matches!(phase, KernelPhase::Process) {
+            node.stats
+                .cow_copies
+                .fetch_add(cow.copies, Ordering::Relaxed);
+            node.stats.cow_bytes.fetch_add(cow.bytes, Ordering::Relaxed);
+        }
 
         // 归零时**不清** started_us:读侧按 in_flight > 0 判断是否在跑,
         // 故无需清零,也就不存在「清零」与「新一次开始」互相覆盖的竞争。
@@ -992,6 +1000,7 @@ impl GraphInner {
         if matches!(phase, KernelPhase::Process) {
             node.stats.total_us.fetch_add(us, Ordering::Relaxed);
             node.stats.max_us.fetch_max(us, Ordering::Relaxed);
+            node.stats.record_latency(us.max(0) as u64);
         }
         let wd = self.shared.config.watchdog_ms;
         if wd > 0 && us as u64 > wd * 1000 {

@@ -1,5 +1,20 @@
 use super::*;
 
+pub(super) const LATENCY_BUCKETS: usize = 32;
+
+pub(super) fn latency_bucket_upper_us(bucket: usize) -> u64 {
+    1u64 << bucket.min(LATENCY_BUCKETS - 1)
+}
+
+fn latency_bucket(us: u64) -> usize {
+    if us <= 1 {
+        0
+    } else {
+        (u64::BITS - (us - 1).leading_zeros()) as usize
+    }
+    .min(LATENCY_BUCKETS - 1)
+}
+
 /// 输入策略(节点级可插拔,见 docs/design.md §7.10)。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InputPolicy {
@@ -257,12 +272,15 @@ impl NodeSched {
 ///
 /// 计数器用 `Relaxed`:它们不参与任何 happens-before 推理,只被读侧当快照看。
 /// `max_in_flight > 1` 时同一节点会被多个工作线程并发更新,故必须是多写者安全的。
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(super) struct NodeStats {
     pub(super) processed: AtomicU64,
     pub(super) errors: AtomicU64,
     pub(super) total_us: AtomicI64,
     pub(super) max_us: AtomicI64,
+    pub(super) latency_buckets: [AtomicU64; LATENCY_BUCKETS],
+    pub(super) cow_copies: AtomicU64,
+    pub(super) cow_bytes: AtomicU64,
     /// 本节点从输入口取走的包数(在 `try_claim` 弹包处累加)
     pub(super) packets_in: AtomicU64,
     /// 本节点产出并派发下游的包数(在 `flush_staging` 派发处累加)
@@ -277,7 +295,30 @@ pub(super) struct NodeStats {
     pub(super) started_us: AtomicI64,
 }
 
+impl Default for NodeStats {
+    fn default() -> Self {
+        Self {
+            processed: AtomicU64::new(0),
+            errors: AtomicU64::new(0),
+            total_us: AtomicI64::new(0),
+            max_us: AtomicI64::new(0),
+            latency_buckets: std::array::from_fn(|_| AtomicU64::new(0)),
+            cow_copies: AtomicU64::new(0),
+            cow_bytes: AtomicU64::new(0),
+            packets_in: AtomicU64::new(0),
+            packets_out: AtomicU64::new(0),
+            peak_queue_depth: AtomicUsize::new(0),
+            in_flight: AtomicUsize::new(0),
+            started_us: AtomicI64::new(0),
+        }
+    }
+}
+
 impl NodeStats {
+    pub(super) fn record_latency(&self, us: u64) {
+        self.latency_buckets[latency_bucket(us)].fetch_add(1, Ordering::Relaxed);
+    }
+
     /// 全字段清零,供图 reset 重跑用。仅在图静止时调用(无并发),但字段是内嵌原子,
     /// 故用 `&self` 逐个 store 即可(不需要 `&mut`)。
     pub(super) fn reset(&self) {
@@ -285,6 +326,11 @@ impl NodeStats {
         self.errors.store(0, Ordering::Relaxed);
         self.total_us.store(0, Ordering::Relaxed);
         self.max_us.store(0, Ordering::Relaxed);
+        for bucket in &self.latency_buckets {
+            bucket.store(0, Ordering::Relaxed);
+        }
+        self.cow_copies.store(0, Ordering::Relaxed);
+        self.cow_bytes.store(0, Ordering::Relaxed);
         self.packets_in.store(0, Ordering::Relaxed);
         self.packets_out.store(0, Ordering::Relaxed);
         self.peak_queue_depth.store(0, Ordering::Relaxed);

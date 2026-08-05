@@ -10,12 +10,42 @@
 //! `Foreign` 只有 `drop_fn`、无从复制;`Native` 是类型擦除的 `Box<dyn Any>`,同理。
 
 use std::any::Any;
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::ffi::{c_void, CString};
 use std::sync::Arc;
 
 use crate::status::{Error, Result};
 use crate::timestamp::Timestamp;
+
+#[derive(Clone, Copy, Default)]
+pub(crate) struct CowCopyCounters {
+    pub copies: u64,
+    pub bytes: u64,
+}
+
+thread_local! {
+    static COW_COPY_SCOPES: RefCell<Vec<CowCopyCounters>> = const { RefCell::new(Vec::new()) };
+}
+
+pub(crate) fn begin_cow_copy_scope() {
+    COW_COPY_SCOPES.with(|scopes| scopes.borrow_mut().push(CowCopyCounters::default()));
+}
+
+pub(crate) fn end_cow_copy_scope() -> CowCopyCounters {
+    COW_COPY_SCOPES.with(|scopes| scopes.borrow_mut().pop().unwrap_or_default())
+}
+
+fn record_cow_copy(bytes: u64) {
+    COW_COPY_SCOPES.with(|scopes| {
+        let mut scopes = scopes.borrow_mut();
+        let Some(counters) = scopes.last_mut() else {
+            return;
+        };
+        counters.copies = counters.copies.saturating_add(1);
+        counters.bytes = counters.bytes.saturating_add(bytes);
+    });
+}
 
 /// 内建类型标识,与 `include/flow.h` 的 `LMFLOW_TYPE_*` 一致。0..15 为内建保留。
 pub mod type_id {
@@ -662,7 +692,10 @@ impl Packet {
         if Arc::get_mut(arc).is_none() {
             // 被共享:只有内建 payload 能复制
             let copy = match &**arc {
-                Payload::Builtin(b) => Payload::Builtin(b.clone()),
+                Payload::Builtin(b) => {
+                    record_cow_copy(b.byte_size());
+                    Payload::Builtin(b.clone())
+                }
                 _ => {
                     return Err(Error::InvalidArg(
                         "custom payload cannot be copied by the engine (only builtin types support CoW)".into(),
