@@ -241,10 +241,8 @@ nodes:
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {
         let dot = graph.to_dot_with_stats();
-        if dot.contains("WAITING_SOURCE") {
-            assert!(dot.contains("source_yield"), "{dot}");
-            assert!(dot.contains("remaining"), "{dot}");
-            assert!(dot.contains("yield 1×"), "{dot}");
+        if dot.contains("WAITING_SOURCE ·") && dot.contains("remaining · source_yield\\nyield 1×")
+        {
             assert!(
                 dot.contains("legend_state_waiting_source"),
                 "state legend should explain WAITING_SOURCE:\n{dot}"
@@ -284,8 +282,7 @@ output_ports: [out]
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {
         let dot = graph.to_dot_with_stats();
-        if dot.contains("WAITING_SOURCE") {
-            assert!(dot.contains("· rate\\nyield 0×"), "{dot}");
+        if dot.contains("WAITING_SOURCE ·") && dot.contains("remaining · rate\\nyield 0×") {
             assert!(!dot.contains("rate + source_yield"), "{dot}");
             break;
         }
