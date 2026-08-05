@@ -345,7 +345,7 @@ impl GraphInner {
         loop {
             // 先把能自己干的干完
             while self.pump_step() {}
-            if self.all_nodes_closed() {
+            if self.all_nodes_closed() && self.workers_idle() {
                 break;
             }
             // 在判断是否空闲**之前**捕获活动代数,再据此等待 —— 否则会丢唤醒。
