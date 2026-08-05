@@ -72,6 +72,7 @@ from __future__ import annotations
 import os
 import sys
 import asyncio
+import warnings
 from typing import Any, Callable, Iterator, Sequence
 
 try:
@@ -409,7 +410,7 @@ class Graph:
         """
         return bool(self._g.pump_step())
 
-    async def run_async(self, *, cancel_grace: float = 1.0) -> None:
+    async def run_async(self, *, cancel_grace: float = 0.0) -> None:
         """Run the graph without blocking the current asyncio event loop.
 
         If the graph is initialized, this method starts it. Engine threads signal the loop through
@@ -420,7 +421,9 @@ class Graph:
         :meth:`Context.source_done`, or call :meth:`cancel`. Cancelling the asyncio task cancels the
         graph and gives it up to ``cancel_grace`` seconds to terminate before re-raising
         :class:`asyncio.CancelledError`. A second cancellation abandons that graceful wait
-        immediately; :meth:`close` remains the final synchronous cleanup fallback.
+        immediately. The default ``0.0`` re-raises without waiting; pass a positive grace when
+        termination before :meth:`reset` matters. :meth:`close` remains the final synchronous
+        cleanup fallback.
         """
         if cancel_grace < 0:
             raise ValueError("cancel_grace must be non-negative")
@@ -460,8 +463,6 @@ class Graph:
             self.cancel()
             current = asyncio.current_task()
             uncancel = getattr(current, "uncancel", None)
-            if uncancel is not None:
-                uncancel()
             cleanup_coro = drive_until_terminated()
             try:
                 cleanup = asyncio.create_task(cleanup_coro)
@@ -470,7 +471,21 @@ class Graph:
                 raise cancelled
             try:
                 await asyncio.wait_for(asyncio.shield(cleanup), timeout=cancel_grace)
-            except (asyncio.TimeoutError, asyncio.CancelledError):
+            except asyncio.TimeoutError:
+                warnings.warn(
+                    "run_async cancellation grace expired before the graph terminated; "
+                    "Graph.close() will complete synchronous cleanup",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+                cleanup.cancel()
+                try:
+                    await cleanup
+                except asyncio.CancelledError:
+                    pass
+            except asyncio.CancelledError:
+                if uncancel is not None:
+                    uncancel()
                 cleanup.cancel()
                 try:
                     await cleanup

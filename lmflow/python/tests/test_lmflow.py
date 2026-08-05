@@ -340,6 +340,8 @@ output_ports: [out]
                     run.cancel()
                     with self.assertRaises(asyncio.CancelledError):
                         await asyncio.wait_for(run, timeout=0.2)
+                    if hasattr(run, "cancelling"):
+                        self.assertEqual(run.cancelling(), 1)
                     self.assertNotEqual(g.state, lmflow.GraphState.TERMINATED)
                 finally:
                     CANCEL_RELEASE.set()
@@ -367,8 +369,11 @@ output_ports: [out]
                     self.assertTrue(await asyncio.to_thread(CANCEL_STARTED.wait, 1.0))
                     started = time.monotonic()
                     run.cancel()
-                    with self.assertRaises(asyncio.CancelledError):
-                        await asyncio.wait_for(run, timeout=0.2)
+                    with self.assertWarnsRegex(RuntimeWarning, "grace expired"):
+                        with self.assertRaises(asyncio.CancelledError):
+                            await asyncio.wait_for(run, timeout=0.2)
+                    if hasattr(run, "cancelling"):
+                        self.assertEqual(run.cancelling(), 1)
                     self.assertLess(time.monotonic() - started, 0.2)
                     self.assertNotEqual(g.state, lmflow.GraphState.TERMINATED)
                 finally:
@@ -386,7 +391,7 @@ nodes:
 output_ports: [out]
 """
             ) as g:
-                run = asyncio.create_task(g.run_async())
+                run = asyncio.create_task(g.run_async(cancel_grace=1.0))
                 await asyncio.sleep(0)
                 with mock.patch("asyncio.create_task", side_effect=RuntimeError("loop closed")):
                     run.cancel()
@@ -407,13 +412,44 @@ input_ports: [in]
 output_ports: [out]
 """
             ) as g:
-                run = asyncio.create_task(g.run_async())
+                run = asyncio.create_task(g.run_async(cancel_grace=1.0))
                 await asyncio.sleep(0)
                 g.input("in").send(21, ts=0)
                 run.cancel()
                 with self.assertRaises(asyncio.CancelledError):
                     await run
                 self.assertEqual(g.state, lmflow.GraphState.TERMINATED)
+
+        asyncio.run(scenario())
+
+    def test_run_async_cancellation_does_not_wait_by_default(self):
+        async def scenario():
+            with graph(
+                """
+executors:
+  - { name: cpu, type: ThreadPoolExecutor, num_threads: 1 }
+nodes:
+  - { name: slow, kernel: TCancelSlow, executor: cpu, input_ports: [in], output_ports: [out] }
+input_ports: [in]
+output_ports: [out]
+"""
+            ) as g:
+                CANCEL_STARTED.clear()
+                CANCEL_RELEASE.clear()
+                try:
+                    run = asyncio.create_task(g.run_async())
+                    await asyncio.sleep(0)
+                    g.input("in").send(1, ts=0)
+                    self.assertTrue(await asyncio.to_thread(CANCEL_STARTED.wait, 1.0))
+                    started = time.monotonic()
+                    run.cancel()
+                    with self.assertWarnsRegex(RuntimeWarning, "grace expired"):
+                        with self.assertRaises(asyncio.CancelledError):
+                            await asyncio.wait_for(run, timeout=0.2)
+                    self.assertLess(time.monotonic() - started, 0.2)
+                    self.assertNotEqual(g.state, lmflow.GraphState.TERMINATED)
+                finally:
+                    CANCEL_RELEASE.set()
 
         asyncio.run(scenario())
 
