@@ -190,20 +190,19 @@ jobs:
         # (Ninja Multi-Config / Visual Studio)的配置是**构建期**由 `--config` 定的。
         # 曾经的写法在配置期读该变量,于是 `--config Release` 会静默建出 dev profile 的引擎、
         # 链进 Release 宿主而**不报任何错**(实测输出 "Finished `dev` profile [unoptimized]")。
-        # 只做配置期 + 干跑检查,不真编译,秒级。
+        # 直接检查生成器按配置写出的命令,不真编译,秒级。
         run: |
           cmake -B build-mc -G "Ninja Multi-Config" > /dev/null
           for cfg in Release RelWithDebInfo; do
-            cmake --build build-mc --config "$cfg" --target flow_engine -- -n \
-              | grep -q 'release profile' \
+            grep -q 'cargo build --release' "build-mc/CMakeFiles/impl-${cfg}.ninja" \
               || { echo "$cfg 下 cargo 没走 release profile"; exit 1; }
           done
-          cmake --build build-mc --config Debug --target flow_engine -- -n \
-            | grep -q 'dev profile' \
+          grep -q 'cargo build$' build-mc/CMakeFiles/impl-Debug.ninja \
             || { echo "Debug 下 cargo 没走 dev profile"; exit 1; }
-          # 上面查的是给人看的 COMMENT;真实传给 cargo 的 flag 也必须在场。
-          grep -rq -- 'cargo build --release' build-mc/CMakeFiles/ \
-            || { echo "生成的构建文件里找不到带 --release 的 cargo 调用"; exit 1; }
+          if grep -q 'cargo build --release' build-mc/CMakeFiles/impl-Debug.ninja; then
+            echo "Debug 下 cargo 错误地带了 --release"
+            exit 1
+          fi
           echo "多配置生成器下 cargo profile 与 --config 一致"
   # ================================ safety (memory / concurrency) ================================
 
