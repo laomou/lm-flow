@@ -1,5 +1,7 @@
-// Graph start, shutdown, reset, and wait state machine.
+use super::scheduler::KernelPhase;
+use super::*;
 
+// Graph start, shutdown, reset, and wait state machine.
 
 impl Graph {
     pub fn start(&self) -> Result<()> {
@@ -20,15 +22,14 @@ impl Graph {
 }
 
 impl GraphInner {
-
     /// 一次调用完成后:尽力再填满容量(并行调度多个 in-flight),并尝试关闭。
-    fn finish(&self, n: NodeId) {
+    pub(super) fn finish(&self, n: NodeId) {
         self.schedule_node(n);
         self.maybe_close(n);
     }
 
     /// 关流推进:所有输入已关且排空 → close 算子 → 关自己的输出边 → 递归下游。
-    fn maybe_close(&self, n: NodeId) -> bool {
+    pub(super) fn maybe_close(&self, n: NodeId) -> bool {
         let node = &self.nodes[n];
         let force = self.shared.has_error() || self.shared.is_cancelled();
 
@@ -92,7 +93,7 @@ impl GraphInner {
         true
     }
 
-    fn close_edge(&self, edge: EdgeId) {
+    pub(super) fn close_edge(&self, edge: EdgeId) {
         let e = &self.edges[edge];
         if e.closed.swap(true, Ordering::SeqCst) {
             return; // 已关
@@ -110,7 +111,7 @@ impl GraphInner {
         }
     }
 
-    fn set_state_draining_if_all_inputs_closed(&self) {
+    pub(super) fn set_state_draining_if_all_inputs_closed(&self) {
         let all = self.graph_inputs.iter().all(|&e| self.edges[e].is_closed());
         if all {
             let mut st = self.state.lock().expect("state lock poisoned");
@@ -121,7 +122,7 @@ impl GraphInner {
     }
 
     /// 尝试推进任一节点的关流;返回是否有进展。
-    fn try_advance_closing(&self) -> bool {
+    pub(super) fn try_advance_closing(&self) -> bool {
         let mut progressed = false;
         for n in 0..self.nodes.len() {
             if self.maybe_close(n) {
@@ -134,7 +135,7 @@ impl GraphInner {
         progressed
     }
 
-    fn all_nodes_closed(&self) -> bool {
+    pub(super) fn all_nodes_closed(&self) -> bool {
         self.nodes
             .iter()
             .all(|n| n.sched.lock().expect("scheduler lock poisoned").closed)
@@ -142,7 +143,10 @@ impl GraphInner {
 
     /// 距 deadline 还剩多久;`None` 表示已超时。无 deadline 时返回一个固定的
     /// 轮询上限,以免因通知丢失而永久挂住。
-    fn remaining(&self, deadline: Option<std::time::Instant>) -> Option<std::time::Duration> {
+    pub(super) fn remaining(
+        &self,
+        deadline: Option<std::time::Instant>,
+    ) -> Option<std::time::Duration> {
         const POLL_CAP: std::time::Duration = std::time::Duration::from_millis(50);
         match deadline {
             None => Some(POLL_CAP),
@@ -156,7 +160,7 @@ impl GraphInner {
             }
         }
     }
-    fn start(self: &Arc<Self>) -> Result<()> {
+    pub(super) fn start(self: &Arc<Self>) -> Result<()> {
         let st = self.state();
         if st != State::Initialized {
             return Err(Error::State(format!(
@@ -232,7 +236,7 @@ impl GraphInner {
     ///
     /// **不碰线程池**:worker 随图存活、此刻都 park 在 condvar 上、`stop` 仍为 false,
     /// 下一轮 `start` 直接复用(见 executor.rs 模块头);shutdown+join 只发生在 Drop。
-    fn reset(&self) -> Result<()> {
+    pub(super) fn reset(&self) -> Result<()> {
         // 1. 校验静止。in_flight==0 且 main_queue 空 ⇒ 没有 worker 在 run_node 中途,
         //    故下面所有「无并发」的复位都成立(与 Drop / start 用同一条静止依据)。
         {
@@ -336,7 +340,7 @@ impl GraphInner {
     ///
     /// 期间会**借用宿主线程**执行主线程任务(默认执行器,§7.9),
     /// 同时等待线程池里的任务完成。
-    fn wait_done(&self, deadline: Option<std::time::Instant>) -> Result<()> {
+    pub(super) fn wait_done(&self, deadline: Option<std::time::Instant>) -> Result<()> {
         loop {
             // 先把能自己干的干完
             while self.pump_step() {}
@@ -428,7 +432,7 @@ impl GraphInner {
     }
 
     /// 等到在途任务都处理完(但不结束图)。
-    fn wait_until_idle(&self, deadline: Option<std::time::Instant>) -> Result<()> {
+    pub(super) fn wait_until_idle(&self, deadline: Option<std::time::Instant>) -> Result<()> {
         loop {
             while self.run_one_main_task() {}
             self.resume_blocked_flushes();
@@ -466,7 +470,6 @@ impl GraphInner {
             None => Ok(()),
         }
     }
-
 }
 
 impl Drop for GraphInner {
@@ -507,4 +510,3 @@ impl Drop for GraphInner {
         }
     }
 }
-

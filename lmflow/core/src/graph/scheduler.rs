@@ -1,452 +1,16 @@
-//! The graph: topology, validation, execution and stream shutdown.
-//!
-//! Structurally this is an **index arena**: entities live in `Vec`s and refer to each other by
-//! `usize` id (see `docs/design.md` §6.1), which avoids a graph of self-referential pointers.
-//!
-//! Queues belong to a **consumer's input port**, not to an edge: one edge may feed several
-//! consumers and each of them must receive every packet, so a shared queue would make them steal
-//! packets from one another. An edge therefore only carries topology and closed-state, and packets
-//! are dispatched per consumer — cloning a reference, never the payload.
+//! Node claiming, dispatch, execution, and ordered output flushing.
 
-use std::cell::UnsafeCell;
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::ffi::c_void;
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
-use std::time::Instant;
-
-use crate::config::GraphConfig;
-use crate::context::Context;
-use crate::executor::ThreadPool;
-use crate::kernel::{KernelInstance, PortTable};
-use crate::packet::Packet;
-use crate::runtime::{self, GraphShared};
-use crate::status::{Error, Result};
-use crate::timestamp::Timestamp;
-
-#[path = "build.rs"]
-mod build;
-#[path = "dot.rs"]
-mod dot;
-#[path = "introspect.rs"]
-mod introspect;
-#[path = "poller.rs"]
-mod poller;
-
-use poller::PollerInner;
-pub use poller::{Poller, PollerBackpressureStatsSnapshot, PollerOptions, PollerOverflow};
-
-pub type NodeId = usize;
-pub type EdgeId = usize;
-
-include!("node.rs");
-
-// ---------------------------------------------------------------- 图
-
-/// 「有进展」的通知状态:活动代数 + **当前阻塞在 condvar 上的宿主线程数**。
-///
-/// `waiters` 与 `gen` 同锁保护,这是能安全跳过 `notify_all` 的依据:notifier 在持锁时
-/// 读到 `waiters == 0`,则任何「正要等待」的线程此刻都还没拿到这把锁 —— 它随后会看到
-/// 递增后的 `gen`(≠ 它捕获的 `before`)从而根本不进入等待。故**不会丢唤醒**。
-///
-/// 为什么值得为此加一个计数:`notify_activity` 在 `dispatch` 里是**每包每条边**调一次,
-/// 而 `Condvar::notify_all` 即使没有任何等待者也会走一次 futex 系统调用
-/// (本机实测约 372 ns,与 `getpid()` 的 329 ns 同量级 —— 该机器系统调用被放大约 5 倍,
-/// 裸机约 60~80 ns)。没人在等的时候这纯属白付。
-#[derive(Debug, Default)]
-struct Activity {
-    gen: u64,
-    waiters: usize,
-}
-
-pub struct GraphInner {
-    pub shared: Arc<GraphShared>,
-    nodes: Vec<Node>,
-    edges: Vec<Edge>,
-    graph_inputs: Vec<EdgeId>,
-    graph_outputs: Vec<EdgeId>,
-    input_by_name: BTreeMap<String, EdgeId>,
-    output_by_name: BTreeMap<String, EdgeId>,
-    edge_by_name: BTreeMap<String, EdgeId>,
-    state: Mutex<State>,
-    /// 主线程执行器的任务队列(默认执行器,见 ADR #16)
-    main_queue: Mutex<VecDeque<NodeId>>,
-    /// 命名线程池,按 YAML 的 executors 顺序
-    executors: Vec<ThreadPool>,
-    /// 已投递到线程池、尚未跑完的任务数。用于「是否空闲」与终止判定。
-    in_flight: AtomicUsize,
-    /// 有任何进展时唤醒阻塞中的宿主线程(取到输出、节点关闭、出错、主线程任务入队)
-    activity: (Mutex<Activity>, Condvar),
-    /// 暂停调度(调试/限速)。已在执行的算子不受影响。
-    paused: AtomicBool,
-    /// 因下游无损输入队列已满而保留 staging 的节点。下游每次出队后重试这些刷新。
-    blocked_flush_nodes: Mutex<BTreeSet<NodeId>>,
-    side_packets: Mutex<BTreeMap<String, Packet>>,
-    /// 各算子在 GetContract 里声明的必需 side packet:(名字, 声明它的节点)
-    required_side_packets: Vec<(String, String)>,
-    /// 计时基准。`Instant` 无法放进原子,故节点统计里存「相对本基准的微秒」。
-    epoch: Instant,
-    /// 本轮 `start` 的时刻(相对 `epoch` 的微秒 + 1);0 表示尚未开始。
-    run_started_us: AtomicI64,
-    /// Compact / Diagnostics 各自相邻两次导出之间的私有基线；不作为宿主查询 API 暴露。
-    dot_intervals: Mutex<dot::DotIntervalBaselines>,
-    /// 是否为每次算子回调计时。建图时由 `config.stats_timing` 与 `watchdog_ms` 定下,
-    /// 之后不变(故是普通 bool,不必原子)。见 `GraphConfig::stats_timing`。
-    timing: bool,
-}
-
-/// A handle to a computation graph.
-///
-/// Build one with [`from_yaml`](Graph::from_yaml), attach output sinks with
-/// [`add_poller`](Graph::add_poller) (pull) or [`observe`](Graph::observe) (push), then
-/// [`start`](Graph::start). Feed packets in through [`input`](Graph::input); terminate by closing
-/// the inputs ([`close_all_inputs`](Graph::close_all_inputs)) and waiting for the pipeline to
-/// drain ([`wait_done`](Graph::wait_done)).
-///
-/// Every method takes `&self` — the handle is shared, not cloned. Dropping it shuts the graph down
-/// and joins the worker threads. After termination, [`reset`](Graph::reset) puts the graph back to
-/// a startable state while keeping already-opened kernel instances alive, so an expensive one-off
-/// such as loading a model is not repeated.
-pub struct Graph {
-    inner: Arc<GraphInner>,
-}
-
-impl Graph {
-    pub fn from_yaml(text: &str) -> Result<Self> {
-        let cfg = GraphConfig::from_yaml(text)?;
-        Self::from_config(cfg)
-    }
-
-    pub fn from_yaml_file(path: &str) -> Result<Self> {
-        let cfg = GraphConfig::from_yaml_file(path)?;
-        Self::from_config(cfg)
-    }
-
-    pub fn from_config(cfg: GraphConfig) -> Result<Self> {
-        // 引擎自带的默认 Rust 算子(PassThrough 等)在此自动注册一次 —— 宿主无需调用。
-        crate::builtin::register_defaults();
-        let inner = GraphInner::build(cfg)?;
-        Ok(Self {
-            inner: Arc::new(inner),
-        })
-    }
-
-    pub fn state(&self) -> State {
-        *self.inner.state.lock().expect("state lock poisoned")
-    }
-
-    pub fn inner(&self) -> &Arc<GraphInner> {
-        &self.inner
-    }
-
-    /// 注入常量输入。必须在 `start` 之前。
-    pub fn set_side_packet(&self, name: &str, pkt: Packet) -> Result<()> {
-        if self.state() != State::Initialized {
-            return Err(Error::State(
-                "side packets must be injected before start".into(),
-            ));
-        }
-        if pkt.type_id() == crate::packet::type_id::HOST_OBJECT {
-            return Err(Error::InvalidArg(format!(
-                "side packet `{name}` carries LMFLOW_TYPE_HOST_OBJECT, which is reserved and \
-                 not enabled (see ADR #26); use LMFLOW_TYPE_BUFFER for numeric collections, \
-                 or LMFLOW_TYPE_STR carrying JSON for arbitrary metadata"
-            )));
-        }
-        self.inner
-            .side_packets
-            .lock()
-            .expect("side packet lock poisoned")
-            .insert(name.to_string(), pkt);
-        Ok(())
-    }
-
-    pub fn input(&self, port: &str) -> Result<Input> {
-        let edge =
-            *self.inner.input_by_name.get(port).ok_or_else(|| {
-                Error::NotFound(format!("graph input port `{port}` does not exist"))
-            })?;
-        Ok(Input {
-            graph: self.inner.clone(),
-            edge,
-        })
-    }
-
-    pub fn close_input(&self, port: &str) -> Result<()> {
-        let edge =
-            *self.inner.input_by_name.get(port).ok_or_else(|| {
-                Error::NotFound(format!("graph input port `{port}` does not exist"))
-            })?;
-        self.inner.close_edge(edge);
-        self.inner.set_state_draining_if_all_inputs_closed();
-        Ok(())
-    }
-
-    pub fn close_all_inputs(&self) {
-        for &e in &self.inner.graph_inputs {
-            self.inner.close_edge(e);
-        }
-        self.inner.set_state_draining_if_all_inputs_closed();
-    }
-
-    pub fn cancel(&self) {
-        self.inner.shared.cancel();
-        self.inner.resume_blocked_flushes();
-        self.inner.finish_all_backpressure_blocks();
-        self.inner.notify_activity();
-    }
-
-    pub fn wait_done_timeout(&self, timeout: std::time::Duration) -> Result<()> {
-        self.inner
-            .wait_done(Some(std::time::Instant::now() + timeout))
-    }
-
-    pub fn wait_until_idle_timeout(&self, timeout: std::time::Duration) -> Result<()> {
-        self.inner
-            .wait_until_idle(Some(std::time::Instant::now() + timeout))
-    }
-
-    pub fn pause(&self) {
-        self.inner.pause();
-    }
-
-    pub fn resume(&self) {
-        self.inner.resume();
-    }
-
-    pub fn is_paused(&self) -> bool {
-        self.inner.is_paused()
-    }
-
-    /// 已定义的线程池名字(按 YAML 顺序)。
-    pub fn executor_names(&self) -> Vec<&str> {
-        self.inner.executor_names()
-    }
-
-    /// 是否空闲:主线程队列为空且线程池无在飞任务。
-    pub fn is_idle(&self) -> bool {
-        self.inner.is_idle_pub()
-    }
-
-    /// 推模式订阅输出口。回调在派发该包的线程上执行(可能是线程池线程)。
-    ///
-    /// 必须在 `start` 之前注册,否则会漏掉已产出的包。
-    pub fn observe<F>(&self, port: &str, f: F) -> Result<()>
-    where
-        F: Fn(&Packet) + Send + Sync + 'static,
-    {
-        if self.state() != State::Initialized {
-            return Err(Error::State(
-                "observe must be called before start, otherwise already-produced packets are missed".into(),
-            ));
-        }
-        self.inner.add_observer_fn(port, Arc::new(f))
-    }
-
-    /// 算子自报计数器的当前值(按图隔离)。
-    pub fn counter_value(&self, name: &str) -> i64 {
-        self.inner.shared.counter_value(name)
-    }
-
-    /// 已登记的计数器名。
-    pub fn counter_names(&self) -> Vec<String> {
-        self.inner.shared.counter_names()
-    }
-
-    /// 取出图级共享状态的句柄 —— 它比 `Graph` 句柄活得久,
-    /// 因此可以在图销毁**之后**仍然读取错误与计数器(测试与排障用)。
-    pub fn shared_for_inspection(&self) -> Arc<crate::runtime::GraphShared> {
-        self.inner.shared.clone()
-    }
-
-    pub fn node_count(&self) -> usize {
-        self.inner.nodes.len()
-    }
-    pub fn node_name(&self, i: usize) -> Option<&str> {
-        self.inner.nodes.get(i).map(|n| n.name.as_str())
-    }
-    pub fn input_port_names(&self) -> Vec<&str> {
-        self.inner
-            .graph_inputs
-            .iter()
-            .map(|&e| self.inner.edges[e].name.as_str())
-            .collect()
-    }
-    pub fn output_port_names(&self) -> Vec<&str> {
-        self.inner
-            .graph_outputs
-            .iter()
-            .map(|&e| self.inner.edges[e].name.as_str())
-            .collect()
-    }
-
-    /// 指定边的积压包数(该边所有消费者输入队列之和)。
-    pub fn queue_depth(&self, port: &str) -> Option<usize> {
-        let e = *self.inner.edge_by_name.get(port)?;
-        Some(self.inner.queue_depth(e))
-    }
-
-    pub fn dropped_count(&self, port: &str) -> Option<u64> {
-        let e = *self.inner.edge_by_name.get(port)?;
-        Some(self.inner.edges[e].dropped_count())
-    }
-
-    pub fn dump(&self) -> String {
-        self.inner.dump()
-    }
-
-    /// 导出 Graphviz DOT(拓扑 + 子图命名空间 cluster + 执行器/绑核图例)。见 `GraphInner::to_dot`。
-    pub fn to_dot(&self) -> String {
-        self.to_dot_with_view(DotView::Topology)
-    }
-
-    /// 导出指定详细程度的 Graphviz DOT。
-    pub fn to_dot_with_view(&self, view: DotView) -> String {
-        self.inner.to_dot(view)
-    }
-
-    /// 带节点状态与核心统计的紧凑视图,适合大型图持续刷新。
-    pub fn to_dot_compact(&self) -> String {
-        self.to_dot_with_view(DotView::Compact)
-    }
-
-    /// 同 [`to_dot`](Self::to_dot),但在每个节点标签上标出运行统计
-    /// (处理数 · 平均延迟 · 收/发包数 · 队列峰值 · 错误数),并把填充色换成
-    /// **按平均延迟的热力图**(绿=快 → 红=慢)—— 一眼看出瓶颈在哪个节点。
-    ///
-    /// 可在图运行期间随时调用(统计是原子读的快照),不必等跑完。
-    /// 注意:热力图占用了「按执行器上色」那一维,执行器仍以标签里的 `@name` 标出。
-    pub fn to_dot_with_stats(&self) -> String {
-        self.to_dot_with_view(DotView::Diagnostics)
-    }
-
-    pub fn node_stats(&self, i: usize) -> Option<NodeStatsSnapshot> {
-        self.inner.node_stats(i)
-    }
-
-    pub fn input_queue_stats(&self, node: usize, port: usize) -> Option<InputQueueStatsSnapshot> {
-        self.inner.input_queue_stats(node, port)
-    }
-}
-
-impl Drop for Graph {
-    /// 在宿主放开句柄时**就地关停线程池并 join**。
-    ///
-    /// 必须在这里做,不能只依赖 `GraphInner::drop`:工作线程为了执行节点会
-    /// `Weak::upgrade` 出一个临时强引用,若宿主的 Arc 已先释放,最后一个引用就落在
-    /// 工作线程手上 —— 于是 `GraphInner::drop` 在工作线程上运行,`shutdown` 变成
-    /// **join 自己**,得到 `EDEADLK`。先在宿主线程 join 完,worker 就不存在了。
-    fn drop(&mut self) {
-        self.inner.shutdown_executors_pub();
-    }
-}
-
-impl std::fmt::Debug for Graph {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "Graph{{state:{:?}, nodes:{}, inputs:{:?}, outputs:{:?}}}",
-            self.state(),
-            self.inner.nodes.len(),
-            self.input_port_names(),
-            self.output_port_names()
-        )
-    }
-}
-
-/// 图输入口句柄(热路径免按名字查表)。
-pub struct Input {
-    graph: Arc<GraphInner>,
-    edge: EdgeId,
-}
-
-impl Input {
-    pub fn send(&self, pkt: Packet) -> Result<()> {
-        self.graph.send(self.edge, pkt, true)
-    }
-    pub fn try_send(&self, pkt: Packet) -> Result<()> {
-        self.graph.send(self.edge, pkt, false)
-    }
-    pub fn backpressure_stats(&self) -> WatermarkBackpressureStatsSnapshot {
-        self.graph.watermark_backpressure_stats(self.edge)
-    }
-    pub fn close(&self) {
-        self.graph.close_edge(self.edge);
-        self.graph.set_state_draining_if_all_inputs_closed();
-    }
-}
-
-impl std::fmt::Debug for Input {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Input{{port:`{}`}}", self.graph.edges[self.edge].name)
-    }
-}
-
-/// `LMFlowNodeStats` 的 Rust 侧快照。
-#[derive(Debug, Clone)]
-pub struct NodeStatsSnapshot {
-    pub node_name: String,
-    pub kernel_name: String,
-    pub running: bool,
-    pub running_for_us: i64,
-    pub processed: u64,
-    pub errors: u64,
-    pub total_process_us: i64,
-    pub max_process_us: i64,
-    /// 从输入口取走的包数
-    pub packets_in: u64,
-    /// 产出并派发下游的包数
-    pub packets_out: u64,
-    /// 下游入队时观察到的队列深度峰值(高水位)
-    pub peak_queue_depth: usize,
-    pub queued: usize,
-}
-
-/// 节点单个输入口的队列与背压统计快照。
-#[derive(Debug, Clone)]
-pub struct InputQueueStatsSnapshot {
-    pub node_name: String,
-    pub port_name: String,
-    pub producer_name: Option<String>,
-    pub packet_capacity: Option<usize>,
-    pub queued_packets: usize,
-    pub queued_bytes: u64,
-    pub reserved_packets: usize,
-    pub peak_queued_packets: usize,
-    pub peak_queued_bytes: u64,
-    pub blocked: bool,
-    pub blocked_for_us: u64,
-    pub block_events: u64,
-    pub total_blocked_us: u64,
-}
-#[derive(Debug, Clone)]
-pub struct WatermarkBackpressureStatsSnapshot {
-    pub port_name: String,
-    pub packet_limit: usize,
-    pub total_queued_packets: usize,
-    pub blocked: bool,
-    pub active_waiters: usize,
-    pub blocked_for_us: u64,
-    pub block_events: u64,
-    pub total_blocked_us: u64,
-}
-
-// ---------------------------------------------------------------- 执行
-
-// Internal queue and watermark backpressure.
-include!("backpressure.rs");
-// Graph start, shutdown, reset, and wait state machine.
-include!("lifecycle.rs");
+use super::*;
 
 impl GraphInner {
-    fn state(&self) -> State {
+    pub(super) fn state(&self) -> State {
         *self.state.lock().expect("state lock poisoned")
     }
-    fn set_state(&self, s: State) {
+    pub(super) fn set_state(&self, s: State) {
         *self.state.lock().expect("state lock poisoned") = s;
     }
 
-    fn send(&self, edge: EdgeId, pkt: Packet, blocking: bool) -> Result<()> {
+    pub(super) fn send(&self, edge: EdgeId, pkt: Packet, blocking: bool) -> Result<()> {
         match self.state() {
             State::Running => {}
             State::Draining | State::Terminated => return Err(Error::Closed),
@@ -522,7 +86,7 @@ impl GraphInner {
     ///
     /// 参照值单独记录在边上,而不是看队列里剩什么 —— 否则队列一排空,
     /// 回退甚至重复的时间戳就能悄悄混进来,下游行为随之变得难以解释。
-    fn check_input_monotonic(&self, edge: EdgeId, pkt: &Packet) -> Result<()> {
+    pub(super) fn check_input_monotonic(&self, edge: EdgeId, pkt: &Packet) -> Result<()> {
         let e = &self.edges[edge];
         let mut last = e.last_sent.lock().expect("timestamp lock poisoned");
         if *last != Timestamp::unset() && pkt.timestamp() <= *last {
@@ -540,7 +104,7 @@ impl GraphInner {
     /// 把一批包投递到边的消费者与订阅者。
     /// 把一批包投递到边的每个消费者队列。**只读 `packets`**(逐个 `clone` 引用计数),
     /// 故取切片而非 `Vec` —— 让调用方保留缓冲的所有权与容量。
-    fn dispatch(&self, edge_id: EdgeId, packets: &[Packet]) {
+    pub(super) fn dispatch(&self, edge_id: EdgeId, packets: &[Packet]) {
         let edge = &self.edges[edge_id];
 
         // 订阅者(poller / observer)各自独立一份
@@ -645,7 +209,7 @@ impl GraphInner {
     }
 
     /// 记录丢包。**绝不静默**:首次丢弃打 WARN,之后按指数退避,避免日志洪水。
-    fn note_dropped(&self, edge_id: EdgeId, n: u64) {
+    pub(super) fn note_dropped(&self, edge_id: EdgeId, n: u64) {
         let e = &self.edges[edge_id];
         let before = e.dropped.fetch_add(n, Ordering::Relaxed); // 纯计数器
         let after = before + n;
@@ -658,7 +222,7 @@ impl GraphInner {
     }
 
     /// 内部边只有软水位:超了告警,但**不阻塞生产者**(§7.5)。
-    fn warn_if_over_soft_limit(&self, edge_id: EdgeId, depth: usize) {
+    pub(super) fn warn_if_over_soft_limit(&self, edge_id: EdgeId, depth: usize) {
         let limit = self.shared.config.max_queue_size;
         if limit == 0 || depth <= limit {
             return;
@@ -673,7 +237,7 @@ impl GraphInner {
         }
     }
 
-    fn schedule_consumers(&self, edge: EdgeId) {
+    pub(super) fn schedule_consumers(&self, edge: EdgeId) {
         let consumers: Vec<NodeId> = self.edges[edge].consumers.iter().map(|&(n, _)| n).collect();
         for n in consumers {
             self.schedule_node(n);
@@ -686,7 +250,7 @@ impl GraphInner {
     /// 全局 `in_flight` 已在认领仍持节点调度锁时递增,这里不能再加。否则
     /// `try_claim` 返回到任务真正入队之间会出现「节点已有已认领调用、全局仍显示空闲」
     /// 的窗口,`wait_done` 可能把正常排空误报成卡死。
-    fn dispatch_task(&self, n: NodeId) {
+    pub(super) fn dispatch_task(&self, n: NodeId) {
         match self.nodes[n].executor {
             None => {
                 self.main_queue
@@ -721,7 +285,7 @@ impl GraphInner {
     ///
     /// `in_flight` 在 `try_claim` 内、仍持节点调度锁时递增,覆盖「已认领但尚未入队」
     /// 的阶段;否则并发关流可能撞上瞬时假空闲。
-    fn workers_idle(&self) -> bool {
+    pub(super) fn workers_idle(&self) -> bool {
         self.in_flight.load(Ordering::SeqCst) == 0
             && self
                 .main_queue
@@ -731,7 +295,7 @@ impl GraphInner {
     }
 
     /// 逻辑空闲还要求没有因内部容量不足而保留的待刷新 staging。
-    fn is_idle(&self) -> bool {
+    pub(super) fn is_idle(&self) -> bool {
         self.workers_idle()
             && self
                 .blocked_flush_nodes
@@ -742,7 +306,7 @@ impl GraphInner {
 
     /// 任何进展都要通知:取到输出、节点关闭、出错、任务入队/完成。
     /// 否则阻塞中的宿主线程会白等到超时。
-    fn notify_activity(&self) {
+    pub(super) fn notify_activity(&self) {
         let (m, cv) = &self.activity;
         let mut a = m.lock().unwrap_or_else(|e| e.into_inner());
         a.gen = a.gen.wrapping_add(1);
@@ -757,7 +321,7 @@ impl GraphInner {
     /// 读取当前活动代数。**必须在判断 is_idle/is_done 之前读取**,再据此 `wait_activity_since`,
     /// 否则会丢唤醒:若在「判断非空闲」与「开始等待」之间任务恰好全部完成,
     /// 等待会一直睡到超时(那 55ms 的假慢就是这么来的)。
-    fn activity_gen(&self) -> u64 {
+    pub(super) fn activity_gen(&self) -> u64 {
         self.activity
             .0
             .lock()
@@ -766,7 +330,7 @@ impl GraphInner {
     }
 
     /// 等到活动代数不等于 `before`(即有新进展)或超时。
-    fn wait_activity_since(&self, before: u64, timeout: std::time::Duration) {
+    pub(super) fn wait_activity_since(&self, before: u64, timeout: std::time::Duration) {
         let (m, cv) = &self.activity;
         let mut a = m.lock().unwrap_or_else(|e| e.into_inner());
         if a.gen != before {
@@ -786,7 +350,7 @@ impl GraphInner {
     /// 放进 `ready` 待执行。成功返回 true —— 调用方应随即 `dispatch_task` 派一个任务。
     ///
     /// readiness 与弹包必须在同一把锁下完成,否则两个并发认领会取到同一时间戳的包。
-    fn try_claim(&self, n: NodeId) -> bool {
+    pub(super) fn try_claim(&self, n: NodeId) -> bool {
         if self.shared.has_error()
             || self.shared.is_cancelled()
             || self.paused.load(Ordering::SeqCst)
@@ -930,7 +494,7 @@ impl GraphInner {
 
     /// 尽力填满容量:反复认领并派任务,直到无法再认领。
     /// `max_in_flight == 1` 时每轮至多派一个,与串行行为一致。
-    fn schedule_node(&self, n: NodeId) {
+    pub(super) fn schedule_node(&self, n: NodeId) {
         while self.try_claim(n) {
             self.dispatch_task(n);
             // 本次认领已从某些内部输入队列弹包,可能为上游腾出了容量。
@@ -943,7 +507,7 @@ impl GraphInner {
     /// ⚠ 必须先把 pop 的结果落到局部变量:在 edition 2021 里,`if let` 表达式中的
     /// 临时值(此处是 MutexGuard)会存活到整个 if-let 块结束 —— 那样 `run_node`
     /// 内部再去 `main_queue.lock()` 就自锁死。这也是 R2 锁序规则的实例。
-    fn run_one_main_task(&self) -> bool {
+    pub(super) fn run_one_main_task(&self) -> bool {
         let next = self
             .main_queue
             .lock()
@@ -961,11 +525,11 @@ impl GraphInner {
     }
 
     /// 执行一步:跑一个主线程任务,或推进关流。返回是否真的做了事。
-    fn pump_step(&self) -> bool {
+    pub(super) fn pump_step(&self) -> bool {
         self.run_one_main_task() || self.try_advance_closing()
     }
 
-    fn run_node(&self, n: NodeId) {
+    pub(super) fn run_node(&self, n: NodeId) {
         let node = &self.nodes[n];
         // 取出一个待执行的调用(认领时已把输入弹进对应槽)。
         let inv = {
@@ -1013,7 +577,7 @@ impl GraphInner {
     /// staging 已被 `discard_staging` 清空,于是 `flush_one` 落到「无产出」分支,
     /// 自动 `propagate_bound(input_ts + 1)`。这正是 `Filter` 丢包时依赖的同一套机制。
     /// 不推进边界的话下游会永远等这一刻,等于把一帧出错升级成整图卡死。
-    fn on_node_error(&self, n: NodeId, slot: usize, e: Error) -> bool {
+    pub(super) fn on_node_error(&self, n: NodeId, slot: usize, e: Error) -> bool {
         let node = &self.nodes[n];
         let before = node.stats.errors.fetch_add(1, Ordering::Relaxed);
         match node.on_error {
@@ -1038,7 +602,7 @@ impl GraphInner {
         }
     }
 
-    fn complete_invocation(&self, n: NodeId, slot: usize, seq: u64, ok: bool) {
+    pub(super) fn complete_invocation(&self, n: NodeId, slot: usize, seq: u64, ok: bool) {
         let node = &self.nodes[n];
         // 登记结果;当前无人刷新则由本线程担任刷新者。
         //
@@ -1074,7 +638,7 @@ impl GraphInner {
     }
 
     /// 契约声明的输入类型校验。类型不符宁可报错,也不让算子按错误类型解读内存。
-    fn check_input_types(&self, n: NodeId, slot: usize) -> Result<()> {
+    pub(super) fn check_input_types(&self, n: NodeId, slot: usize) -> Result<()> {
         let node = &self.nodes[n];
         let ctx = unsafe { node.ctx_slot(slot) };
         for (port, &want) in node.input_types.iter().enumerate() {
@@ -1145,7 +709,7 @@ impl GraphInner {
     /// 算子暂存输出的类型校验。必须在离开回调后、派发前统一做,因为 C/C++/Python 的
     /// `emit` ABI 是 `void`:不能依赖算子检查返回值。放在这里也能覆盖源节点、图输出、
     /// `close` 产出以及所有语言的算子。
-    fn check_output_types(&self, n: NodeId, slot: usize) -> Result<()> {
+    pub(super) fn check_output_types(&self, n: NodeId, slot: usize) -> Result<()> {
         let node = &self.nodes[n];
         let ctx = unsafe { node.ctx_slot(slot) };
         for (port, packets) in ctx.staging.iter().enumerate() {
@@ -1179,7 +743,7 @@ impl GraphInner {
     }
 
     /// 把时间戳边界推给某条边的所有消费者,并重扫其就绪性。
-    fn propagate_bound(&self, edge: EdgeId, bound: Timestamp) {
+    pub(super) fn propagate_bound(&self, edge: EdgeId, bound: Timestamp) {
         let consumers: Vec<(NodeId, usize)> = self.edges[edge].consumers.clone();
         for (node, port) in consumers {
             self.nodes[node].advance_bound(port, bound);
@@ -1189,7 +753,7 @@ impl GraphInner {
 
     /// 调用算子回调(在指定 context 槽上)。**调用期间不持有任何引擎锁**(R1),
     /// 并记录耗时以便定位卡死。可被并发调用(不同槽),故 `process` 必须可重入。
-    fn call_kernel(&self, n: NodeId, slot: usize, phase: KernelPhase) -> i32 {
+    pub(super) fn call_kernel(&self, n: NodeId, slot: usize, phase: KernelPhase) -> i32 {
         let node = &self.nodes[n];
         // 直接交出 UnsafeCell 内部指针:不构造 Rust 引用,故与回调内
         // 从该指针造出的 `&mut Context` 不冲突(该槽此刻由本调用独占持有)。
@@ -1436,7 +1000,7 @@ impl GraphInner {
     }
 
     /// 关停所有线程池并 join。**必须在动节点之前做**。
-    fn shutdown_executors(&self) {
+    pub(super) fn shutdown_executors(&self) {
         for p in &self.executors {
             p.shutdown();
         }
@@ -1444,7 +1008,7 @@ impl GraphInner {
 }
 
 #[derive(Debug, Clone, Copy)]
-enum KernelPhase {
+pub(super) enum KernelPhase {
     Open,
     Process,
     Close,

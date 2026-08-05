@@ -469,7 +469,9 @@ input_ports: [in, gate]
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
     let dot = loop {
         let dot = graph.to_dot_with_stats();
-        if dot.contains("stage2 1/1 r0 HOT #1 BLOCKED: queue full") {
+        if dot.contains("stage2 1/1 r0 HOT #1 BLOCKED: queue full")
+            && dot.matches("PRESSURE PATH: upstream propagation").count() >= 2
+        {
             break dot;
         }
         assert!(

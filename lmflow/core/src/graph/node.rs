@@ -1,3 +1,5 @@
+use super::*;
+
 /// 输入策略(节点级可插拔,见 docs/design.md §7.10)。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InputPolicy {
@@ -21,7 +23,7 @@ pub enum InputPolicy {
 
 impl InputPolicy {
     /// 从配置构造。`ins` 用于把 `sync_set` 里的端口**名字**解析成序号并校验。
-    fn from_config(
+    pub(super) fn from_config(
         c: &crate::config::InputPolicyConfig,
         ins: &crate::kernel::PortTable,
     ) -> Result<Self> {
@@ -78,13 +80,13 @@ impl InputPolicy {
 /// 一次触发的计划:处理时间戳 + 参与本次的输入口。
 /// `ports = None` 表示「全部口」(Sync / Immediate / FixedSize 的现状,不分配);
 /// `Some(set)` 表示「只这些口」(SyncSet 的就绪组)—— 认领时只对这些口弹包、推进 bound。
-struct Ready {
-    ts: Timestamp,
-    ports: Option<Vec<usize>>,
+pub(super) struct Ready {
+    pub(super) ts: Timestamp,
+    pub(super) ports: Option<Vec<usize>>,
     /// 仅 `batch` 策略:就绪判定时已算好的取包计划。放在这里而不是认领时重算,
     /// 是为了保住「每口只拿一次队列锁」(ADR #36)—— 判定期已把各口时间戳前缀
     /// 快照过一次,认领期照计划批量弹出即可,不必再逐轮加锁。
-    batch: Option<BatchPlan>,
+    pub(super) batch: Option<BatchPlan>,
 }
 
 /// `batch` 策略的认领计划:每个**正向口**本次取多少个包,以及本批末尾的对齐时间戳。
@@ -93,11 +95,11 @@ struct Ready {
 /// 单包时的语义一致(`Context::input_count` 本就是按口计数的),而不是「各口各自数够
 /// `size` 个」:后者会把 0 号口的第 k 个与 1 号口的第 k 个配成一对,而它们未必是同一帧,
 /// 属于**静默的错误配对**。
-struct BatchPlan {
+pub(super) struct BatchPlan {
     /// (端口号, 取包数)
-    take: Vec<(usize, usize)>,
+    pub(super) take: Vec<(usize, usize)>,
     /// 本批最后一轮对齐到的时间戳:用作 `input_ts`,并据此推进各口 bound。
-    last_ts: Timestamp,
+    pub(super) last_ts: Timestamp,
 }
 
 // ---------------------------------------------------------------- 状态机
@@ -132,18 +134,18 @@ pub struct Edge {
     pub consumers: Vec<(NodeId, usize)>,
     pub is_graph_input: bool,
     pub is_graph_output: bool,
-    closed: AtomicBool,
-    dropped: AtomicU64,
-    watermark_backpressure: BackpressureStats,
+    pub(super) closed: AtomicBool,
+    pub(super) dropped: AtomicU64,
+    pub(super) watermark_backpressure: BackpressureStats,
     /// 该边上最近一次投递的时间戳。**必须独立记录**,不能拿「队列里还剩的包」当参照 ——
     /// 队列一排空参照就消失了,回退的时间戳就能混进来。
-    last_sent: Mutex<Timestamp>,
-    pollers: Mutex<Vec<Arc<PollerInner>>>,
-    observers: Mutex<Vec<Observer>>,
+    pub(super) last_sent: Mutex<Timestamp>,
+    pub(super) pollers: Mutex<Vec<Arc<PollerInner>>>,
+    pub(super) observers: Mutex<Vec<Observer>>,
 }
 
 impl Edge {
-    fn new(name: String) -> Self {
+    pub(super) fn new(name: String) -> Self {
         Self {
             name,
             producer: None,
@@ -170,7 +172,7 @@ impl Edge {
 
 /// 推模式订阅者。C 宿主给函数指针,Rust 宿主给闭包 —— 后者才是 Rust 侧的自然写法。
 #[derive(Clone)]
-enum Observer {
+pub(super) enum Observer {
     C {
         cb: unsafe extern "C" fn(*mut c_void, crate::ffi::LMFlowPacket),
         user: *mut c_void,
@@ -193,31 +195,31 @@ unsafe impl Send for Observer {}
 /// `max_in_flight == 1` 是自然特例:只有一个槽,序号恒连续,重排是恒等操作 ——
 /// 行为与串行路径一致。
 #[derive(Debug)]
-struct NodeSched {
-    opened: bool,
+pub(super) struct NodeSched {
+    pub(super) opened: bool,
     /// 已「认领关流」—— 在锁下置位,保证并发时只有一个线程会调算子的 Close。
     /// 必须与 `closed` 分开:`closed` 表示 Close 已跑完,终止判定看它。
-    close_started: bool,
-    closed: bool,
+    pub(super) close_started: bool,
+    pub(super) closed: bool,
     /// 已认领但尚未刷新的调用数(= 占用中的槽数)。归零方可关闭。
-    in_flight: usize,
+    pub(super) in_flight: usize,
     /// 可用的 context 槽序号(初始 0..max_in_flight)。
-    free_slots: Vec<usize>,
+    pub(super) free_slots: Vec<usize>,
     /// 已认领、等待某个 worker 来执行的调用:(slot, seq)。
-    ready: VecDeque<(usize, u64)>,
+    pub(super) ready: VecDeque<(usize, u64)>,
     /// 取时间戳时分配的下一个序号。
-    next_seq: u64,
+    pub(super) next_seq: u64,
     /// 下一个可刷新的序号(保证下游时间戳单调)。
-    next_flush_seq: u64,
+    pub(super) next_flush_seq: u64,
     /// 完成但等待按序刷新的调用:seq -> (slot, 是否成功)。
-    pending_flush: BTreeMap<u64, (usize, bool)>,
+    pub(super) pending_flush: BTreeMap<u64, (usize, bool)>,
     /// 当前按序轮到、但因下游内部输入队列已满而暂缓刷新的槽。
-    blocked_flush: Option<BlockedFlush>,
+    pub(super) blocked_flush: Option<BlockedFlush>,
     /// 是否已有线程在做刷新 —— 保证刷新按序、串行(否则并发刷新会打乱下游顺序)。
-    flushing: bool,
+    pub(super) flushing: bool,
 }
 impl NodeSched {
-    fn new(max_in_flight: usize) -> Self {
+    pub(super) fn new(max_in_flight: usize) -> Self {
         Self {
             opened: false,
             close_started: false,
@@ -240,29 +242,29 @@ impl NodeSched {
 /// 计数器用 `Relaxed`:它们不参与任何 happens-before 推理,只被读侧当快照看。
 /// `max_in_flight > 1` 时同一节点会被多个工作线程并发更新,故必须是多写者安全的。
 #[derive(Debug, Default)]
-struct NodeStats {
-    processed: AtomicU64,
-    errors: AtomicU64,
-    total_us: AtomicI64,
-    max_us: AtomicI64,
+pub(super) struct NodeStats {
+    pub(super) processed: AtomicU64,
+    pub(super) errors: AtomicU64,
+    pub(super) total_us: AtomicI64,
+    pub(super) max_us: AtomicI64,
     /// 本节点从输入口取走的包数(在 `try_claim` 弹包处累加)
-    packets_in: AtomicU64,
+    pub(super) packets_in: AtomicU64,
     /// 本节点产出并派发下游的包数(在 `flush_staging` 派发处累加)
-    packets_out: AtomicU64,
+    pub(super) packets_out: AtomicU64,
     /// 下游入队时观察到的**队列深度峰值**(高水位)—— 定位积压点
-    peak_queue_depth: AtomicUsize,
+    pub(super) peak_queue_depth: AtomicUsize,
     /// 正在执行算子回调的并发数(> 0 即「在跑」)
-    in_flight: AtomicUsize,
+    pub(super) in_flight: AtomicUsize,
     /// 最近一次 `in_flight` 0→1 跃变的时刻(相对 [`GraphInner::epoch`] 的微秒)。
     /// **归零时不清零** —— 读侧一律先看 `in_flight > 0` 再用它,从而避开
     /// 「清零」与「新一次开始」互相覆盖的竞争(那会让诊断值瞬时错乱)。
-    started_us: AtomicI64,
+    pub(super) started_us: AtomicI64,
 }
 
 impl NodeStats {
     /// 全字段清零,供图 reset 重跑用。仅在图静止时调用(无并发),但字段是内嵌原子,
     /// 故用 `&self` 逐个 store 即可(不需要 `&mut`)。
-    fn reset(&self) {
+    pub(super) fn reset(&self) {
         self.processed.store(0, Ordering::Relaxed);
         self.errors.store(0, Ordering::Relaxed);
         self.total_us.store(0, Ordering::Relaxed);
@@ -288,7 +290,7 @@ pub enum OnError {
 }
 
 impl OnError {
-    fn from_config(s: &str) -> Self {
+    pub(super) fn from_config(s: &str) -> Self {
         // 未知值已在 config 校验期拒掉,这里只认已知的两个。
         if s == "skip" {
             OnError::Skip
@@ -306,49 +308,49 @@ pub struct Node {
     pub in_ports: Arc<PortTable>,
     pub out_ports: Arc<PortTable>,
     /// `None` = 宿主主线程(默认执行器,ADR #16);`Some(i)` = executors[i] 线程池
-    executor: Option<usize>,
-    policy: InputPolicy,
-    input_types: Vec<u64>,
-    output_types: Vec<u64>,
-    kernel: KernelInstance,
+    pub(super) executor: Option<usize>,
+    pub(super) policy: InputPolicy,
+    pub(super) input_types: Vec<u64>,
+    pub(super) output_types: Vec<u64>,
+    pub(super) kernel: KernelInstance,
     /// 每次并行 in-flight 调用一个 context 槽(池大小 = max_in_flight)。
     /// 用 UnsafeCell 而非 Mutex:算子回调期间引擎必须交出一个 `*mut Context` 给 C 侧,
     /// 若同时持有 Mutex guard 的 `&mut`,回调里从裸指针再造 `&mut` 就构成别名 UB。
     /// 独占性由「一个槽同一时刻只被一个调用持有」保证(槽在锁下认领/归还)。
     /// 池在 build 后不再增长,故元素地址稳定 —— 交给 C 侧的 `*mut Context` 在
     /// 调用期间始终有效。
-    ctxs: Vec<UnsafeCell<Context>>,
-    max_in_flight: usize,
-    sched: Mutex<NodeSched>,
+    pub(super) ctxs: Vec<UnsafeCell<Context>>,
+    pub(super) max_in_flight: usize,
+    pub(super) sched: Mutex<NodeSched>,
     /// 全原子,无锁 —— 见 [`NodeStats`]
-    stats: NodeStats,
+    pub(super) stats: NodeStats,
     /// 每个输入口一条独立队列(见模块头注释)
-    input_queues: Vec<Mutex<VecDeque<Packet>>>,
+    pub(super) input_queues: Vec<Mutex<VecDeque<Packet>>>,
     /// 每个正向输入口的无损包数容量。`None` = 不限。
-    input_queue_capacity: Vec<Option<usize>>,
+    pub(super) input_queue_capacity: Vec<Option<usize>>,
     /// 已由上游刷新预留、尚未真正入队的槽数。与 queue len 合计做并发容量判定。
-    input_queue_reserved: Vec<AtomicUsize>,
+    pub(super) input_queue_reserved: Vec<AtomicUsize>,
     /// 当前各输入队列内 payload 的浅字节数。
-    input_queue_bytes: Vec<AtomicU64>,
+    pub(super) input_queue_bytes: Vec<AtomicU64>,
     /// 每个输入口的背压与高水位统计。
-    input_queue_stats: Vec<InputQueueStats>,
-    input_closed: Vec<AtomicBool>,
+    pub(super) input_queue_stats: Vec<InputQueueStats>,
+    pub(super) input_closed: Vec<AtomicBool>,
     /// 算子失败时的处理策略(见 [`OnError`])。建图期定下,之后不变。
-    on_error: OnError,
+    pub(super) on_error: OnError,
     /// 源节点定速:相邻两次 `process` 的最小间隔。`None` = 不限速(见 `NodeConfig::rate`)。
-    min_period: Option<std::time::Duration>,
+    pub(super) min_period: Option<std::time::Duration>,
     /// 上次 `process` 的开始时刻,配合 `min_period` 节流。仅源节点用到 ——
     /// 源本就串行自续产(一个包跑完才排下一个),故一把 Mutex 足够、无竞争压力。
-    last_fire: Mutex<Option<Instant>>,
+    pub(super) last_fire: Mutex<Option<Instant>>,
     /// 每个输入口是否为 back-edge(反馈寄存器):true 的口不参与就绪 / 终止 / 对齐,
     /// 入队走 cap-1 drop-old(只留最新反馈)。长度恒 = 输入口数(无 back-edge 则全 false)。
-    input_is_back_edge: Vec<bool>,
+    pub(super) input_is_back_edge: Vec<bool>,
     /// 源节点(0 输入口)自报「已产完」。置位后 readiness 不再放行、节点可关流终止。
-    source_done: AtomicBool,
+    pub(super) source_done: AtomicBool,
     /// 每个输入口的**时间戳边界**:保证「不会再有时间戳 < bound 的包到来」。
     /// 这是多输入口对齐的依据 —— 只有确知某口不会再来更早的包,
     /// 才能安全地在当前最小时间戳上组一次 Process。
-    input_bounds: Vec<Mutex<Timestamp>>,
+    pub(super) input_bounds: Vec<Mutex<Timestamp>>,
 }
 
 // 安全性:Node 内每个 UnsafeCell<Context> 槽只在被「认领」(从 free_slots 取出而未归还)
@@ -362,29 +364,29 @@ impl Node {
     /// 调用者必须**独占持有该槽**(通过在锁下从 `free_slots` 取出而尚未归还),
     /// 或处于尚未开始调度的阶段(build/start/close,此时 in_flight==0)。
     #[allow(clippy::mut_from_ref)]
-    unsafe fn ctx_slot(&self, slot: usize) -> &mut Context {
+    pub(super) unsafe fn ctx_slot(&self, slot: usize) -> &mut Context {
         &mut *self.ctxs[slot].get()
     }
 
-    fn queue_len(&self, port: usize) -> usize {
+    pub(super) fn queue_len(&self, port: usize) -> usize {
         self.input_queues[port]
             .lock()
             .expect("queue lock poisoned")
             .len()
     }
-    fn bound(&self, port: usize) -> Timestamp {
+    pub(super) fn bound(&self, port: usize) -> Timestamp {
         *self.input_bounds[port].lock().expect("bound lock poisoned")
     }
 
     /// 把某口的时间戳边界向前推进(只增不减)。
-    fn advance_bound(&self, port: usize, to: Timestamp) {
+    pub(super) fn advance_bound(&self, port: usize, to: Timestamp) {
         let mut b = self.input_bounds[port].lock().expect("bound lock poisoned");
         if to > *b {
             *b = to;
         }
     }
 
-    fn front_ts(&self, port: usize) -> Option<Timestamp> {
+    pub(super) fn front_ts(&self, port: usize) -> Option<Timestamp> {
         self.input_queues[port]
             .lock()
             .expect("queue lock poisoned")
@@ -393,13 +395,13 @@ impl Node {
     }
 
     /// 源节点:没有输入口,由内核自行产出(见 docs/design.md §7.4)。
-    fn is_source(&self) -> bool {
+    pub(super) fn is_source(&self) -> bool {
         self.input_queues.is_empty()
     }
 
     /// 正向(非 back-edge)输入口下标。back-edge 是反馈寄存器,不参与就绪 / 终止 / 对齐判定 ——
     /// **核心不变式:back-edge 口永不触发 readiness**,故反馈包不会自激无限重跑。
-    fn forward_ports(&self) -> impl Iterator<Item = usize> + '_ {
+    pub(super) fn forward_ports(&self) -> impl Iterator<Item = usize> + '_ {
         (0..self.input_queues.len()).filter(move |&i| !self.input_is_back_edge[i])
     }
 
@@ -412,7 +414,7 @@ impl Node {
     ///     于是可以在 `min_packet` 上安全地组一次 Process。
     ///
     /// 这条判据是多输入口正确性的核心:没有它,Zip 之类算子会把不同时刻的数据配到一起。
-    fn readiness(&self) -> Option<Ready> {
+    pub(super) fn readiness(&self) -> Option<Ready> {
         let n = self.input_queues.len();
         if n == 0 {
             // 源节点:无输入口。未自报完成即「可产出」;ts 占位(try_claim 用 seq 覆盖成单调时间戳)。
@@ -480,7 +482,7 @@ impl Node {
     /// (ADR #36)。前缀在此期间稳定 —— 只有 `try_claim` 会 pop 且全程持 `sched`
     /// (ADR #30),别的线程只往队尾 push。每口游标每轮至多前进 1、共 `size` 轮,
     /// 故快照 `size` 个足够。
-    fn batch_readiness(&self, size: usize) -> Option<Ready> {
+    pub(super) fn batch_readiness(&self, size: usize) -> Option<Ready> {
         let ports: Vec<usize> = self.forward_ports().collect();
         if ports.is_empty() || size == 0 {
             return None;
@@ -545,7 +547,7 @@ impl Node {
     }
 
     /// 在给定的一组输入口上做 sync 对齐,返回对齐到的时间戳(逻辑同 §7.2 的 min_bound>min_packet)。
-    fn sync_align(&self, ports: impl Iterator<Item = usize>) -> Option<Timestamp> {
+    pub(super) fn sync_align(&self, ports: impl Iterator<Item = usize>) -> Option<Timestamp> {
         let mut min_packet = Timestamp::done();
         let mut min_bound = Timestamp::done();
         for i in ports {
@@ -564,7 +566,7 @@ impl Node {
         }
     }
 
-    fn all_inputs_closed_and_drained(&self) -> bool {
+    pub(super) fn all_inputs_closed_and_drained(&self) -> bool {
         if self.is_source() {
             // 源节点没有输入口;只有内核自报完成才算「排空」(否则 (0..0).all() 空真会开图即关)。
             return self.source_done.load(Ordering::SeqCst);

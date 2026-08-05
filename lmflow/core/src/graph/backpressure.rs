@@ -1,12 +1,13 @@
-// Internal queue and watermark backpressure.
+use super::*;
 
+// Internal queue and watermark backpressure.
 
 #[derive(Debug, Default)]
 pub(super) struct BackpressureStats {
-    active_waiters: AtomicUsize,
-    block_events: AtomicU64,
-    blocked_total_us: AtomicU64,
-    blocked_since_us: AtomicI64,
+    pub(super) active_waiters: AtomicUsize,
+    pub(super) block_events: AtomicU64,
+    pub(super) blocked_total_us: AtomicU64,
+    pub(super) blocked_since_us: AtomicI64,
 }
 
 impl BackpressureStats {
@@ -59,43 +60,42 @@ impl BackpressureStats {
     }
 }
 
-
 #[derive(Debug, Clone, Copy)]
-enum BlockedFlush {
+pub(super) enum BlockedFlush {
     Invocation { slot: usize, ok: bool },
     Close,
 }
 
 #[derive(Debug, Clone, Copy)]
-struct InputQueueReservation {
-    node: NodeId,
-    port: usize,
-    packets: usize,
+pub(super) struct InputQueueReservation {
+    pub(super) node: NodeId,
+    pub(super) port: usize,
+    pub(super) packets: usize,
 }
 
 #[derive(Debug, Clone, Copy)]
-struct InputQueueBlockContext {
-    producer: NodeId,
-    consumer: NodeId,
-    port: usize,
-    capacity: usize,
-    queued: usize,
-    reserved: usize,
-    incoming: usize,
+pub(super) struct InputQueueBlockContext {
+    pub(super) producer: NodeId,
+    pub(super) consumer: NodeId,
+    pub(super) port: usize,
+    pub(super) capacity: usize,
+    pub(super) queued: usize,
+    pub(super) reserved: usize,
+    pub(super) incoming: usize,
 }
 
 #[derive(Debug, Default)]
-struct InputQueueStats {
-    peak_packets: AtomicUsize,
-    peak_bytes: AtomicU64,
-    block_events: AtomicU64,
-    blocked_total_us: AtomicU64,
+pub(super) struct InputQueueStats {
+    pub(super) peak_packets: AtomicUsize,
+    pub(super) peak_bytes: AtomicU64,
+    pub(super) block_events: AtomicU64,
+    pub(super) blocked_total_us: AtomicU64,
     /// 0 = 当前未阻塞；否则为相对 graph epoch 的微秒数 + 1。
-    blocked_since_us: AtomicI64,
+    pub(super) blocked_since_us: AtomicI64,
 }
 
 impl InputQueueStats {
-    fn reset(&self) {
+    pub(super) fn reset(&self) {
         self.peak_packets.store(0, Ordering::Relaxed);
         self.peak_bytes.store(0, Ordering::Relaxed);
         self.block_events.store(0, Ordering::Relaxed);
@@ -103,7 +103,6 @@ impl InputQueueStats {
         self.blocked_since_us.store(0, Ordering::Relaxed);
     }
 }
-
 
 #[derive(Debug, Clone, Copy, Default)]
 pub(super) struct BackpressureStatsSnapshot {
@@ -114,10 +113,8 @@ pub(super) struct BackpressureStatsSnapshot {
     pub(super) total_blocked_us: u64,
 }
 
-
 impl GraphInner {
-
-    fn begin_watermark_block(&self, edge: EdgeId) {
+    pub(super) fn begin_watermark_block(&self, edge: EdgeId) {
         let Some(event) = self.edges[edge]
             .watermark_backpressure
             .enter(self.epoch_us())
@@ -135,7 +132,7 @@ impl GraphInner {
         }
     }
 
-    fn finish_watermark_block(&self, edge: EdgeId, log_recovery: bool) {
+    pub(super) fn finish_watermark_block(&self, edge: EdgeId, log_recovery: bool) {
         let Some((event, elapsed)) = self.edges[edge]
             .watermark_backpressure
             .leave(self.epoch_us())
@@ -157,7 +154,7 @@ impl GraphInner {
     /// 下游队列里可能已有可消费数据,但对应节点的调度通知恰好与上游进入 blocked
     /// staging 交错,此刻任务队列暂时为空。先全图重扫就绪性并重试刷新;若活动代数
     /// 仍不变且 worker 仍空闲,才算稳定地没有进展。
-    fn retry_backpressure_progress(&self) -> bool {
+    pub(super) fn retry_backpressure_progress(&self) -> bool {
         let before = self.activity_gen();
         for node in 0..self.nodes.len() {
             self.schedule_node(node);
@@ -168,7 +165,7 @@ impl GraphInner {
     }
 
     /// 驱动按序刷新。下游容量不足时保留槽与 staging,让出 worker;由下游出队后重试。
-    fn drive_invocation_flushes(&self, n: NodeId, mut first: Option<(usize, bool)>) {
+    pub(super) fn drive_invocation_flushes(&self, n: NodeId, mut first: Option<(usize, bool)>) {
         let node = &self.nodes[n];
         loop {
             let item = match first.take() {
@@ -230,7 +227,7 @@ impl GraphInner {
         }
     }
 
-    fn resume_blocked_flushes(&self) {
+    pub(super) fn resume_blocked_flushes(&self) {
         if self.shared.is_cancelled() || self.shared.has_error() {
             self.finish_all_backpressure_blocks();
         }
@@ -267,7 +264,7 @@ impl GraphInner {
         }
     }
 
-    fn resume_blocked_close(&self, n: NodeId) {
+    pub(super) fn resume_blocked_close(&self, n: NodeId) {
         let node = &self.nodes[n];
         if self.shared.is_cancelled() || self.shared.has_error() {
             unsafe { node.ctx_slot(0) }.discard_staging();
@@ -332,7 +329,7 @@ impl GraphInner {
     }
 
     /// 把某个槽暂存区的输出分发到下游(此时不持有任何算子回调栈)。
-    fn flush_staging(&self, n: NodeId, slot: usize) -> Result<bool> {
+    pub(super) fn flush_staging(&self, n: NodeId, slot: usize) -> Result<bool> {
         let node = &self.nodes[n];
         let input_ts = unsafe { node.ctx_slot(slot) }.input_ts;
         let reservations = {
@@ -372,7 +369,7 @@ impl GraphInner {
         Ok(true)
     }
 
-    fn reserve_internal_capacity(
+    pub(super) fn reserve_internal_capacity(
         &self,
         producer: NodeId,
         outputs: &[(EdgeId, usize)],
@@ -440,18 +437,18 @@ impl GraphInner {
         Ok(Some(reservations))
     }
 
-    fn release_internal_reservations(&self, reservations: &[InputQueueReservation]) {
+    pub(super) fn release_internal_reservations(&self, reservations: &[InputQueueReservation]) {
         for reservation in reservations {
             self.nodes[reservation.node].input_queue_reserved[reservation.port]
                 .fetch_sub(reservation.packets, Ordering::SeqCst);
         }
     }
 
-    fn epoch_us(&self) -> i64 {
+    pub(super) fn epoch_us(&self) -> i64 {
         self.epoch.elapsed().as_micros().min(i64::MAX as u128) as i64
     }
 
-    fn mark_input_queue_blocked(&self, context: InputQueueBlockContext) {
+    pub(super) fn mark_input_queue_blocked(&self, context: InputQueueBlockContext) {
         let InputQueueBlockContext {
             producer,
             consumer,
@@ -482,7 +479,7 @@ impl GraphInner {
         }
     }
 
-    fn finish_input_queue_block(&self, node: NodeId, port: usize, log_recovery: bool) {
+    pub(super) fn finish_input_queue_block(&self, node: NodeId, port: usize, log_recovery: bool) {
         let stats = &self.nodes[node].input_queue_stats[port];
         let since = stats.blocked_since_us.swap(0, Ordering::SeqCst);
         if since != 0 {
@@ -507,7 +504,7 @@ impl GraphInner {
         }
     }
 
-    fn finish_all_backpressure_blocks(&self) {
+    pub(super) fn finish_all_backpressure_blocks(&self) {
         for node in 0..self.nodes.len() {
             for port in 0..self.nodes[node].input_queues.len() {
                 self.finish_input_queue_block(node, port, false);
@@ -515,7 +512,7 @@ impl GraphInner {
         }
     }
 
-    fn backpressure_stall_details(&self, producers: &[NodeId]) -> Vec<String> {
+    pub(super) fn backpressure_stall_details(&self, producers: &[NodeId]) -> Vec<String> {
         let producer_set: BTreeSet<NodeId> = producers.iter().copied().collect();
         let mut details = Vec::new();
         for (consumer, node) in self.nodes.iter().enumerate() {
@@ -552,7 +549,7 @@ impl GraphInner {
     }
 
     /// `flush_staging` 的单个输出口分支(拆出来只为让上面的循环短一点,逻辑未变)。
-    fn flush_one(
+    pub(super) fn flush_one(
         &self,
         n: NodeId,
         edge: EdgeId,
