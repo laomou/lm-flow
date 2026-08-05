@@ -143,7 +143,8 @@ jobs:
       - name: configure + build + ctest
         run: |
           cmake -B build -DCMAKE_BUILD_TYPE=Release \
-            -DBUILD_SHARED_LIBS=OFF -DLMFLOW_BUILD_KERNELS=ON
+            -DBUILD_SHARED_LIBS=OFF -DLMFLOW_BUILD_KERNELS=ON \
+            -DLMFLOW_BUILD_BENCHMARKS=ON
           cmake --build build -j
           ctest --test-dir build --output-on-failure
       - name: install SDK + 最小外部工程消费(find_package)
