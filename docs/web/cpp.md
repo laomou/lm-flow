@@ -744,7 +744,7 @@ output_ports: ["boxes"]
 max_queue_size: 100
 max_queued_packets: 500
 watchdog_ms: 5000
-stats_timing: true
+stats: full
 ```
 
 Node fields: `name`, `kernel` (or `type` for a subgraph instance), `input_ports`, `output_ports`,
@@ -769,7 +769,7 @@ thread; dequeue resumes the pending flush. Do not combine `input_queues` limits 
 participate in capacity enforcement.
 
 Graph fields: `executors`, `nodes`, `subgraphs`, `include`, `input_ports`, `output_ports`,
-`max_queue_size`, `max_queued_packets`, `watchdog_ms`, `stats_timing`.
+`max_queue_size`, `max_queued_packets`, `watchdog_ms`, `stats`.
 
 ### Input policies
 
@@ -938,11 +938,11 @@ ports. Counters set with
 `Context::CounterAdd` are aggregated per graph and are far easier to assert on in a test than log
 output.
 
-`watchdog_ms` logs a warning when a single callback exceeds the given duration. `stats_timing`
-(default on) controls whether each callback is timed; turning it off saves two clock reads per
-`process`, at the cost of zeroing the timing fields and flattening the heat map. Because the watchdog
-depends on those timings, setting `watchdog_ms > 0` forces timing back on and logs an INFO line
-explaining why — a silently disabled watchdog is not an acceptable outcome.
+`stats` selects runtime diagnostics: `basic` (default) keeps low-cost state, throughput, queue, and
+backpressure counters; `full` additionally records callback timing, latency percentiles, CoW copies,
+and executor timing; `off` keeps only state required for correct scheduling. Because the watchdog
+depends on callback timing, setting `watchdog_ms > 0` forces `full` and logs an INFO line explaining
+why. Legacy `stats_timing: true/false` remains accepted as `full/basic`.
 
 ## Logging
 

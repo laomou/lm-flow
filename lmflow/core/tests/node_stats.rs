@@ -98,6 +98,7 @@ output_ports: ["out"]
 /// 默认执行器是线程池,「送一个」与「worker 取一个」并发进行,峰值可能是 1 也可能是 2。
 /// 交还宿主线程后执行严格同步,峰值恒为 1,那种精确断言才有意义。
 const CHAIN_SYNC: &str = r#"
+stats: full
 executors:
   - { name: "host", type: "DelegatingExecutor" }
 nodes:
@@ -163,7 +164,7 @@ fn peak_queue_depth_is_a_high_water_mark() {
 
 #[test]
 fn total_us_is_consistent_with_processed() {
-    let g = run_chain(4);
+    let g = run_chain_of(&format!("stats: full\n{CHAIN}"), 4);
     let st = g.node_stats(0).unwrap();
     assert!(
         st.total_process_us >= 0 && st.max_process_us >= 0,
@@ -190,6 +191,7 @@ fn diagnostics_show_latency_percentiles() {
     let _ = lmflow::register_kernel::<PercentileSlow>("PercentileSlow");
     let graph = Graph::from_yaml(
         r#"
+stats: full
 executors:
   - { name: host, type: DelegatingExecutor }
 nodes:
@@ -289,6 +291,7 @@ fn dot_marks_saturated_executor_and_lists_queued_nodes() {
     let gate = ExecutorQueueGateGuard::hold();
     let graph = Graph::from_yaml(
         r#"
+stats: full
 executors:
   - { name: solo, num_threads: 1 }
 nodes:
@@ -553,13 +556,12 @@ output_ports: ["out"]
     assert!(dot.contains("cluster_"), "子图 cluster 应保留:\n{dot}");
 }
 
-/// `stats_timing: false` 关掉每次回调的两次 `Instant::now()`:
-/// 耗时类字段归零、其余计数照常。这是**显式取舍**,不是 bug。
+/// 默认 `basic` 关闭每次回调计时，但保留低成本计数。
 #[test]
-fn stats_timing_off_zeroes_only_timing_fields() {
+fn basic_stats_zeroes_only_full_fields() {
     let g = Graph::from_yaml(
         r#"
-stats_timing: false
+stats: basic
 nodes:
   - { name: a, kernel: PassThrough, input_ports: ["in"], output_ports: ["out"] }
 input_ports: ["in"]
@@ -585,7 +587,7 @@ output_ports: ["out"]
 
     let st = g.node_stats(0).unwrap();
     // 计数照常
-    assert_eq!(st.processed, 4, "计数不受计时开关影响");
+    assert_eq!(st.processed, 4, "basic 应保留吞吐计数");
     assert_eq!(st.packets_in, 4);
     assert_eq!(st.packets_out, 4);
     // 耗时归零
@@ -596,9 +598,14 @@ output_ports: ["out"]
     // 热力图退化:全同色(不报错、不崩)
     let dot = g.to_dot_with_stats();
     assert!(dot.contains("4 pkts"), "包数仍应标出:\n{dot}");
+    assert!(
+        dot.contains("timing n/a"),
+        "basic 应明确标出未采集耗时:\n{dot}"
+    );
+    assert!(dot.contains("detailed stats n/a"));
 }
 
-/// `watchdog_ms > 0` 时,即使写了 `stats_timing: false` 也必须**强制开启**计时 ——
+/// `watchdog_ms > 0` 时,即使写了 `stats: off` 也必须**强制开启** full ——
 /// 否则 watchdog 无从判断超时、会静默失效。
 ///
 /// 用一个**故意睡 2ms** 的算子做决定性判据:强制开启则 `max_process_us >= 1000`;
@@ -617,7 +624,7 @@ fn watchdog_forces_timing_on() {
 
     let g = Graph::from_yaml(
         r#"
-stats_timing: false
+stats: off
 watchdog_ms: 1
 nodes:
   - { name: a, kernel: SlowForWatchdogTest, input_ports: ["in"], output_ports: ["out"] }
@@ -641,7 +648,43 @@ output_ports: ["out"]
     assert!(
         st.max_process_us >= 1000,
         "watchdog_ms>0 必须强制开启计时(睡了 2ms,应测到 >=1000µs);实测 {}µs —— \
-         若为 0 说明计时被 stats_timing=false 关掉了,watchdog 会静默失效",
+         若为 0 说明 full 统计未被强制开启,watchdog 会静默失效",
         st.max_process_us
     );
+}
+
+#[test]
+fn stats_off_keeps_state_and_errors_but_skips_throughput_counters() {
+    let g = Graph::from_yaml(
+        r#"
+stats: off
+nodes:
+  - { name: a, kernel: PassThrough, input_ports: ["in"], output_ports: ["out"] }
+input_ports: ["in"]
+output_ports: ["out"]
+"#,
+    )
+    .unwrap();
+    let out = g.add_poller("out").unwrap();
+    g.start().unwrap();
+    g.input("in")
+        .unwrap()
+        .send(Packet::from_i64(1).at(Timestamp(0)))
+        .unwrap();
+    g.close_all_inputs();
+    assert!(out.next().is_some());
+    g.wait_done_timeout(Duration::from_secs(5)).unwrap();
+
+    let st = g.node_stats(0).unwrap();
+    assert!(!st.running);
+    assert_eq!(st.queued, 0);
+    assert_eq!(st.errors, 0);
+    assert_eq!(st.processed, 0);
+    assert_eq!(st.packets_in, 0);
+    assert_eq!(st.packets_out, 0);
+    assert_eq!(st.peak_queue_depth, 0);
+    assert_eq!(st.total_process_us, 0);
+    let dot = g.to_dot_with_stats();
+    assert!(dot.contains("stats off"));
+    assert!(!dot.contains("1 pkts"), "off 不应把未采集吞吐画成真实 0/1");
 }

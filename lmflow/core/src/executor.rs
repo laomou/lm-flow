@@ -124,7 +124,7 @@ impl Executor {
         }
     }
 
-    pub fn complete_delegated(&self, execution: Duration) {
+    pub fn complete_delegated(&self, execution: Option<Duration>) {
         if let Self::Delegating(delegating) = self {
             delegating.complete(execution);
         }

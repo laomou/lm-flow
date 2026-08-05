@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering}
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Instant;
 
-use crate::config::GraphConfig;
+use crate::config::{GraphConfig, StatsLevel};
 use crate::context::Context;
 use crate::executor::Executor;
 use crate::kernel::{KernelInstance, PortTable};
@@ -102,9 +102,20 @@ pub struct GraphInner {
     run_started_us: AtomicI64,
     /// Compact / Diagnostics 各自相邻两次导出之间的私有基线；不作为宿主查询 API 暴露。
     dot_intervals: Mutex<dot::DotIntervalBaselines>,
-    /// 是否为每次算子回调计时。建图时由 `config.stats_timing` 与 `watchdog_ms` 定下,
-    /// 之后不变(故是普通 bool,不必原子)。见 `GraphConfig::stats_timing`。
-    timing: bool,
+    /// 建图时确定，运行期间不变，故无需原子。
+    stats_level: StatsLevel,
+}
+
+impl GraphInner {
+    #[inline]
+    fn basic_stats(&self) -> bool {
+        self.stats_level != StatsLevel::Off
+    }
+
+    #[inline]
+    fn full_stats(&self) -> bool {
+        self.stats_level == StatsLevel::Full
+    }
 }
 
 /// A handle to a computation graph.

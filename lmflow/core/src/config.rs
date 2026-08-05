@@ -11,6 +11,19 @@ fn default_max_queue_size() -> usize {
     100
 }
 
+/// 运行时统计级别。它只控制诊断记账，不改变调度与终止语义。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum StatsLevel {
+    /// 仅保留调度正确性和错误处理必需的状态。
+    Off,
+    /// 保留低成本吞吐、队列与背压统计。
+    #[default]
+    Basic,
+    /// 额外记录耗时、百分位、CoW 和执行器诊断。
+    Full,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExecutorConfig {
@@ -171,25 +184,21 @@ pub struct GraphConfig {
     /// 单次算子回调超过该时长即打 WARN(0 = 关闭)
     #[serde(default)]
     pub watchdog_ms: u64,
-    /// 是否为每次算子回调计时(默认开)。
+    /// 运行时统计级别。省略时为 `basic`。
     ///
-    /// 关掉可省下**每次 process 两次 `Instant::now()`**(本机约 43 ns,占单跳派发成本
-    /// 约 15%)。代价是 `LMFlowNodeStats` 的 `total_process_us` / `max_process_us` /
-    /// `running_for_us` 恒为 0,`to_dot(with_stats)` 的延迟热力图退化为单色。
+    /// `full` 才记录每次回调耗时、百分位、CoW 与执行器耗时；`off` 进一步关闭低成本
+    /// 吞吐和高水位计数。`watchdog_ms > 0` 时会强制提升为 `full`。
+    #[serde(default)]
+    pub stats: Option<StatsLevel>,
+    /// 旧版兼容字段：`true` 等价于 `stats: full`，`false` 等价于 `stats: basic`。
     ///
-    /// **`watchdog_ms > 0` 时本项被强制视为开启**(否则 watchdog 无从判断超时,
-    /// 那属于静默失效 —— 本项目不接受)。真关掉时会打一条 INFO 说明,不静默。
-    #[serde(default = "default_true")]
-    pub stats_timing: bool,
+    /// 不得与 `stats` 同时出现。
+    #[serde(default)]
+    pub stats_timing: Option<bool>,
 }
 
-fn default_true() -> bool {
-    true
-}
-
-/// **必须与上面的 serde 默认值保持一致** —— 否则「YAML 省略该字段」与「Rust 里
-/// `..Default::default()`」两条路会得到不同行为(典型陷阱:`bool` 的 derive 默认是
-/// `false`,而 `stats_timing` 的 serde 默认是 `true`)。故手写而不 derive。
+/// **必须与上面的 serde 默认值保持一致** —— 否则「YAML 省略字段」与 Rust
+/// `..Default::default()` 两条路会得到不同行为，故手写而不 derive。
 impl Default for GraphConfig {
     fn default() -> Self {
         Self {
@@ -202,7 +211,8 @@ impl Default for GraphConfig {
             max_queue_size: default_max_queue_size(),
             max_queued_packets: 0,
             watchdog_ms: 0,
-            stats_timing: default_true(),
+            stats: None,
+            stats_timing: None,
         }
     }
 }
@@ -246,6 +256,21 @@ pub struct SubgraphConfig {
 }
 
 impl GraphConfig {
+    pub fn effective_stats_level(&self) -> StatsLevel {
+        if self.watchdog_ms > 0 {
+            return StatsLevel::Full;
+        }
+        self.stats.unwrap_or_else(|| {
+            self.stats_timing.map_or(StatsLevel::Basic, |enabled| {
+                if enabled {
+                    StatsLevel::Full
+                } else {
+                    StatsLevel::Basic
+                }
+            })
+        })
+    }
+
     /// 只做 serde 解析:不校验、不展开、不解析 include。管线内部用。
     pub fn parse(text: &str) -> Result<Self> {
         serde_yaml::from_str(text).map_err(|e| Error::InvalidArg(format!("YAML parse failed: {e}")))
@@ -281,6 +306,11 @@ impl GraphConfig {
 
     /// 只检查「本版本是否支持」,拓扑合法性在 Graph::build 里查。
     fn check_supported(&self) -> Result<()> {
+        if self.stats.is_some() && self.stats_timing.is_some() {
+            return Err(Error::InvalidArg(
+                "`stats` and legacy `stats_timing` cannot be used together".into(),
+            ));
+        }
         for n in &self.nodes {
             let who = if n.name.is_empty() {
                 n.kernel.clone()
@@ -428,6 +458,16 @@ impl GraphConfig {
     }
 }
 
+impl StatsLevel {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Basic => "basic",
+            Self::Full => "full",
+        }
+    }
+}
+
 /// 端口声明的解析结果:`"TAG:index:name"` / `"TAG:name"` / `"name"`。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PortSpec {
@@ -500,6 +540,34 @@ output_ports: ["b"]
         assert_eq!(cfg.nodes[0].kernel, "PassThroughKernel");
         assert_eq!(cfg.input_ports, vec!["a"]);
         assert_eq!(cfg.max_queue_size, 100, "default queue limit");
+        assert_eq!(cfg.effective_stats_level(), StatsLevel::Basic);
+    }
+
+    #[test]
+    fn parses_stats_levels_and_legacy_timing() {
+        for (yaml, expected) in [
+            ("nodes: []\nstats: off", StatsLevel::Off),
+            ("nodes: []\nstats: basic", StatsLevel::Basic),
+            ("nodes: []\nstats: full", StatsLevel::Full),
+            ("nodes: []\nstats_timing: false", StatsLevel::Basic),
+            ("nodes: []\nstats_timing: true", StatsLevel::Full),
+        ] {
+            let cfg = GraphConfig::from_yaml(yaml).unwrap();
+            assert_eq!(cfg.effective_stats_level(), expected, "{yaml}");
+        }
+    }
+
+    #[test]
+    fn rejects_new_and_legacy_stats_together() {
+        let error =
+            GraphConfig::from_yaml("nodes: []\nstats: basic\nstats_timing: false").unwrap_err();
+        assert!(error.to_string().contains("cannot be used together"));
+    }
+
+    #[test]
+    fn watchdog_forces_full_stats() {
+        let cfg = GraphConfig::from_yaml("nodes: []\nstats: off\nwatchdog_ms: 1").unwrap();
+        assert_eq!(cfg.effective_stats_level(), StatsLevel::Full);
     }
 
     #[test]
