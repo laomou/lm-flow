@@ -372,14 +372,14 @@ class Graph:
         """Wait for the graph to finish (close the inputs first). Releases the GIL while waiting."""
         try:
             self._g.wait_done(timeout)
-        except TypeError as e:  # 原生层用 TypeError 表示超时
+        except TimeoutError as e:
             raise Timeout(str(e)) from None
 
     def wait_until_idle(self, timeout: float | None = None) -> None:
         """Wait until in-flight packets are all processed, but **do not end the graph** (batch mode)."""
         try:
             self._g.wait_until_idle(timeout)
-        except TypeError as e:
+        except TimeoutError as e:
             raise Timeout(str(e)) from None
 
     def pump_step(self) -> bool:
