@@ -61,21 +61,29 @@ class PyBlurInPlaceKernel(lmflow.Kernel):
         cc.emit(0, packet)
 
 
-# resize 是 Python 算子:不指定 executor,跑在 Python 主线程 → 无 GIL 争抢。
-# invert 是 C++ 算子:显式放进线程池,可与主线程上的 Python 算子真正并行。
+# 两个 Python 算子(resize / blur)挂**委托执行器** —— 它不拥有线程,把节点交还
+# Python 主线程跑,于是**没有 GIL 争抢**。invert 是 C++ 算子,放进线程池,可与主线程上的
+# Python 算子真正并行。
+#
+# 注意:不写 executor 会归默认执行器,而默认执行器是线程池 —— Python 算子在那上面要抢 GIL。
+# 所以这里必须显式指名 host。
 CONFIG = """
 executors:
+  - name: "host"
+    type: "DelegatingExecutor"      # 不拥有线程,交还 Python 主线程 → 无 GIL 争抢
   - name: "cpu"
     type: "ThreadPoolExecutor"
     num_threads: 4
 nodes:
   - name: "resize"
     kernel: "PyResizeKernel"
+    executor: "host"                # Python 算子留在主线程
     input_ports: ["frames"]
     output_ports: ["small"]
     options: { width: 320, height: 240 }
   - name: "blur"
     kernel: "PyBlurInPlaceKernel"   # Python 算子:take_input + make_mutable 的 CoW 原地改写
+    executor: "host"
     input_ports: ["small"]
     output_ports: ["blurred"]
   - name: "invert"

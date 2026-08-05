@@ -35,11 +35,9 @@ fn make_int_packet(v: i32, ts: i64) -> LMFlowPacket {
     }
 }
 
-// 显式跑委托执行器(交还宿主线程):本文件以 C 调用方的方式驱动引擎,靠的正是
-// 「宿主进入阻塞接口时任务被抽取」这条语义 —— 顺序确定,断言才写得死。
+// 不写 executors —— 走**默认执行器**(按 CPU 核数开线程的线程池),也就是绝大多数
+// 宿主的实际配置。委托执行器另有专门用例(见 tests/concurrency.rs)。
 const CONFIG: &str = r#"
-executors:
-  - { name: "", type: "DelegatingExecutor" }
 nodes:
   - name: "n1"
     kernel: "PassThroughKernel"
@@ -677,7 +675,7 @@ fn observer_receives_packets() {
                 lmflow_input_send(input, make_int_packet(i * 10, i as i64)),
                 0
             );
-            // 委托执行器:需要进入引擎才会推进(见 docs/design.md §7.9)
+            // 每送一个就排干一次,故 observer 收到的顺序是确定的
             assert_eq!(lmflow_graph_wait_until_idle(g), 0);
         }
         lmflow_graph_close_all_inputs(g);

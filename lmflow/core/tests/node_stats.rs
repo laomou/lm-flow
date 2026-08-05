@@ -53,9 +53,20 @@ impl Kernel for DotError {
     }
 }
 
-// 显式跑委托执行器:这些是 DOT / 状态渲染测试,要的是「状态转换可复现」,
-// 不是并发。默认执行器是线程池,节点状态会随 worker 调度抖动。
 const CHAIN: &str = r#"
+nodes:
+  - { name: a, kernel: PassThrough, input_ports: ["in"],  output_ports: ["mid"] }
+  - { name: b, kernel: PassThrough, input_ports: ["mid"], output_ports: ["out"] }
+input_ports: ["in"]
+output_ports: ["out"]
+"#;
+
+/// 同一条链,但显式挂**委托执行器**(交还宿主线程)。
+///
+/// 只给那些断言**精确队列深度**的用例用:队列高水位本质上是调度产物 ——
+/// 默认执行器是线程池,「送一个」与「worker 取一个」并发进行,峰值可能是 1 也可能是 2。
+/// 交还宿主线程后执行严格同步,峰值恒为 1,那种精确断言才有意义。
+const CHAIN_SYNC: &str = r#"
 executors:
   - { name: "", type: "DelegatingExecutor" }
 nodes:
@@ -66,7 +77,11 @@ output_ports: ["out"]
 "#;
 
 fn run_chain(n: i64) -> Graph {
-    let g = Graph::from_yaml(CHAIN).unwrap();
+    run_chain_of(CHAIN, n)
+}
+
+fn run_chain_of(yaml: &str, n: i64) -> Graph {
+    let g = Graph::from_yaml(yaml).unwrap();
     let out = g.add_poller("out").unwrap();
     g.start().unwrap();
     let inp = g.input("in").unwrap();
@@ -133,7 +148,8 @@ fn total_us_is_consistent_with_processed() {
 
 #[test]
 fn dot_with_stats_annotates_and_keeps_structure() {
-    let g = run_chain(3);
+    // 精确断言 peakQ 需要同步执行 —— 见 CHAIN_SYNC 的说明。
+    let g = run_chain_of(CHAIN_SYNC, 3);
     let plain = g.to_dot();
     let stats = g.to_dot_with_stats();
 
@@ -238,8 +254,6 @@ fn dot_node_state_tracks_idle_running_closed_and_error() {
 
     let idle = Graph::from_yaml(
         r#"
-executors:
-  - { name: "", type: "DelegatingExecutor" }
 nodes:
   - { name: idle, kernel: PassThrough, input_ports: [in], output_ports: [] }
 input_ports: [in]
@@ -293,8 +307,6 @@ input_ports: [in]
 
     let failed = Graph::from_yaml(
         r#"
-executors:
-  - { name: "", type: "DelegatingExecutor" }
 nodes:
   - { name: failed, kernel: DotError, input_ports: [in], output_ports: [] }
 input_ports: [in]

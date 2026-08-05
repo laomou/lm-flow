@@ -15,6 +15,62 @@ to each GitHub Release.
 - **Graph runtime module layout.** The former monolithic graph implementation is split into
   dedicated Poller, node/readiness, backpressure, runtime scheduling, and lifecycle files without
   changing the public API or execution behavior.
+- **BREAKING — nodes without an `executor` now run on a real default thread pool, not the host
+  thread.** The engine creates a default executor named `default`, sized to
+  `available_parallelism()`, and every node that names no executor is bound to it. Previously such
+  nodes ran on the host thread and only advanced while the host sat inside `wait_done` /
+  `wait_until_idle` / `poller.next` / a blocking `send` — a graph that only ever called `send` never
+  progressed at all. That surprise is gone; the cost is that **default execution is now concurrent
+  and its order is no longer deterministic**, and Python kernels now contend for the GIL by default.
+- **BREAKING — `Graph::executor_names()` now includes the default executor as its first entry.**
+  A graph declaring one pool `cpu` reports `["default", "cpu"]` rather than `["cpu"]`.
+- **BREAKING — the DOT string `@main` no longer exists.** Node placement is always rendered as
+  `@<executor name>`, so host-thread nodes now show `@default` (or whatever the delegating executor
+  is called). Delegating executors keep the white fill and are listed in the executor legend as
+  `host thread (delegating)`; the standalone `legend_main` box is gone.
+- **`max_in_flight > 1` is now validated against the resolved executor's thread count** rather than
+  against "did you write an `executor` field". Since the default pool is multi-threaded, a node on
+  the default executor may now set `max_in_flight > 1` (ADR #29). Single-threaded pools and
+  delegating executors still reject it.
+- **Source nodes are now rejected only on delegating executors**, not on "no executor" — the default
+  pool is a perfectly good home for a source. A new check rejects a pool carrying as many source
+  nodes as it has threads, which is provable starvation.
+
+### Added
+
+- **`DelegatingExecutor` — host-thread execution is now an executor type**, selected with
+  `type: "DelegatingExecutor"`. It owns no threads and hands ready nodes back to the host thread,
+  restoring the old default's guarantees: zero concurrency, deterministic order, straightforward
+  debugging, and Python kernels free of GIL contention. Declaring it with an empty name makes it the
+  default for the whole graph:
+
+  ```yaml
+  executors:
+    - { name: "", type: "DelegatingExecutor" }
+  ```
+
+  `num_threads` / `affinity` / `priority` on a delegating executor are rejected rather than silently
+  ignored.
+- **An empty `executors[].name` configures the default executor** (normalised to `default`), so the
+  default pool's thread count, CPU affinity, and realtime priority are all tunable:
+  `- { name: "", type: "ThreadPoolExecutor", num_threads: 4 }`.
+- **`Graph::pump_step()`** is documented as the way for a host that owns its own event loop to
+  advance delegating-executor nodes without blocking.
+
+### Fixed
+
+- **A graph whose every node named an executor no longer logs a bogus
+  ``executor `` is defined but not used`` warning.** The implicitly created default executor is
+  exempt from the unused-pool check.
+
+### Known issues
+
+- **CoW zero-copy on a linear pipeline is best-effort on thread pools, not guaranteed.** An upstream
+  node's context input slot is only cleared at the start of its *next* call, so a downstream in-place
+  write on another worker thread can still see a refcount ≥ 2 and silently copy. Measured over 600
+  single-packet three-stage runs: 0 copies on a delegating executor, ~13% on a 4-thread pool. This
+  predates the default change (any `executor:`-on-a-pool graph behaved this way), but the default
+  path now lands on it. See `docs/design.md` §3.4.
 
 ## [0.3.0] — 2026-08-04
 

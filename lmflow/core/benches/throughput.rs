@@ -35,7 +35,7 @@ fn buf_u8(shape: &[i64]) -> Packet {
     Packet::from_builtin(Builtin::Buffer(BufferData::new(shape, DT_U8).unwrap()))
 }
 
-/// K 级 PassThrough 直通链的 YAML;`pool>0` 挂线程池,否则主线程执行器。
+/// K 级 PassThrough 直通链的 YAML;`pool>0` 挂线程池,否则显式用委托执行器(交还宿主线程)。
 /// 名字相连即成边(n{i} 输出 e{i} = n{i+1} 输入 e{i})。`max_queue_size` 调大,批量喂入不撞软水位。
 fn chain_yaml(depth: usize, pool: usize) -> String {
     let mut s = String::from("max_queue_size: 1000000\n");
@@ -43,6 +43,10 @@ fn chain_yaml(depth: usize, pool: usize) -> String {
         s += &format!(
             "executors:\n  - {{ name: \"cpu\", type: \"ThreadPoolExecutor\", num_threads: {pool} }}\n"
         );
+    } else {
+        // pool == 0 要量的是**宿主线程**路径。默认执行器现在是线程池(ADR #16),
+        // 不显式换成委托执行器就会悄悄变成又一组线程池数据,与记录的基线不可比。
+        s += "executors:\n  - { name: \"\", type: \"DelegatingExecutor\" }\n";
     }
     s += "nodes:\n";
     for i in 0..depth {
@@ -65,10 +69,11 @@ fn chain_yaml(depth: usize, pool: usize) -> String {
     s
 }
 
-/// 单节点图:in -> <kernel> -> out(主线程执行器)。
+/// 单节点图:in -> <kernel> -> out(委托执行器,交还宿主线程)。
 fn single_yaml(kernel: &str) -> String {
     format!(
         "max_queue_size: 1000000\n\
+         executors:\n  - {{ name: \"\", type: \"DelegatingExecutor\" }}\n\
          nodes:\n  - {{ name: \"n\", kernel: \"{kernel}\", input_ports: [\"in\"], output_ports: [\"out\"] }}\n\
          input_ports: [\"in\"]\noutput_ports: [\"out\"]\n"
     )

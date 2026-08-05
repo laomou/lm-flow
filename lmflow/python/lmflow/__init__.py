@@ -30,12 +30,24 @@ down, otherwise engine threads may call back into a dying interpreter and crash.
 Always use ``with lmflow.Graph.from_yaml(...) as g:``, or call ``g.close()``
 explicitly. ``__del__`` is only a fallback and its timing is not guaranteed.
 
-**GIL** — a node with no ``executor`` runs on the **host main thread**, where
-Python kernels never contend for the GIL. It only matters once you put a Python
-kernel on a thread pool: there they cannot truly run in parallel, so heavy compute
-belongs in C++ kernels (or keep the Python kernels on the main thread and put the
-C++ kernels on the pool). Every potentially blocking call (``poller.next`` /
-``wait_done`` / ``send``) releases the GIL while waiting.
+**GIL** — a node with no ``executor`` runs on the **default executor**, which is a
+thread pool sized to the CPU count. So by default Python kernels *do* contend for
+the GIL and cannot truly run in parallel; heavy compute belongs in C++ kernels.
+
+To get back the contention-free behaviour, make the default executor delegate to the
+host thread — one line of YAML::
+
+    executors:
+      - { name: "", type: "DelegatingExecutor" }
+
+Then Python kernels all run on the Python main thread, exactly as before. You can
+also declare a *named* ``DelegatingExecutor`` and put only the Python kernels on it,
+leaving the C++ kernels on a pool so the two genuinely run in parallel. The tradeoff
+is that a delegating executor only advances while the host is inside a blocking call
+(``wait_done`` / ``wait_until_idle`` / ``poller.next`` / blocking ``send``).
+
+Every potentially blocking call (``poller.next`` / ``wait_done`` / ``send``) releases
+the GIL while waiting.
 
 **Data types** — Python kernels may only send/receive **builtin types**: int /
 float / bool / str / bytes, plus N-dimensional numeric buffers (``as_numpy()`` /

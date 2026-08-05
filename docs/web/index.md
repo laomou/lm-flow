@@ -177,7 +177,10 @@ Notable capabilities:
   depth, processing-time totals), a watchdog for slow callbacks, and DOT export with an optional
   latency heat map.
 - **Executor control** — thread count, CPU affinity and real-time priority per executor, for
-  pinning work on realtime or NUMA systems.
+  pinning work on realtime or NUMA systems. Nodes that name no executor land on the **default
+  executor**, a thread pool sized to the CPU count; declare
+  `- { name: "", type: "DelegatingExecutor" }` to hand the default back to the host thread instead
+  (zero concurrency, deterministic order, no GIL contention for Python kernels).
 
 Unsupported configuration is **rejected loudly** rather than ignored: if a field asks for
 something this version does not implement, graph construction fails. Silently doing less than

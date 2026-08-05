@@ -12,7 +12,9 @@
 
 #include "lmflow/flow.h"
 
-/* 两个节点都未指定 executor → 都跑在主线程,任务在 poller_next / wait_done 期间被抽取。 */
+/* 两个节点都未指定 executor → 都归**默认执行器**(按 CPU 核数开线程的线程池,引擎自动建)。
+ * 想要零并发、顺序确定,把默认换成委托执行器:
+ *   executors: [{ name: "", type: "DelegatingExecutor" }] */
 static const char* kConfig = R"(
 nodes:
   - name: "node1"
