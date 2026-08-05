@@ -71,7 +71,6 @@ impl GraphInner {
                     let mut sched = node.sched.lock().expect("scheduler lock poisoned");
                     sched.blocked_flush = Some(BlockedFlush::Close);
                     sched.flushing = false;
-                    drop(sched);
                     self.blocked_flush_nodes
                         .lock()
                         .expect("blocked flush lock poisoned")
@@ -367,7 +366,7 @@ impl GraphInner {
                     .copied()
                     .collect();
                 if !blocked.is_empty() {
-                    if self.retry_backpressure_progress() {
+                    if self.retry_idle_progress() {
                         continue;
                     }
                     let details = self.backpressure_stall_details(&blocked);
@@ -376,6 +375,9 @@ impl GraphInner {
                          increase the input queue packet capacity or inspect downstream alignment",
                         details.join("; ")
                     )));
+                }
+                if self.retry_idle_progress() {
+                    continue;
                 }
                 // 空闲且未全关:再推一轮关流
                 if self.try_advance_closing() {
@@ -467,7 +469,7 @@ impl GraphInner {
                     .iter()
                     .copied()
                     .collect();
-                if !blocked.is_empty() && self.retry_backpressure_progress() {
+                if !blocked.is_empty() && self.retry_idle_progress() {
                     continue;
                 }
                 if self.is_idle() {

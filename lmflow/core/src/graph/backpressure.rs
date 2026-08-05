@@ -150,11 +150,10 @@ impl GraphInner {
         }
     }
 
-    /// `workers_idle + blocked staging` 只是一个瞬时快照,不能直接等同于死锁:
-    /// 下游队列里可能已有可消费数据,但对应节点的调度通知恰好与上游进入 blocked
-    /// staging 交错,此刻任务队列暂时为空。先全图重扫就绪性并重试刷新;若活动代数
-    /// 仍不变且 worker 仍空闲,才算稳定地没有进展。
-    pub(super) fn retry_backpressure_progress(&self) -> bool {
+    /// `workers_idle` 只是执行器快照,不能直接等同于图没有可推进工作:
+    /// 队列入队、blocked staging 恢复与下游调度通知可能交错,使任务队列暂时为空。
+    /// 先全图重扫就绪性并重试刷新;若活动代数仍不变且 worker 仍空闲,才算稳定。
+    pub(super) fn retry_idle_progress(&self) -> bool {
         let before = self.activity_gen();
         for node in 0..self.nodes.len() {
             self.schedule_node(node);
@@ -165,6 +164,12 @@ impl GraphInner {
     }
 
     /// 驱动按序刷新。下游容量不足时保留槽与 staging,让出 worker;由下游出队后重试。
+    ///
+    /// ⚠ 本文件里对 `blocked_flush_nodes` 的每次增删都**刻意放在持 `node.sched` 的作用域内**:
+    /// 它是「哪些节点有 `blocked_flush`」的索引,与 `sched.blocked_flush` 必须原子地一起变。
+    /// 分两步做会露出「索引已空、节点仍有 blocked_flush」的中间态,而 `wait_done` / `is_idle`
+    /// 正是读这个索引判死锁的 —— 读到中间态就把正常排空误报成卡死。
+    /// 由此锁序恒为 `node.sched` → `blocked_flush_nodes`(见 design.md R2),反向即死锁。
     pub(super) fn drive_invocation_flushes(&self, n: NodeId, mut first: Option<(usize, bool)>) {
         let node = &self.nodes[n];
         loop {
@@ -181,6 +186,10 @@ impl GraphInner {
                             Some(value) => Some(value),
                             None => {
                                 sched.flushing = false;
+                                self.blocked_flush_nodes
+                                    .lock()
+                                    .expect("blocked flush lock poisoned")
+                                    .remove(&n);
                                 None
                             }
                         }
@@ -188,10 +197,6 @@ impl GraphInner {
                 }
             };
             let Some((slot, ok)) = item else {
-                self.blocked_flush_nodes
-                    .lock()
-                    .expect("blocked flush lock poisoned")
-                    .remove(&n);
                 return;
             };
 
@@ -202,7 +207,6 @@ impl GraphInner {
                         let mut sched = node.sched.lock().expect("scheduler lock poisoned");
                         sched.blocked_flush = Some(BlockedFlush::Invocation { slot, ok });
                         sched.flushing = false;
-                        drop(sched);
                         self.blocked_flush_nodes
                             .lock()
                             .expect("blocked flush lock poisoned")
@@ -231,6 +235,9 @@ impl GraphInner {
         if self.shared.is_cancelled() || self.shared.has_error() {
             self.finish_all_backpressure_blocks();
         }
+        // 取快照即释放索引锁 —— 下面要锁 `node.sched`,而锁序是 sched → 索引(R2),
+        // 反过来就死锁。这里靠的是「临时 MutexGuard 活到语句末」:别把 `.lock()` 的
+        // 结果绑成局部变量,那会把它的存活期拉长到覆盖下面的 sched 加锁。
         let blocked: Vec<NodeId> = self
             .blocked_flush_nodes
             .lock()
@@ -274,11 +281,11 @@ impl GraphInner {
                 sched.blocked_flush = None;
                 sched.flushing = false;
                 sched.closed = true;
+                self.blocked_flush_nodes
+                    .lock()
+                    .expect("blocked flush lock poisoned")
+                    .remove(&n);
             }
-            self.blocked_flush_nodes
-                .lock()
-                .expect("blocked flush lock poisoned")
-                .remove(&n);
             for &edge in &node.outputs {
                 self.close_edge(edge);
             }
@@ -293,11 +300,11 @@ impl GraphInner {
                     sched.blocked_flush = None;
                     sched.flushing = false;
                     sched.closed = true;
+                    self.blocked_flush_nodes
+                        .lock()
+                        .expect("blocked flush lock poisoned")
+                        .remove(&n);
                 }
-                self.blocked_flush_nodes
-                    .lock()
-                    .expect("blocked flush lock poisoned")
-                    .remove(&n);
                 for &edge in &node.outputs {
                     self.close_edge(edge);
                 }
@@ -315,11 +322,11 @@ impl GraphInner {
                     sched.blocked_flush = None;
                     sched.flushing = false;
                     sched.closed = true;
+                    self.blocked_flush_nodes
+                        .lock()
+                        .expect("blocked flush lock poisoned")
+                        .remove(&n);
                 }
-                self.blocked_flush_nodes
-                    .lock()
-                    .expect("blocked flush lock poisoned")
-                    .remove(&n);
                 for &edge in &node.outputs {
                     self.close_edge(edge);
                 }
