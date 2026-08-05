@@ -317,6 +317,13 @@ freed a slot. If several parts of your host need waking, have one owner install 
 broadcast to them, each re-checking its own condition. Installing a second callback from elsewhere
 silently displaces the first, and the symptom is a graph that quietly stops advancing.
 
+Before writing that broadcaster, check whether you need the slot at all. To consume output, use
+`lmflow_graph_observe` — it already accepts several subscribers per port and is a separate mechanism
+that leaves this slot alone. The trade is its own constraints: register it before
+`lmflow_graph_start`, it **cannot be unregistered** afterwards, and the callback runs inline on the
+dispatching worker thread with a borrowed packet. Reserve the wakeup slot for what has no dedicated
+subscription API — waiting for the run to finish, or for an input queue to drain.
+
 ```cpp
 struct LoopWake {
   LMFlowGraph* graph;
