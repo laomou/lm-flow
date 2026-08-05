@@ -42,12 +42,16 @@ class PyOffsetKernel(lmflow.Kernel):
 
 
 # 两个节点都未指定 executor → 都归**默认执行器**(按 CPU 核数开线程的线程池)。
-# ⚠ 于是 Python 算子会在引擎工作线程上抢 GIL。想要「完全没有 GIL 争抢」,自己声明一个
-# 委托执行器(交还 Python 主线程)、把节点指过去 —— 见 opencv_pipeline 那个例子:
+# ⚠ Python 算子会在引擎 worker 上获取 GIL,多个 Python 算子不能真正并行。
+# 若希望 Python 算子在宿主线程串行执行,可声明委托执行器并把 Python 节点指过去:
 #   executors:
 #     - { name: "host", type: "DelegatingExecutor" }
 #   nodes:
-#     - { name: scale, kernel: ScaleKernel, executor: "host", ... }
+#     - { name: offset, kernel: PyOffsetKernel, executor: "host", ... }
+#
+# 此时 poller.next()/wait_done() 会自动推进委托任务。事件循环宿主不想阻塞时也可主动:
+#   while graph.pump_step():
+#       pass
 CONFIG = """
 nodes:
   - name: "scale"

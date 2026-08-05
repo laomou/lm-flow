@@ -661,6 +661,11 @@ class Graph {
     check(st, "wait_until_idle");
   }
 
+  bool pump_step() {
+    py::gil_scoped_release unlock;
+    return lmflow_graph_pump_step(g_);
+  }
+
   int state() const { return static_cast<int>(lmflow_graph_state(g_)); }
   std::string dump() const {
     const char* s = lmflow_graph_dump(g_);
@@ -981,6 +986,7 @@ PYBIND11_MODULE(_lmflow, m) {
       .def("resume", &Graph::resume)
       .def("wait_done", &Graph::wait_done, py::arg("timeout") = std::nullopt)
       .def("wait_until_idle", &Graph::wait_until_idle, py::arg("timeout") = std::nullopt)
+      .def("pump_step", &Graph::pump_step)
       .def("new_buffer", &Graph::new_buffer, py::arg("shape"), py::arg("dtype"))
       .def_property_readonly("state", &Graph::state)
       .def("dump", &Graph::dump)

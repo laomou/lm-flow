@@ -276,6 +276,7 @@ impl GraphInner {
     /// 的阶段;否则并发关流可能撞上瞬时假空闲。
     pub(super) fn workers_idle(&self) -> bool {
         self.in_flight.load(Ordering::SeqCst) == 0
+            && !self.delegated_running.load(Ordering::Acquire)
             && self
                 .executors
                 .iter()
@@ -492,16 +493,36 @@ impl GraphInner {
 
     /// 跑一个委托给宿主线程的任务。返回是否真的跑了。
     ///
-    /// ⚠ 必须先把 pop 的结果落到局部变量:在 edition 2021 里,`if let` 表达式中的
-    /// 临时值(此处是 MutexGuard)会存活到整个 if-let 块结束 —— 那样 `run_node`
-    /// 内部再去锁同一个委托队列就自锁死。这也是 R2 锁序规则的实例。
+    /// 多个宿主线程可能同时进入阻塞接口；原子闸门保证同一张图一次只由一个线程
+    /// 执行委托任务。游标则让多个委托执行器轮询取任务，避免固定从第一个开始导致饥饿。
     pub(super) fn run_one_main_task(&self) -> bool {
-        let next = self
-            .executors
-            .iter()
-            .find_map(|executor| executor.take_delegated());
+        if self
+            .delegated_running
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            return false;
+        }
+        struct RunningGuard<'a>(&'a AtomicBool);
+        impl Drop for RunningGuard<'_> {
+            fn drop(&mut self) {
+                self.0.store(false, Ordering::Release);
+            }
+        }
+        let _running = RunningGuard(&self.delegated_running);
+
+        let len = self.executors.len();
+        let start = self.delegated_cursor.fetch_add(1, Ordering::Relaxed) % len;
+        let next = (0..len).find_map(|offset| {
+            let index = (start + offset) % len;
+            self.executors[index]
+                .take_delegated()
+                .map(|node| (index, node))
+        });
         match next {
-            Some(n) => {
+            Some((index, n)) => {
+                self.delegated_cursor
+                    .store(index.wrapping_add(1), Ordering::Relaxed);
                 self.run_node(n);
                 self.in_flight.fetch_sub(1, Ordering::SeqCst);
                 self.notify_activity();

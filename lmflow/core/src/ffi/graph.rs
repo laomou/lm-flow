@@ -504,6 +504,21 @@ pub unsafe extern "C" fn lmflow_graph_wait_until_idle_timeout(g: *mut LMFlowGrap
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn lmflow_graph_pump_step(g: *mut LMFlowGraph) -> bool {
+    guard_val(false, || {
+        let Some(slot) = slot_mut(g) else {
+            last_error::set("graph handle is null");
+            return false;
+        };
+        let Some(graph) = slot.graph.as_ref() else {
+            last_error::set("graph not yet initialized");
+            return false;
+        };
+        graph.pump_step()
+    })
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn lmflow_graph_pause(g: *mut LMFlowGraph) {
     guard_val((), || {
         if let Some(gr) = graph_of(g) {

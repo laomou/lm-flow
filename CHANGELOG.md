@@ -57,7 +57,11 @@ to each GitHub Release.
   `name: "default"`, or an entry with an empty name, is an error. To control threads / affinity /
   priority, declare your own pool and point the nodes at it.
 - **`Graph::pump_step()`** is documented as the way for a host that owns its own event loop to
-  advance delegating-executor nodes without blocking.
+  advance delegating-executor nodes without blocking, and is now exposed consistently through the
+  Rust API, C ABI (`lmflow_graph_pump_step`) and Python binding.
+- **Delegated execution is serialized and fair per graph.** Concurrent host callers cannot execute
+  delegated kernels simultaneously, and multiple `DelegatingExecutor` queues are pumped
+  round-robin instead of giving permanent priority to the first one.
 
 ### Fixed
 

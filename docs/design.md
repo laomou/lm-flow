@@ -2,7 +2,7 @@
 
 > 状态:**成品**。Rust 引擎、C ABI、C++ 糖层(含 OpenCV 互转)、18 个内置算子、
 > Python 绑定(pybind11)、原生 SDK 发布(各平台头文件+库)、三端文档站全部就位;
-> **321 个测试**(Rust 278 + soak 2 + doctest 3 + Python 38)全绿,TSan 硬门禁 0 竞态。Rust / C++ / Python 三种宿主的
+> **326 个测试**(Rust 282 + soak 2 + doctest 3 + Python 39)全绿,TSan 硬门禁 0 竞态。Rust / C++ / Python 三种宿主的
 > hello_world 都输出正确;支持线程池绑核 + 实时优先级(Linux/Android),可交叉编到
 > Android / iOS / 鸿蒙。
 > 定位:一个数据流图计算框架 —— 把计算描述成**有向图**,节点是**算子(Kernel)**,
@@ -950,8 +950,11 @@ nodes:
   - { name: "post",   kernel: "Post" }                          # 不写 → 默认池
 ```
 
-挂在 `DelegatingExecutor` 上就重新拿到:零并发、执行顺序确定、断点调试直观,以及
-**Python 算子跑在 Python 主线程上、完全没有 GIL 争抢**(§8.2)。
+挂在 `DelegatingExecutor` 上就重新拿到:零并发、执行顺序确定、断点调试直观。
+任务由实际进入引擎阻塞接口或调用 `pump_step()` 的宿主线程执行；通常由 Python
+主线程负责推进时，Python 算子就在主线程运行，且同一张图内不会互相争抢 GIL(§8.2)。
+多个宿主线程同时进入也不会把委托任务跑并发；多个委托执行器则按轮询顺序抽取，
+避免前一个队列持续繁忙时饿死后面的队列。
 
 ⚠ **委托任务的执行时机** —— 引擎不能凭空占用宿主线程,只能在宿主**进入引擎**时借用它。
 因此挂在 `DelegatingExecutor` 上的节点,其任务在宿主调用下列**阻塞接口**期间被抽取执行:
@@ -1185,8 +1188,10 @@ with lmflow.Graph.from_yaml(CONFIG) as graph:        # with 是硬要求,见 8.3
 
 - ⚠ **默认会有 GIL 争抢**:默认执行器是线程池(ADR #16),Python 算子在引擎工作线程上
   被回调、期间持 GIL ⇒ 多个 Python 算子之间无法真并行。
-- **想回到「完全没有 GIL 争抢」**:声明一个 `DelegatingExecutor`,把 Python 算子指过去 ——
-  它们就都在 Python 主线程上执行(§7.9)。C++ 算子仍可放进线程池,两者真并行
+- **想回到「同图 Python 算子不互相争抢 GIL」**:声明一个 `DelegatingExecutor`,
+  把 Python 算子指过去 —— 它们在负责推进的宿主线程上串行执行；通常由 Python
+  主线程调用阻塞接口或 `pump_step()` 时，就是在 Python 主线程执行(§7.9)。
+  C++ 算子仍可放进线程池,两者真并行
   (见 `examples/python/opencv_pipeline/opencv_pipeline.py`)。
 - 重计算仍应优先写成 C++ 算子 —— 那是唯一能在池里真并行的路。
 - **所有可能阻塞的接口必须释放 GIL**(`poller.next` / `wait_done` / `send`),
@@ -1379,7 +1384,7 @@ lm-flow/                          仓库根
 
 ---
 
-## 13. 测试策略(已落地 321 个:Rust 278 + soak 2 + doctest 3 + Python 38;另有 3 个独立 C++ 测试)
+## 13. 测试策略(已落地 326 个:Rust 282 + soak 2 + doctest 3 + Python 39;另有 3 个独立 C++ 测试)
 
 | 测试文件 | 数量 | 覆盖 |
 |---|---|---|

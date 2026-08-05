@@ -666,6 +666,11 @@ LMFlowStatus lmflow_graph_wait_done_timeout(LMFlowGraph*, int64_t timeout_ms);
 LMFlowStatus lmflow_graph_wait_until_idle(LMFlowGraph*);
 LMFlowStatus lmflow_graph_wait_until_idle_timeout(LMFlowGraph*, int64_t timeout_ms);
 
+/* 在当前宿主线程执行至多一个 DelegatingExecutor 任务,或推进一次关流。
+ * 事件循环型宿主可反复调用它主动推进委托节点,而不必进入阻塞接口。
+ * 有实际进展返回 true;当前无事可做返回 false。同一张图的委托任务始终串行执行。 */
+bool lmflow_graph_pump_step(LMFlowGraph*);
+
 /* 暂停 / 恢复调度(调试、限速用)。暂停期间已在执行的算子不受影响;
  * 送包仍会入队,只是不被调度。cancel 优先于 pause。 */
 void lmflow_graph_pause(LMFlowGraph*);

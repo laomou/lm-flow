@@ -219,6 +219,43 @@ fn full_pipeline_through_c_abi() {
 }
 
 #[test]
+fn c_abi_can_pump_a_delegating_executor() {
+    lmflow::register_builtin_kernels();
+    unsafe {
+        let graph = lmflow_graph_new();
+        let yaml = cs(r#"
+executors:
+  - { name: host, type: DelegatingExecutor }
+nodes:
+  - { name: pass, kernel: PassThroughKernel, executor: host, input_ports: [in], output_ports: [out] }
+input_ports: [in]
+output_ports: [out]
+"#);
+        assert_eq!(lmflow_graph_init_from_yaml(graph, yaml.as_ptr()), 0);
+        let output = cs("out");
+        let poller = lmflow_graph_add_poller(graph, output.as_ptr());
+        assert!(!poller.is_null());
+        assert_eq!(lmflow_graph_start(graph), 0);
+        let input_name = cs("in");
+        let input = lmflow_graph_input(graph, input_name.as_ptr());
+        assert_eq!(lmflow_input_send(input, make_int_packet(7, 0)), 0);
+
+        let mut packet = LMFlowPacket::default();
+        assert!(!lmflow_poller_try_next(poller, &mut packet));
+        assert!(lmflow_graph_pump_step(graph));
+        assert!(lmflow_poller_try_next(poller, &mut packet));
+        assert_eq!(*(packet.payload as *const i32), 7);
+        lmflow_packet_drop(&mut packet);
+
+        lmflow_graph_close_all_inputs(graph);
+        assert_eq!(lmflow_graph_wait_done(graph), 0);
+        lmflow_input_free(input);
+        lmflow_poller_free(poller);
+        lmflow_graph_free(graph);
+    }
+}
+
+#[test]
 fn builtin_packet_types_roundtrip() {
     unsafe {
         // 整数
@@ -395,6 +432,7 @@ fn null_pointers_do_not_crash() {
         // 所有导出函数都应对空指针返回错误/默认值,而不是崩溃
         assert!(lmflow_graph_init_from_yaml(std::ptr::null_mut(), std::ptr::null()) != 0);
         assert!(lmflow_graph_start(std::ptr::null_mut()) != 0);
+        assert!(!lmflow_graph_pump_step(std::ptr::null_mut()));
         assert!(lmflow_graph_input(std::ptr::null_mut(), std::ptr::null()).is_null());
         assert!(lmflow_graph_add_poller(std::ptr::null_mut(), std::ptr::null()).is_null());
         assert!(!lmflow_poller_next(

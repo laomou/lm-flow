@@ -154,18 +154,15 @@ output_ports: ["out"]
     let _ = graph.wait_done();
 }
 
-/// `fixed_size` 与线程池并用:实时管线的典型配置。
+/// `fixed_size` 与默认线程池并用:实时管线的默认配置。
 #[test]
-fn fixed_size_with_pool_bounds_memory() {
+fn fixed_size_with_default_pool_bounds_memory() {
     init();
     let graph = Graph::from_yaml(
         r#"
-executors:
-  - { name: "cpu", type: "ThreadPoolExecutor", num_threads: 2 }
 nodes:
   - name: "p"
     kernel: "PassThroughKernel"
-    executor: "cpu"
     input_ports: ["in"]
     output_ports: ["out"]
     input_policy: { type: "fixed_size", capacity: 4 }
