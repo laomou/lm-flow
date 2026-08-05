@@ -26,7 +26,9 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
+#include <cmath>
 #include <cstring>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <string>
@@ -406,6 +408,15 @@ class Context {
   }
   void set_error(const std::string& msg) const { lmflow_ctx_set_error(c_, msg.c_str()); }
   void source_done() const { lmflow_ctx_source_done(c_); }
+  void source_yield(double delay_seconds) const {
+    constexpr double kMaxDelaySeconds =
+        static_cast<double>(std::numeric_limits<uint64_t>::max()) / 1000.0;
+    if (!std::isfinite(delay_seconds) || delay_seconds < 0.0 ||
+        delay_seconds > kMaxDelaySeconds) {
+      throw py::value_error("delay_seconds must be finite, non-negative, and representable");
+    }
+    lmflow_ctx_source_yield(c_, static_cast<uint64_t>(delay_seconds * 1000.0));
+  }
   void counter_add(const std::string& n, int64_t d) const {
     lmflow_ctx_counter_add(c_, n.c_str(), d);
   }
@@ -950,6 +961,8 @@ PYBIND11_MODULE(_lmflow, m) {
       .def("source_done", &Context::source_done,
            "Source kernel (0 inputs): signal it has produced all its data -- the engine stops "
            "invoking it and closes its outputs, ending the graph.")
+      .def("source_yield", &Context::source_yield, py::arg("delay_seconds") = 0.0,
+           "Source kernel (0 inputs): release the worker and retry after the delay.")
       .def("counter_add", &Context::counter_add, py::arg("name"), py::arg("delta") = 1,
            "Add to a self-reported counter (for diagnostics).");
 

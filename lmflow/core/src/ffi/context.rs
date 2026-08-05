@@ -129,6 +129,14 @@ pub unsafe extern "C" fn lmflow_ctx_source_done(c: *const LMFlowContext) {
     });
 }
 #[no_mangle]
+pub unsafe extern "C" fn lmflow_ctx_source_yield(c: *const LMFlowContext, delay_ms: u64) {
+    guard_val((), || {
+        if let Some(x) = ctx_mut(c as *mut LMFlowContext) {
+            x.source_yield = Some(std::time::Duration::from_millis(delay_ms));
+        }
+    });
+}
+#[no_mangle]
 pub unsafe extern "C" fn lmflow_ctx_close_reason(c: *const LMFlowContext) -> i32 {
     guard_val(0, || ctx_ref(c).map_or(0, |x| x.close_reason))
 }

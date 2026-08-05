@@ -24,6 +24,7 @@ impl Graph {
 impl GraphInner {
     /// 一次调用完成后:尽力再填满容量(并行调度多个 in-flight),并尝试关闭。
     pub(super) fn finish(&self, n: NodeId) {
+        self.schedule_source_resumption(n);
         self.schedule_node(n);
         self.maybe_close(n);
     }
@@ -308,6 +309,8 @@ impl GraphInner {
                 *b.lock().expect("bound lock poisoned") = Timestamp::pre_stream();
             }
             node.source_done.store(false, Ordering::SeqCst);
+            node.source_waiting.store(false, Ordering::SeqCst);
+            node.source_wake_generation.fetch_add(1, Ordering::SeqCst);
             *node.last_fire.lock().expect("last_fire lock poisoned") = None;
             // 逐槽复位 Context:此刻 in_flight==0,与 start/Drop 同为「独占相」,无并发。
             for slot in 0..node.ctxs.len() {
@@ -318,7 +321,7 @@ impl GraphInner {
         // 5. GraphInner 顶层。side_packets 保留(下一轮 start 会自动 clone 进各 ctx)。
         //    epoch 不动:它只是各诊断时间戳的单调基准。
         for executor in &self.executors {
-            executor.clear_delegated();
+            executor.reset_run_state();
         }
         self.in_flight.store(0, Ordering::SeqCst);
         self.delegated_cursor.store(0, Ordering::Relaxed);

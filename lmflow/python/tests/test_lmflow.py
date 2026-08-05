@@ -128,6 +128,19 @@ class PyBatchSum(lmflow.Kernel):
         cc.emit(0, sum(cc.input_at(0, k).as_int() for k in range(n)))
 
 
+@lmflow.kernel("TYieldSource")
+class TYieldSource(lmflow.Kernel):
+    def open(self, cc):
+        self.calls = 0
+
+    def process(self, cc):
+        if self.calls == 0:
+            self.calls += 1
+            cc.source_yield(0.02)
+        else:
+            cc.source_done()
+
+
 def graph(yaml: str) -> lmflow.Graph:
     return lmflow.Graph.from_yaml(yaml)
 
@@ -210,6 +223,20 @@ output_ports: [out]
             g.start()
             g.wait_done(timeout=15.0)  # 没有输入口可喂,源自产
             self.assertEqual([p.as_int() for p in out], [0, 1, 2, 3, 4])
+
+    def test_source_yield_releases_worker_and_retries(self):
+        with graph(
+            """
+executors:
+  - { name: solo, type: ThreadPoolExecutor, num_threads: 1 }
+nodes:
+  - { name: src, kernel: TYieldSource, executor: solo, input_ports: [], output_ports: [] }
+"""
+        ) as g:
+            started = time.monotonic()
+            g.start()
+            g.wait_done(timeout=1.0)
+            self.assertGreaterEqual(time.monotonic() - started, 0.015)
 
     def test_subgraph_expands_and_runs(self):
         # 子图是纯 YAML / 建图期展开,绑定无需改:一个 PassPair 实例展开成两级直通。

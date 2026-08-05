@@ -148,6 +148,8 @@ pub struct Context {
     pub close_reason: i32,
     /// 源算子经 `source_done()` 自报「已产完」;引擎在 process 返回后读取。
     pub source_done: bool,
+    /// 源算子协作式让出 worker，并请求引擎在指定延迟后再次调度。
+    pub source_yield: Option<std::time::Duration>,
     names: CStrArena,
 }
 
@@ -180,6 +182,7 @@ impl Context {
             error_msg: None,
             close_reason: crate::runtime::CLOSE_NORMAL,
             source_done: false,
+            source_yield: None,
             names: CStrArena::default(),
         }
     }
@@ -201,6 +204,7 @@ impl Context {
         self.input_ts = Timestamp::unset();
         self.error_msg = None;
         self.source_done = false;
+        self.source_yield = None;
         // 下面两项在正常流程里使用前会被重写(claim 时写 inputs_done、进 close 前写
         // close_reason),故单次调用不清也不出错;但 `reset` 要能用于「彻底静态复位」
         // (图 reset 重跑),所以这里一并归位,不留任何上一轮残留。
