@@ -482,6 +482,93 @@ fn from_buffer_handles_non_contiguous_strides() {
     }
 }
 
+/// 整块连续的 HWC 缓冲必须走一次性整块拷贝,而不是按「最后一维 = 一行」逐行搬。
+///
+/// 通用路径以最后一维为一行,而 HWC 图像的最后一维是通道数(2/3/4)—— 那会退化成
+/// 几百万次几字节的拷贝(实测 1920x1080x2 要 6.7ms,约 600MB/s)。本测试同时钉住
+/// **正确性**(内容逐字节相同)与**不变量**(连续布局下 strides 恰为紧密行优先),
+/// 后者正是快路径的判据;判据写错就会静默走回慢路或拷错。
+#[test]
+fn from_buffer_copies_contiguous_hwc_in_one_shot() {
+    unsafe {
+        // 32x16x3 u8 的 HWC 图:最后一维 3,正是会触发退化的形状
+        const H: usize = 32;
+        const W: usize = 16;
+        const C: usize = 3;
+        let data: Vec<u8> = (0..(H * W * C)).map(|i| (i % 251) as u8).collect();
+        let mut shape = [0i64; 8];
+        shape[0] = H as i64;
+        shape[1] = W as i64;
+        shape[2] = C as i64;
+        let mut strides = [0i64; 8];
+        strides[0] = (W * C) as i64; // 紧密行优先
+        strides[1] = C as i64;
+        strides[2] = 1;
+        let src = LMFlowBuffer {
+            data: data.as_ptr() as *mut c_void,
+            ndim: 3,
+            shape,
+            strides,
+            dtype: 0, // U8
+            ..Default::default()
+        };
+
+        let mut p = lmflow_packet_from_buffer(&src, 0);
+        assert!(!p.payload.is_null(), "{}", last_error());
+
+        let mut view = LMFlowBuffer::default();
+        assert!(lmflow_packet_as_buffer(&p, &mut view));
+        assert_eq!(&view.shape[..3], &[H as i64, W as i64, C as i64]);
+        let out = std::slice::from_raw_parts(view.data as *const u8, H * W * C);
+        assert_eq!(
+            out, &data[..],
+            "a contiguous HWC buffer must be copied byte-for-byte"
+        );
+        // 取回的视图必须仍是紧密行优先 —— 这是快路径判据成立的前提。
+        assert_eq!(
+            &view.strides[..3],
+            &[(W * C) as i64, C as i64, 1],
+            "engine-side buffers are packed row-major; the fast path keys off exactly this"
+        );
+        lmflow_packet_drop(&mut p);
+    }
+}
+
+/// 负步长(numpy 的 `arr[::-1]`)必须逐元素拷对 —— 它绝不能被误判成连续而整块拷。
+#[test]
+fn from_buffer_handles_negative_stride() {
+    unsafe {
+        // 源:连续的 4 个 i32 = [10,20,30,40];按「反向视图」描述它
+        let data: [i32; 4] = [10, 20, 30, 40];
+        let esz = 4i64;
+        let mut shape = [0i64; 8];
+        shape[0] = 4;
+        let mut strides = [0i64; 8];
+        strides[0] = -esz;
+        let src = LMFlowBuffer {
+            // 反向视图的 data 指向最后一个元素
+            data: data.as_ptr().add(3) as *mut c_void,
+            ndim: 1,
+            shape,
+            strides,
+            dtype: 4, // I32
+            ..Default::default()
+        };
+
+        let mut p = lmflow_packet_from_buffer(&src, 0);
+        assert!(!p.payload.is_null(), "{}", last_error());
+        let mut view = LMFlowBuffer::default();
+        assert!(lmflow_packet_as_buffer(&p, &mut view));
+        let out = std::slice::from_raw_parts(view.data as *const i32, 4);
+        assert_eq!(
+            out,
+            &[40, 30, 20, 10],
+            "a negative stride must be flattened in reverse, never taken for a contiguous block"
+        );
+        lmflow_packet_drop(&mut p);
+    }
+}
+
 #[test]
 fn make_mutable_rejects_borrowed_packet() {
     unsafe {

@@ -472,40 +472,72 @@ pub unsafe extern "C" fn lmflow_packet_from_buffer(
                 let n_rows: i64 = dims[..ndim - 1].iter().product::<i64>().max(1);
                 let src_base = s.data as *const u8;
                 let dst_base = b.bytes.as_mut_ptr();
-                // 里程表遍历外层维度索引,按完整 strides 求每行源偏移。
-                let mut idx = vec![0i64; ndim - 1];
-                for r in 0..n_rows {
-                    let mut so: i64 = 0;
-                    for (d, &ix) in idx.iter().enumerate() {
-                        so += ix * s.strides[d];
-                    }
-                    let dofs = (r as usize) * row_bytes;
-                    if dofs + row_bytes <= b.bytes.len() {
-                        if last_stride == esz as i64 {
-                            // 最后一维连续:整行拷
-                            std::ptr::copy_nonoverlapping(
-                                src_base.offset(so as isize),
-                                dst_base.add(dofs),
-                                row_bytes,
-                            );
-                        } else {
-                            // 最后一维也跳跃(转置/步长切片/负步长):逐元素拷
-                            for k in 0..last {
-                                std::ptr::copy_nonoverlapping(
-                                    src_base.offset((so + k * last_stride) as isize),
-                                    dst_base.add(dofs + (k as usize) * esz),
-                                    esz,
-                                );
+                // 先判**整块连续**(strides 恰好是紧密行优先布局),一次拷完。
+                //
+                // 下面的通用路径以「最后一维 = 一行」为单位搬运,而 HWC 图像的最后一维
+                // 正是通道数(2/3/4)—— 于是 1920x1080x2 的帧会退化成 200 万次 2 字节
+                // 拷贝,实测 6.7ms、约 600MB/s,比 memcpy 慢约 30 倍。而 numpy 传进来的
+                // 数组绝大多数是连续的,这条快路径覆盖的正是最常见也最大的那些。
+                let packed = {
+                    let mut expected = esz as i64;
+                    let mut ok = true;
+                    for d in (0..ndim).rev() {
+                        if s.strides[d] != expected {
+                            ok = false;
+                            break;
+                        }
+                        // dims 的乘积已被 BufferData::new 验证过(它据此分配了 b.bytes),
+                        // 故此处不会溢出;仍用 checked 以防将来放宽校验。
+                        match expected.checked_mul(dims[d]) {
+                            Some(next) => expected = next,
+                            None => {
+                                ok = false;
+                                break;
                             }
                         }
                     }
-                    // 里程表 +1(最右外层维先进位)
-                    for d in (0..ndim - 1).rev() {
-                        idx[d] += 1;
-                        if idx[d] < dims[d] {
-                            break;
+                    ok
+                };
+                if packed {
+                    // 与通用路径读取的字节区间完全相同(n_rows * row_bytes == b.bytes.len()),
+                    // 故安全性无差别。
+                    std::ptr::copy_nonoverlapping(src_base, dst_base, b.bytes.len());
+                } else {
+                    // 里程表遍历外层维度索引,按完整 strides 求每行源偏移。
+                    let mut idx = vec![0i64; ndim - 1];
+                    for r in 0..n_rows {
+                        let mut so: i64 = 0;
+                        for (d, &ix) in idx.iter().enumerate() {
+                            so += ix * s.strides[d];
                         }
-                        idx[d] = 0;
+                        let dofs = (r as usize) * row_bytes;
+                        if dofs + row_bytes <= b.bytes.len() {
+                            if last_stride == esz as i64 {
+                                // 最后一维连续:整行拷
+                                std::ptr::copy_nonoverlapping(
+                                    src_base.offset(so as isize),
+                                    dst_base.add(dofs),
+                                    row_bytes,
+                                );
+                            } else {
+                                // 最后一维也跳跃(转置/步长切片/负步长):逐元素拷
+                                for k in 0..last {
+                                    std::ptr::copy_nonoverlapping(
+                                        src_base.offset((so + k * last_stride) as isize),
+                                        dst_base.add(dofs + (k as usize) * esz),
+                                        esz,
+                                    );
+                                }
+                            }
+                        }
+                        // 里程表 +1(最右外层维先进位)
+                        for d in (0..ndim - 1).rev() {
+                            idx[d] += 1;
+                            if idx[d] < dims[d] {
+                                break;
+                            }
+                            idx[d] = 0;
+                        }
                     }
                 }
             }
