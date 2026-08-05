@@ -31,6 +31,7 @@
 #include <limits>
 #include <memory>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -47,6 +48,15 @@ namespace {
   throw py::error_already_set();
 }
 
+/// LMFLOW_ERR_KERNEL 的载体,由模块初始化处注册成 `lmflow.KernelError`。
+///
+/// 派生自 `std::runtime_error` 是刻意的:Python 侧 KernelError 派生自 RuntimeError,
+/// 于是既能 `except lmflow.KernelError` 精确接,也不破坏原先 `except RuntimeError` 的代码。
+class KernelFailure : public std::runtime_error {
+ public:
+  using std::runtime_error::runtime_error;
+};
+
 /// 把 C ABI 的失败转成 Python 异常,并带上引擎给的可读原因。
 void check(LMFlowStatus st, const char* what) {
   if (st == LMFLOW_OK) return;
@@ -56,6 +66,8 @@ void check(LMFlowStatus st, const char* what) {
   switch (st) {
     case LMFLOW_ERR_TIMEOUT:
       throw_timeout_error(msg);
+    case LMFLOW_ERR_KERNEL:
+      throw KernelFailure(msg);
     case LMFLOW_ERR_INVALID_ARG:
     case LMFLOW_ERR_UNSUPPORTED:
       throw py::value_error(msg);
@@ -851,6 +863,10 @@ using namespace lmflow_python;
 
 PYBIND11_MODULE(_lmflow, m) {
   m.doc() = "Python bindings for the lmflow engine (pybind11)";
+
+  // 算子失败(LMFLOW_ERR_KERNEL)有自己的异常类,好让宿主把「算子炸了」与 cancel / 状态错误
+  // 区分开 —— 从前它们一律塌成裸 RuntimeError。基类取 RuntimeError,故旧代码不受影响。
+  py::register_exception<KernelFailure>(m, "KernelError", PyExc_RuntimeError);
 
   m.attr("ABI_VERSION") = LMFLOW_ABI_VERSION;
   m.attr("TS_UNSET") = LMFLOW_TS_UNSET;

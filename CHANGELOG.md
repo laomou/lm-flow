@@ -73,6 +73,11 @@ to each GitHub Release.
 - **Executor runtime state in DOT diagnostics.** Executor legend boxes now show current queued and
   running tasks, thread capacity, peak queued tasks, and completed tasks. These counters are
   embedded in compact/diagnostics visualization rather than exposed as another public stats API.
+- **Python `lmflow.KernelError`.** An execution failure now raises a dedicated exception instead of
+  a bare `RuntimeError`, so hosts can tell "a kernel failed" apart from a cancellation or a
+  bad-state error. It derives from `RuntimeError`, so existing `except RuntimeError` code keeps
+  working. Note the engine reports graph stalls with the same status code, so an unsatisfiable
+  graph surfaces here too — the message distinguishes them (`kernel failed: ...` vs `wait_done: ...`).
 
 ### Fixed
 
