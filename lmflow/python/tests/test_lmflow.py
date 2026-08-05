@@ -67,6 +67,13 @@ class TSlow(lmflow.Kernel):
         cc.forward(0, 0)
 
 
+@lmflow.kernel("TTimeoutSlow")
+class TTimeoutSlow(lmflow.Kernel):
+    def process(self, cc):
+        time.sleep(0.1)
+        cc.forward(0, 0)
+
+
 @lmflow.kernel("TBoom")
 class TBoom(lmflow.Kernel):
     def process(self, cc):
@@ -696,16 +703,40 @@ nodes: [ { kernel: PassThroughKernel, executor: solo, max_in_flight: 8 } ]
 executors:
   - { name: cpu, type: ThreadPoolExecutor, num_threads: 1 }
 nodes:
-  - { name: p, kernel: TSlow, executor: cpu, input_ports: [in], output_ports: [out] }
+  - { name: p, kernel: TTimeoutSlow, executor: cpu, input_ports: [in], output_ports: [out] }
 input_ports: [in]
 output_ports: [out]
 """
         ) as g:
             g.add_poller("out")
             g.start()
-            # 输入口没关,wait_done 不会自行结束 → 必须报错而不是永久挂住
-            with self.assertRaises(Exception):
-                g.wait_done(timeout=0.2)
+            g.input("in").send(1, ts=0)
+            g.close_all_inputs()
+            with self.assertRaises(lmflow.Timeout):
+                g.wait_done(timeout=0.001)
+
+    def test_wait_until_idle_timeout_raises(self):
+        with graph(
+            """
+executors:
+  - { name: cpu, type: ThreadPoolExecutor, num_threads: 1 }
+nodes:
+  - { name: p, kernel: TTimeoutSlow, executor: cpu, input_ports: [in], output_ports: [out] }
+input_ports: [in]
+output_ports: [out]
+"""
+        ) as g:
+            g.start()
+            g.input("in").send(1, ts=0)
+            with self.assertRaises(lmflow.Timeout):
+                g.wait_until_idle(timeout=0.001)
+
+    def test_wait_timeout_argument_type_error_is_not_rewritten(self):
+        with graph(one_node("TDouble")) as g:
+            with self.assertRaises(TypeError):
+                g.wait_done(timeout="abc")
+            with self.assertRaises(TypeError):
+                g.wait_until_idle(timeout="abc")
 
     def test_close_is_idempotent(self):
         g = graph(one_node("TDouble"))

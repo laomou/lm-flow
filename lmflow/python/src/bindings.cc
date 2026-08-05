@@ -42,6 +42,11 @@ namespace py = pybind11;
 
 namespace {
 
+[[noreturn]] void throw_timeout_error(const std::string& msg) {
+  PyErr_SetString(PyExc_TimeoutError, msg.c_str());
+  throw py::error_already_set();
+}
+
 /// 把 C ABI 的失败转成 Python 异常,并带上引擎给的可读原因。
 void check(LMFlowStatus st, const char* what) {
   if (st == LMFLOW_OK) return;
@@ -50,7 +55,7 @@ void check(LMFlowStatus st, const char* what) {
   if (detail && *detail) msg += ": " + std::string(detail);
   switch (st) {
     case LMFLOW_ERR_TIMEOUT:
-      throw py::type_error(msg);  // 由 Python 侧再包装成 Timeout
+      throw_timeout_error(msg);
     case LMFLOW_ERR_INVALID_ARG:
     case LMFLOW_ERR_UNSUPPORTED:
       throw py::value_error(msg);
