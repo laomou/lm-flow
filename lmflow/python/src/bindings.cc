@@ -1062,7 +1062,15 @@ PYBIND11_MODULE(_lmflow, m) {
            "Graph.run_async() owns this slot today. Anything else that needs waking -- an async "
            "output iterator, an async send that waits for queue space -- must go through a shared "
            "dispatcher that owns the slot and broadcasts to its waiters; calling this a second "
-           "time silently displaces run_async()'s callback and the graph quietly stops advancing.")
+           "time silently displaces run_async()'s callback and the graph quietly stops advancing."
+           "\n\n"
+           "Before building that dispatcher, check whether you need this slot at all: to consume "
+           "output, use Graph.observe(), which already supports several subscribers per port and "
+           "is a separate mechanism that does not touch this slot. The trade is its own "
+           "constraints -- register before start(), cannot be removed afterwards, and the callback "
+           "runs inline on the dispatching worker thread with a borrowed packet. Reserve this slot "
+           "for what has no dedicated subscription API: waiting for the run to finish, or for an "
+           "input queue to drain.")
       .def("new_buffer", &Graph::new_buffer, py::arg("shape"), py::arg("dtype"))
       .def_property_readonly("state", &Graph::state)
       .def("dump", &Graph::dump)

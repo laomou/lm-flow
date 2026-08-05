@@ -327,7 +327,18 @@ class Graph:
         return self._g.add_poller(port)
 
     def observe(self, port: str, fn: Callable[[Packet], Any]) -> None:
-        """Push-mode subscription. The callback runs on **the thread that dispatched the packet**; the packet is borrowed and invalid after the callback returns."""
+        """Push-mode subscription. Must be before :meth:`start`, and **cannot be removed** once
+        registered — it lives as long as the graph.
+
+        The callback runs on **the thread that dispatched the packet**, with no buffering in
+        between, so a slow callback holds up that worker; and the packet is borrowed, becoming
+        invalid the moment the callback returns (deep-copy anything you keep). Do not call graph
+        lifecycle methods from inside it.
+
+        Several pollers and observers may share one port — each gets its own reference to the same
+        packet, with no payload copy. Prefer :meth:`add_poller` unless the callback is trivial:
+        a poller is buffered and participates in backpressure, an observer does neither.
+        """
         self._g.observe(port, fn)
 
     def start(self) -> None:
