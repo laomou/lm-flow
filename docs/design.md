@@ -2,7 +2,7 @@
 
 > 状态:**成品**。Rust 引擎、C ABI、C++ 糖层(含 OpenCV 互转)、18 个内置算子、
 > Python 绑定(pybind11)、原生 SDK 发布(各平台头文件+库)、三端文档站全部就位;
-> **308 个测试**(Rust 265 + soak 2 + doctest 3 + Python 38)全绿,TSan 硬门禁 0 竞态。Rust / C++ / Python 三种宿主的
+> **321 个测试**(Rust 278 + soak 2 + doctest 3 + Python 38)全绿,TSan 硬门禁 0 竞态。Rust / C++ / Python 三种宿主的
 > hello_world 都输出正确;支持线程池绑核 + 实时优先级(Linux/Android),可交叉编到
 > Android / iOS / 鸿蒙。
 > 定位:一个数据流图计算框架 —— 把计算描述成**有向图**,节点是**算子(Kernel)**,
@@ -1382,7 +1382,7 @@ lm-flow/                          仓库根
 
 ---
 
-## 13. 测试策略(已落地 308 个:Rust 265 + soak 2 + doctest 3 + Python 38;另有 3 个独立 C++ 测试)
+## 13. 测试策略(已落地 321 个:Rust 278 + soak 2 + doctest 3 + Python 38;另有 3 个独立 C++ 测试)
 
 | 测试文件 | 数量 | 覆盖 |
 |---|---|---|
