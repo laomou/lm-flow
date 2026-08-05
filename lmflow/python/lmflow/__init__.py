@@ -513,10 +513,6 @@ class Graph:
         """Current graph state (values in :class:`GraphState`)."""
         return self._g.state
 
-    def dump(self) -> str:
-        """Human-readable snapshot of topology and state (node table shows running/elapsed — handy for locating a stall)."""
-        return self._g.dump()
-
     def to_dot(self, view: str = DotView.TOPOLOGY) -> str:
         """Graphviz DOT of the topology (pipe to ``dot -Tsvg``).
 
@@ -524,12 +520,16 @@ class Graph:
         coloured by the thread pool it runs on, and a legend lists every
         executor's thread count, pinned CPU cores (affinity), and realtime
         priority. Compact/diagnostics views also show queued, running,
-        peak-queued, and completed executor tasks.
+        peak-queued, completed, total wait/execution time, saturation duration,
+        and the main queued nodes. A saturated executor is orange, turning red
+        after its ready queue remains non-empty for one second.
 
         ``view="compact"`` adds node state plus core throughput/latency counters
         without per-port and Poller diagnostics. ``view="diagnostics"`` adds the
-        full queue/backpressure detail. Node state uses the border colour while
-        the fill remains the latency heat map.
+        full queue/backpressure detail. Waiting source nodes show
+        ``WAITING_SOURCE``, remaining wakeup time, yield count, and whether the
+        delay came from ``rate``, ``source_yield``, or both. Node state uses the
+        border colour while the fill remains the latency heat map.
         """
         views = {
             DotView.TOPOLOGY: 0,
@@ -548,10 +548,6 @@ class Graph:
         """Graph-level error text — the only place to get a worker-thread kernel's failure reason."""
         return self._g.last_error()
 
-    def queue_depth(self, port: str) -> int:
-        """Number of packets currently queued on that input port."""
-        return self._g.queue_depth(port)
-
     def dropped_count(self, port: str) -> int:
         """Cumulative packets dropped on that edge (only the fixed_size policy drops)."""
         return self._g.dropped_count(port)
@@ -560,21 +556,9 @@ class Graph:
         """Current value of a kernel-reported counter."""
         return self._g.counter_value(name)
 
-    def total_queued(self) -> int:
-        """Total in-flight (enqueued but unconsumed) packets across the graph."""
-        return self._g.total_queued()
-
-    def node_names(self) -> list[str]:
-        """All node names (in declaration order)."""
-        return self._g.node_names()
-
-    def node_stats(self, index: int) -> dict[str, Any]:
-        """Node stats: running / running_for_us / processed / errors / elapsed / queued."""
-        return self._g.node_stats(index)
-
     def __repr__(self) -> str:
-        names = "?" if self._closed else ",".join(self.node_names())
-        return f"<lmflow.Graph nodes=[{names}] state={self.state}>"
+        state = GraphState.TERMINATED if self._closed else self.state
+        return f"<lmflow.Graph state={state}>"
 
 
 def _poller_iter(self: Poller) -> Iterator[Packet]:

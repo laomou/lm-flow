@@ -335,6 +335,9 @@ impl GraphInner {
                 input_is_back_edge: back_edge_mask[idx].clone(),
                 source_done: AtomicBool::new(false),
                 source_waiting: AtomicBool::new(false),
+                source_wait_reason: AtomicUsize::new(0),
+                source_wake_deadline_us: AtomicI64::new(0),
+                source_yield_count: AtomicU64::new(0),
                 source_wake_generation: AtomicU64::new(0),
                 input_bounds: (0..ins.len())
                     .map(|_| Mutex::new(Timestamp::pre_stream()))

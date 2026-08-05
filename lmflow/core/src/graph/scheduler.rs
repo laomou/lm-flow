@@ -284,6 +284,8 @@ impl GraphInner {
             return;
         }
         node.source_waiting.store(false, Ordering::SeqCst);
+        node.source_wait_reason.store(0, Ordering::Relaxed);
+        node.source_wake_deadline_us.store(0, Ordering::Relaxed);
         if matches!(self.state(), State::Running | State::Draining)
             && !self.shared.is_cancelled()
             && !self.shared.has_error()
@@ -308,10 +310,10 @@ impl GraphInner {
     pub(super) fn workers_idle(&self) -> bool {
         self.in_flight.load(Ordering::SeqCst) == 0
             && !self.delegated_running.load(Ordering::Acquire)
-            && self.executors.iter().all(|executor| {
-                let stats = executor.stats();
-                stats.queued == 0 && stats.running == 0
-            })
+            && self
+                .executors
+                .iter()
+                .all(|executor| !executor.has_pending_work())
     }
 
     /// 逻辑空闲还要求没有因内部容量不足而保留的待刷新 staging。
@@ -554,9 +556,10 @@ impl GraphInner {
             Some((index, n)) => {
                 self.delegated_cursor
                     .store(index.wrapping_add(1), Ordering::Relaxed);
+                let started = Instant::now();
                 self.run_node(n);
                 self.in_flight.fetch_sub(1, Ordering::SeqCst);
-                self.executors[index].complete_delegated();
+                self.executors[index].complete_delegated(started.elapsed());
                 self.notify_activity();
                 true
             }
@@ -638,9 +641,14 @@ impl GraphInner {
                 let rc = self.call_kernel(n, slot, KernelPhase::Process);
                 let ctx = unsafe { node.ctx_slot(slot) };
                 if node.is_source() {
+                    if ctx.source_yield.is_some() {
+                        node.source_yield_count.fetch_add(1, Ordering::Relaxed);
+                    }
                     if ctx.source_done {
                         node.source_done.store(true, Ordering::SeqCst);
                         node.source_waiting.store(false, Ordering::SeqCst);
+                        node.source_wait_reason.store(0, Ordering::Relaxed);
+                        node.source_wake_deadline_us.store(0, Ordering::Relaxed);
                         node.sched
                             .lock()
                             .expect("scheduler lock poisoned")
@@ -650,19 +658,35 @@ impl GraphInner {
                             let last = node.last_fire.lock().expect("last_fire lock poisoned");
                             last.and_then(|started| period.checked_sub(started.elapsed()))
                         });
-                        let delay = match (ctx.source_yield, rate_delay) {
-                            (Some(yield_delay), Some(rate_delay)) => {
-                                Some(yield_delay.max(rate_delay))
-                            }
-                            (Some(delay), None) | (None, Some(delay)) => Some(delay),
+                        let reschedule = match (ctx.source_yield, rate_delay) {
+                            (Some(yield_delay), Some(rate_delay)) => Some(SourceReschedule {
+                                delay: yield_delay.max(rate_delay),
+                                reason: SourceWaitReason::RateAndYield,
+                            }),
+                            (Some(delay), None) => Some(SourceReschedule {
+                                delay,
+                                reason: SourceWaitReason::Yield,
+                            }),
+                            (None, Some(delay)) => Some(SourceReschedule {
+                                delay,
+                                reason: SourceWaitReason::Rate,
+                            }),
                             (None, None) => None,
                         };
-                        if let Some(delay) = delay {
+                        if let Some(reschedule) = reschedule {
                             node.source_waiting.store(true, Ordering::SeqCst);
+                            node.source_wait_reason.store(
+                                match reschedule.reason {
+                                    SourceWaitReason::Rate => 1,
+                                    SourceWaitReason::Yield => 2,
+                                    SourceWaitReason::RateAndYield => 3,
+                                },
+                                Ordering::Relaxed,
+                            );
                             node.sched
                                 .lock()
                                 .expect("scheduler lock poisoned")
-                                .source_reschedule = Some(delay);
+                                .source_reschedule = Some(reschedule);
                         }
                     }
                 } else if ctx.source_yield.is_some() && rc == 0 {
@@ -774,23 +798,35 @@ impl GraphInner {
             || !matches!(self.state(), State::Running | State::Draining)
         {
             node.source_waiting.store(false, Ordering::SeqCst);
+            node.source_wait_reason.store(0, Ordering::Relaxed);
+            node.source_wake_deadline_us.store(0, Ordering::Relaxed);
             node.sched
                 .lock()
                 .expect("scheduler lock poisoned")
                 .source_reschedule = None;
             return;
         }
-        let delay = {
+        let reschedule = {
             let mut sched = node.sched.lock().expect("scheduler lock poisoned");
             if sched.in_flight != 0 || sched.blocked_flush.is_some() || sched.flushing {
                 return;
             }
             sched.source_reschedule.take()
         };
-        let Some(delay) = delay else { return };
+        let Some(reschedule) = reschedule else {
+            return;
+        };
         let generation = node.source_wake_generation.fetch_add(1, Ordering::SeqCst) + 1;
-        if !self.executors[node.executor].submit_source_wake(n, generation, delay) {
+        node.source_wake_deadline_us.store(
+            self.epoch_us()
+                .saturating_add(reschedule.delay.as_micros().min(i64::MAX as u128) as i64)
+                .saturating_add(1),
+            Ordering::Relaxed,
+        );
+        if !self.executors[node.executor].submit_source_wake(n, generation, reschedule.delay) {
             node.source_waiting.store(false, Ordering::SeqCst);
+            node.source_wait_reason.store(0, Ordering::Relaxed);
+            node.source_wake_deadline_us.store(0, Ordering::Relaxed);
         }
         self.notify_activity();
     }
@@ -1143,6 +1179,46 @@ impl GraphInner {
 
     pub fn executor_names(&self) -> Vec<&str> {
         self.executors.iter().map(|p| p.name()).collect()
+    }
+
+    pub(super) fn executor_stats(&self, name: &str) -> Option<ExecutorStatsSnapshot> {
+        let executor = self
+            .executors
+            .iter()
+            .find(|executor| executor.name() == name)?;
+        let stats = executor.stats();
+        let capacity = if executor.is_delegating() {
+            1
+        } else {
+            executor.num_threads()
+        };
+        let mut queued_counts = std::collections::BTreeMap::<NodeId, usize>::new();
+        for node in executor.queued_nodes() {
+            *queued_counts.entry(node).or_default() += 1;
+        }
+        let mut queued_nodes = queued_counts.into_iter().collect::<Vec<_>>();
+        queued_nodes.sort_by(|(left_node, left_count), (right_node, right_count)| {
+            right_count.cmp(left_count).then_with(|| {
+                self.nodes[*left_node]
+                    .name
+                    .cmp(&self.nodes[*right_node].name)
+            })
+        });
+        Some(ExecutorStatsSnapshot {
+            queued: stats.queued,
+            running: stats.running,
+            peak_queued: stats.peak_queued,
+            completed: stats.completed,
+            total_wait_us: stats.total_wait_us,
+            total_execution_us: stats.total_execution_us,
+            queued_for_us: stats.queued_for_us,
+            saturated: stats.queued > 0 && stats.running >= capacity,
+            queued_nodes: queued_nodes
+                .into_iter()
+                .take(5)
+                .map(|(node, count)| format!("{} ({count})", self.nodes[node].name))
+                .collect(),
+        })
     }
 
     pub(crate) fn shutdown_executors_pub(&self) {

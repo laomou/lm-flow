@@ -107,6 +107,7 @@ fn pressure_delta(
 enum NodeRunState {
     Created,
     Idle,
+    WaitingSource,
     Running,
     Closed,
     Error,
@@ -117,6 +118,7 @@ impl NodeRunState {
         match self {
             Self::Created => "CREATED",
             Self::Idle => "IDLE",
+            Self::WaitingSource => "WAITING_SOURCE",
             Self::Running => "RUNNING",
             Self::Closed => "CLOSED",
             Self::Error => "ERROR",
@@ -127,6 +129,7 @@ impl NodeRunState {
         match self {
             Self::Created | Self::Closed => "#777777",
             Self::Idle => "#4c78a8",
+            Self::WaitingSource => "#d6a700",
             Self::Running => "#2ca02c",
             Self::Error => "#d62728",
         }
@@ -136,9 +139,10 @@ impl NodeRunState {
         match self {
             Self::Error => 0,
             Self::Running => 1,
-            Self::Idle => 2,
-            Self::Created => 3,
-            Self::Closed => 4,
+            Self::WaitingSource => 2,
+            Self::Idle => 3,
+            Self::Created => 4,
+            Self::Closed => 5,
         }
     }
 }
@@ -218,6 +222,34 @@ fn duration_us(value: u64) -> String {
         format!("{:.1}ms", value as f64 / 1_000.0)
     } else {
         format!("{:.2}s", value as f64 / 1_000_000.0)
+    }
+}
+
+fn executor_load_color(saturated: bool, queued_for_us: u64, queued: usize) -> &'static str {
+    if saturated && queued_for_us >= 1_000_000 {
+        "#ffd6d6"
+    } else if saturated || queued > 0 {
+        "#ffe4b5"
+    } else {
+        "white"
+    }
+}
+
+fn executor_queue_nodes_label(nodes: &[String]) -> String {
+    if nodes.is_empty() {
+        String::new()
+    } else {
+        format!("\\nqueue: {}", nodes.join(", "))
+    }
+}
+
+fn executor_load_label(saturated: bool, queued_for_us: u64, queued: usize) -> String {
+    if saturated {
+        format!("\\nSATURATED · queued {}", duration_us(queued_for_us))
+    } else if queued > 0 {
+        format!("\\nBACKLOG · queued {}", duration_us(queued_for_us))
+    } else {
+        String::new()
     }
 }
 
@@ -540,6 +572,8 @@ impl GraphInner {
             NodeRunState::Error
         } else if node.stats.in_flight.load(Ordering::Relaxed) > 0 {
             NodeRunState::Running
+        } else if node.is_source() && node.source_waiting.load(Ordering::SeqCst) {
+            NodeRunState::WaitingSource
         } else if closed {
             NodeRunState::Closed
         } else if opened {
@@ -555,6 +589,7 @@ impl GraphInner {
             match node_states[node_id] {
                 NodeRunState::Running => hotspots.running += 1,
                 NodeRunState::Error => hotspots.errors += 1,
+                NodeRunState::WaitingSource => hotspots.waiting += 1,
                 _ => {}
             }
             hotspots.blocked += node
@@ -830,13 +865,38 @@ impl GraphInner {
                 {
                     extra.push_str(" · PRESSURE PATH");
                 }
-                let active_or_abnormal =
-                    matches!(node_state, NodeRunState::Running | NodeRunState::Error)
-                        || queued_bytes > 0
-                        || block_events > 0
-                        || blocked_ports > 0
-                        || errs > 0;
+                let active_or_abnormal = matches!(
+                    node_state,
+                    NodeRunState::Running | NodeRunState::WaitingSource | NodeRunState::Error
+                ) || queued_bytes > 0
+                    || block_events > 0
+                    || blocked_ports > 0
+                    || errs > 0;
                 extra.push_str(&format!("\\n{}", node_state.label()));
+                if node_state == NodeRunState::WaitingSource {
+                    let reason = match n.source_wait_reason.load(Ordering::Relaxed) {
+                        1 => "rate",
+                        2 => "source_yield",
+                        3 => "rate + source_yield",
+                        _ => "scheduled wake",
+                    };
+                    let deadline = n.source_wake_deadline_us.load(Ordering::Relaxed);
+                    let remaining = if deadline == 0 {
+                        0
+                    } else {
+                        deadline
+                            .saturating_sub(
+                                snapshot_us.expect("statistics snapshot timestamp exists"),
+                            )
+                            .max(0) as u64
+                    };
+                    extra.push_str(&format!(
+                        " · {} remaining · {}\\nyield {}×",
+                        duration_us(remaining),
+                        reason,
+                        n.source_yield_count.load(Ordering::Relaxed),
+                    ));
+                }
                 if diagnostics || processed > 0 || active_or_abnormal {
                     extra.push_str(&format!(
                         " · {} pkts (+{} · {}) · {} avg\\nin {} (+{}) / out {} (+{})",
@@ -1164,17 +1224,35 @@ impl GraphInner {
             for (i, ex) in self.executors.iter().enumerate() {
                 // 委托执行器没有线程/绑核/优先级可言 —— 标出「交还宿主线程」而不是 0t。
                 if ex.is_delegating() {
-                    let stats = ex.stats();
+                    let stats = self
+                        .executor_stats(ex.name())
+                        .expect("executor exists while rendering DOT");
+                    let fill = if with_stats {
+                        executor_load_color(stats.saturated, stats.queued_for_us, stats.queued)
+                    } else {
+                        "white"
+                    };
                     let runtime = if with_stats {
                         format!(
-                            "\\nqueued {} · running {}/1 · peak {} · done {}",
-                            stats.queued, stats.running, stats.peak_queued, stats.completed
+                            "\\nqueued {} · running {}/1 · peak {} · done {}\\nwait {} · exec {}{}{}",
+                            stats.queued,
+                            stats.running,
+                            stats.peak_queued,
+                            stats.completed,
+                            duration_us(stats.total_wait_us),
+                            duration_us(stats.total_execution_us),
+                            executor_load_label(
+                                stats.saturated,
+                                stats.queued_for_us,
+                                stats.queued,
+                            ),
+                            executor_queue_nodes_label(&stats.queued_nodes),
                         )
                     } else {
                         String::new()
                     };
                     out.push_str(&format!(
-                        "    legend_e{i} [shape=box, style=filled, fillcolor=white, label=\"{}\\nhost thread (delegating){}\", tooltip=\"executor {}: queued {}, running {}/1, peak queued {}, completed {}\"];\n",
+                        "    legend_e{i} [shape=box, style=filled, fillcolor=\"{fill}\", label=\"{}\\nhost thread (delegating){}\", tooltip=\"executor {}: queued {}, running {}/1, peak queued {}, completed {}, total wait {}, total execution {}, queued for {}, queued nodes {}\"];\n",
                         escape_dot(&truncate_label(ex.name(), NODE_LABEL_CHARS)),
                         runtime,
                         escape_dot(ex.name()),
@@ -1182,6 +1260,10 @@ impl GraphInner {
                         stats.running,
                         stats.peak_queued,
                         stats.completed,
+                        duration_us(stats.total_wait_us),
+                        duration_us(stats.total_execution_us),
+                        duration_us(stats.queued_for_us),
+                        escape_dot(&stats.queued_nodes.join(", ")),
                     ));
                     continue;
                 }
@@ -1202,22 +1284,33 @@ impl GraphInner {
                 } else {
                     String::new()
                 };
-                let stats = ex.stats();
+                let stats = self
+                    .executor_stats(ex.name())
+                    .expect("executor exists while rendering DOT");
+                let fill = if with_stats {
+                    executor_load_color(stats.saturated, stats.queued_for_us, stats.queued)
+                } else {
+                    COLORS[i % COLORS.len()]
+                };
                 let runtime = if with_stats {
                     format!(
-                        "\\nqueued {} · running {}/{} · peak {} · done {}",
+                        "\\nqueued {} · running {}/{} · peak {} · done {}\\nwait {} · exec {}{}{}",
                         stats.queued,
                         stats.running,
                         ex.num_threads(),
                         stats.peak_queued,
-                        stats.completed
+                        stats.completed,
+                        duration_us(stats.total_wait_us),
+                        duration_us(stats.total_execution_us),
+                        executor_load_label(stats.saturated, stats.queued_for_us, stats.queued),
+                        executor_queue_nodes_label(&stats.queued_nodes),
                     )
                 } else {
                     String::new()
                 };
                 out.push_str(&format!(
                     "    legend_e{i} [shape=box, style=filled, fillcolor=\"{}\", label=\"{}\\n{}t · {}{}{}\", tooltip=\"executor {}: queued {}, running {}/{}, peak queued {}, completed {}\"];\n",
-                    COLORS[i % COLORS.len()],
+                    fill,
                     escape_dot(&truncate_label(ex.name(), NODE_LABEL_CHARS)),
                     ex.num_threads(),
                     cores,
@@ -1242,6 +1335,9 @@ impl GraphInner {
             );
             out.push_str(
                 "    legend_state_idle [shape=box, style=filled, fillcolor=white, color=\"#4c78a8\", label=\"IDLE\"];\n",
+            );
+            out.push_str(
+                "    legend_state_waiting_source [shape=box, style=filled, fillcolor=white, color=\"#d6a700\", penwidth=2, label=\"WAITING_SOURCE\"];\n",
             );
             out.push_str(
                 "    legend_state_running [shape=box, style=filled, fillcolor=white, color=\"#2ca02c\", penwidth=3, label=\"RUNNING\"];\n",
@@ -1275,6 +1371,9 @@ impl GraphInner {
             );
             out.push_str(
                 "    legend_pressure [shape=box, style=filled, fillcolor=white, color=\"#6f42c1\", fontcolor=\"#553096\", penwidth=3, label=\"PRESSURE PATH\\nupstream propagation to active stall\"];\n",
+            );
+            out.push_str(
+                "    legend_executor_hot [shape=box, style=filled, fillcolor=\"#ffd6d6\", color=\"#d62728\", penwidth=2, label=\"EXECUTOR SATURATED\\nred >1s queued · orange shorter\"];\n",
             );
             out.push_str("  }\n");
         }

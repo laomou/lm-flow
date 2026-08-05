@@ -83,12 +83,14 @@ def main() -> None:
         producer.start()
 
         index = 0
-        while producer.is_alive() or graph.total_queued() > 0:
+        while producer.is_alive():
             write_snapshot(graph, output, index)
             index += 1
             time.sleep(0.1)
 
         producer.join()
+        write_snapshot(graph, output, index)
+        index += 1
         graph.wait_done(timeout=10.0)
         write_snapshot(graph, output, index)
 

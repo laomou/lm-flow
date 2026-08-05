@@ -53,6 +53,20 @@ impl Kernel for DotError {
     }
 }
 
+#[derive(Default)]
+struct DotQueued;
+
+impl Kernel for DotQueued {
+    fn process(&mut self, _context: &mut KernelCtx) -> lmflow::Result<()> {
+        let (lock, wake) = &RUNNING_GATE;
+        let mut released = lock.lock().unwrap();
+        while !*released {
+            released = wake.wait(released).unwrap();
+        }
+        Ok(())
+    }
+}
+
 const CHAIN: &str = r#"
 nodes:
   - { name: a, kernel: PassThrough, input_ports: ["in"],  output_ports: ["mid"] }
@@ -205,6 +219,68 @@ fn dot_with_stats_annotates_and_keeps_structure() {
         count(&stats, "[label="),
         "节点数不应因统计模式改变"
     );
+}
+
+#[test]
+fn dot_marks_saturated_executor_and_lists_queued_nodes() {
+    let _ = lmflow::register_kernel::<DotQueued>("DotQueued");
+    let gate = RunningGateGuard::hold();
+    let graph = Graph::from_yaml(
+        r#"
+executors:
+  - { name: solo, num_threads: 1 }
+nodes:
+  - { name: busy, kernel: DotQueued, executor: solo, input_ports: [busy_in], output_ports: [] }
+  - { name: queued_a, kernel: DotQueued, executor: solo, input_ports: [a_in], output_ports: [] }
+  - { name: queued_b, kernel: DotQueued, executor: solo, input_ports: [b_in], output_ports: [] }
+input_ports: [busy_in, a_in, b_in]
+"#,
+    )
+    .unwrap();
+    graph.start().unwrap();
+    graph
+        .input("busy_in")
+        .unwrap()
+        .send(Packet::from_i64(1).at(Timestamp(0)))
+        .unwrap();
+    graph
+        .input("a_in")
+        .unwrap()
+        .send(Packet::from_i64(1).at(Timestamp(0)))
+        .unwrap();
+    graph
+        .input("b_in")
+        .unwrap()
+        .send(Packet::from_i64(1).at(Timestamp(0)))
+        .unwrap();
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        let dot = graph.to_dot_with_stats();
+        if dot.contains("queued 2 · running 1/1") {
+            assert!(dot.contains("fillcolor=\"#ffe4b5\""), "{dot}");
+            assert!(dot.contains("queue: queued_a (1), queued_b (1)"), "{dot}");
+            assert!(dot.contains("wait "), "{dot}");
+            assert!(dot.contains("exec "), "{dot}");
+            assert!(dot.contains("legend_executor_hot"), "{dot}");
+            std::thread::sleep(Duration::from_millis(1_050));
+            let sustained = graph.to_dot_with_stats();
+            assert!(
+                sustained.contains("fillcolor=\"#ffd6d6\""),
+                "持续排队超过 1 秒应标红:\n{sustained}"
+            );
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "executor never reached saturated snapshot"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+
+    drop(gate);
+    graph.close_all_inputs();
+    graph.wait_done_timeout(Duration::from_secs(2)).unwrap();
 }
 
 #[test]
