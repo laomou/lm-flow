@@ -71,7 +71,6 @@ impl GraphInner {
                     let mut sched = node.sched.lock().expect("scheduler lock poisoned");
                     sched.blocked_flush = Some(BlockedFlush::Close);
                     sched.flushing = false;
-                    drop(sched);
                     self.blocked_flush_nodes
                         .lock()
                         .expect("blocked flush lock poisoned")

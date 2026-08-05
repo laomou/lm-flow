@@ -180,6 +180,10 @@ impl GraphInner {
                             Some(value) => Some(value),
                             None => {
                                 sched.flushing = false;
+                                self.blocked_flush_nodes
+                                    .lock()
+                                    .expect("blocked flush lock poisoned")
+                                    .remove(&n);
                                 None
                             }
                         }
@@ -187,10 +191,6 @@ impl GraphInner {
                 }
             };
             let Some((slot, ok)) = item else {
-                self.blocked_flush_nodes
-                    .lock()
-                    .expect("blocked flush lock poisoned")
-                    .remove(&n);
                 return;
             };
 
@@ -201,7 +201,6 @@ impl GraphInner {
                         let mut sched = node.sched.lock().expect("scheduler lock poisoned");
                         sched.blocked_flush = Some(BlockedFlush::Invocation { slot, ok });
                         sched.flushing = false;
-                        drop(sched);
                         self.blocked_flush_nodes
                             .lock()
                             .expect("blocked flush lock poisoned")
@@ -273,11 +272,11 @@ impl GraphInner {
                 sched.blocked_flush = None;
                 sched.flushing = false;
                 sched.closed = true;
+                self.blocked_flush_nodes
+                    .lock()
+                    .expect("blocked flush lock poisoned")
+                    .remove(&n);
             }
-            self.blocked_flush_nodes
-                .lock()
-                .expect("blocked flush lock poisoned")
-                .remove(&n);
             for &edge in &node.outputs {
                 self.close_edge(edge);
             }
@@ -292,11 +291,11 @@ impl GraphInner {
                     sched.blocked_flush = None;
                     sched.flushing = false;
                     sched.closed = true;
+                    self.blocked_flush_nodes
+                        .lock()
+                        .expect("blocked flush lock poisoned")
+                        .remove(&n);
                 }
-                self.blocked_flush_nodes
-                    .lock()
-                    .expect("blocked flush lock poisoned")
-                    .remove(&n);
                 for &edge in &node.outputs {
                     self.close_edge(edge);
                 }
@@ -314,11 +313,11 @@ impl GraphInner {
                     sched.blocked_flush = None;
                     sched.flushing = false;
                     sched.closed = true;
+                    self.blocked_flush_nodes
+                        .lock()
+                        .expect("blocked flush lock poisoned")
+                        .remove(&n);
                 }
-                self.blocked_flush_nodes
-                    .lock()
-                    .expect("blocked flush lock poisoned")
-                    .remove(&n);
                 for &edge in &node.outputs {
                     self.close_edge(edge);
                 }
