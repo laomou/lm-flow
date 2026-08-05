@@ -691,12 +691,11 @@ output_ports: ["out"]
     }
 }
 
-/// 源节点会常年阻塞在 `process` 里,占满线程就没人跑同池的其它节点 —— 可证明的饿死。
+/// Source 可以与普通节点共用单线程池；协作等待应使用 `source_yield`。
 #[test]
-fn sources_cannot_starve_their_pool() {
+fn source_and_ordinary_node_may_share_single_thread_pool() {
     init();
-    // 单线程池 + 1 个源 + 1 个普通节点:源会独占那唯一的线程。
-    let err = Graph::from_yaml(
+    Graph::from_yaml(
         r#"
 executors:
   - { name: "solo", type: "ThreadPoolExecutor", num_threads: 1 }
@@ -706,21 +705,7 @@ nodes:
 output_ports: ["out"]
 "#,
     )
-    .unwrap_err();
-    assert!(err.to_string().contains("starve"), "{err}");
-
-    // 线程够(2 线程 1 源)就该放行。
-    Graph::from_yaml(
-        r#"
-executors:
-  - { name: "duo", type: "ThreadPoolExecutor", num_threads: 2 }
-nodes:
-  - { name: "src", kernel: "RangeSourceKernel", executor: "duo", input_ports: [], output_ports: ["mid"] }
-  - { name: "p", kernel: "PassThroughKernel", executor: "duo", input_ports: ["mid"], output_ports: ["out"] }
-output_ports: ["out"]
-"#,
-    )
-    .expect("2 threads for 1 source + 1 node is fine");
+    .expect("cooperative sources can share a single-thread pool with ordinary nodes");
 }
 
 /// 混合执行器:一部分节点在池里、一部分交还宿主线程 —— 最容易死锁的组合。

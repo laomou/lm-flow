@@ -16,30 +16,125 @@
 //!    否则工作线程可能触碰正在析构的节点。
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, Weak};
 use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 use crate::graph::{GraphInner, NodeId};
 
+#[derive(Clone, Copy)]
+enum Task {
+    Run(NodeId),
+    WakeSource(NodeId, u64),
+}
+
+struct DelayedTask {
+    deadline: Instant,
+    task: Task,
+}
+
+#[derive(Default)]
+struct QueueState {
+    ready: VecDeque<Task>,
+    delayed: Vec<DelayedTask>,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct ExecutorStatsSnapshot {
+    pub queued: usize,
+    pub running: usize,
+    pub peak_queued: usize,
+    pub completed: u64,
+}
+
+#[derive(Default)]
+struct ExecutorStats {
+    queued: AtomicUsize,
+    running: AtomicUsize,
+    peak_queued: AtomicUsize,
+    completed: AtomicU64,
+}
+
+impl ExecutorStats {
+    fn enqueued(&self) {
+        let queued = self.queued.fetch_add(1, Ordering::Relaxed) + 1;
+        self.peak_queued.fetch_max(queued, Ordering::Relaxed);
+    }
+
+    fn started(&self) {
+        self.queued.fetch_sub(1, Ordering::Relaxed);
+        self.running.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn completed(&self) {
+        self.running.fetch_sub(1, Ordering::Relaxed);
+        self.completed.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn dropped(&self, count: usize) {
+        let _ = self
+            .queued
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |queued| {
+                Some(queued.saturating_sub(count))
+            });
+    }
+
+    fn snapshot(&self) -> ExecutorStatsSnapshot {
+        ExecutorStatsSnapshot {
+            queued: self.queued.load(Ordering::Relaxed),
+            running: self.running.load(Ordering::Relaxed),
+            peak_queued: self.peak_queued.load(Ordering::Relaxed),
+            completed: self.completed.load(Ordering::Relaxed),
+        }
+    }
+
+    fn reset(&self) {
+        self.queued.store(0, Ordering::Relaxed);
+        self.running.store(0, Ordering::Relaxed);
+        self.peak_queued.store(0, Ordering::Relaxed);
+        self.completed.store(0, Ordering::Relaxed);
+    }
+}
+
 struct Shared {
-    queue: Mutex<VecDeque<NodeId>>,
+    queue: Mutex<QueueState>,
     cv: Condvar,
     stop: AtomicBool,
+    stats: ExecutorStats,
 }
 
 impl Shared {
     /// 取一个任务;返回 `None` 表示「已关停且队列排空」,工作线程可以退出。
-    fn take(&self) -> Option<NodeId> {
-        let mut q = self.queue.lock().unwrap_or_else(|e| e.into_inner());
+    fn take(&self) -> Option<Task> {
+        let mut queue = self.queue.lock().unwrap_or_else(|e| e.into_inner());
         loop {
-            if let Some(n) = q.pop_front() {
-                return Some(n);
+            let now = Instant::now();
+            while queue
+                .delayed
+                .first()
+                .is_some_and(|delayed| delayed.deadline <= now)
+            {
+                let delayed = queue.delayed.remove(0);
+                queue.ready.push_back(delayed.task);
+            }
+            if let Some(task) = queue.ready.pop_front() {
+                self.stats.started();
+                return Some(task);
             }
             if self.stop.load(Ordering::SeqCst) {
                 return None;
             }
-            q = self.cv.wait(q).unwrap_or_else(|e| e.into_inner());
+            if let Some(delayed) = queue.delayed.first() {
+                let timeout = delayed.deadline.saturating_duration_since(now);
+                let (next, _) = self
+                    .cv
+                    .wait_timeout(queue, timeout)
+                    .unwrap_or_else(|e| e.into_inner());
+                queue = next;
+            } else {
+                queue = self.cv.wait(queue).unwrap_or_else(|e| e.into_inner());
+            }
         }
     }
 }
@@ -143,9 +238,10 @@ impl ThreadPool {
             affinity,
             priority,
             shared: Arc::new(Shared {
-                queue: Mutex::new(VecDeque::new()),
+                queue: Mutex::new(QueueState::default()),
                 cv: Condvar::new(),
                 stop: AtomicBool::new(false),
+                stats: ExecutorStats::default(),
             }),
             threads: Mutex::new(Vec::new()),
         }
@@ -201,24 +297,66 @@ impl ThreadPool {
 
     /// 投递一个就绪节点。关停后返回 `false`,由调用方善后(释放已取得的令牌)。
     pub fn submit(&self, node: NodeId) -> bool {
-        let mut q = self.shared.queue.lock().unwrap_or_else(|e| e.into_inner());
+        let mut queue = self.shared.queue.lock().unwrap_or_else(|e| e.into_inner());
         // 在**队列锁内**查 stop:与 shutdown 的锁内置位配对。否则关停后仍可能入队,
         // 任务成孤儿留在队里(其 in_flight 永不归零)。
         if self.shared.stop.load(Ordering::SeqCst) {
             return false;
         }
-        q.push_back(node);
-        drop(q);
+        queue.ready.push_back(Task::Run(node));
+        self.shared.stats.enqueued();
+        drop(queue);
+        self.shared.cv.notify_one();
+        true
+    }
+
+    pub fn submit_source_wake(&self, node: NodeId, generation: u64, delay: Duration) -> bool {
+        let mut queue = self.shared.queue.lock().unwrap_or_else(|e| e.into_inner());
+        if self.shared.stop.load(Ordering::SeqCst) {
+            return false;
+        }
+        let task = Task::WakeSource(node, generation);
+        if delay.is_zero() {
+            queue.ready.push_back(task);
+        } else {
+            let now = Instant::now();
+            let mut bounded_delay = delay;
+            let deadline = loop {
+                if let Some(deadline) = now.checked_add(bounded_delay) {
+                    break deadline;
+                }
+                bounded_delay /= 2;
+            };
+            let index = queue
+                .delayed
+                .partition_point(|delayed| delayed.deadline <= deadline);
+            queue.delayed.insert(index, DelayedTask { deadline, task });
+        }
+        self.shared.stats.enqueued();
+        drop(queue);
         self.shared.cv.notify_one();
         true
     }
 
     pub fn pending(&self) -> usize {
-        self.shared
-            .queue
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .len()
+        self.shared.stats.queued.load(Ordering::Relaxed)
+    }
+
+    pub fn clear_delayed(&self) {
+        let mut queue = self.shared.queue.lock().unwrap_or_else(|e| e.into_inner());
+        let count = queue.delayed.len();
+        queue.delayed.clear();
+        self.shared.stats.dropped(count);
+        drop(queue);
+        self.shared.cv.notify_all();
+    }
+
+    pub(crate) fn stats(&self) -> ExecutorStatsSnapshot {
+        self.shared.stats.snapshot()
+    }
+
+    pub fn reset_stats(&self) {
+        self.shared.stats.reset();
     }
 
     /// 关停并 join。幂等。
@@ -249,12 +387,15 @@ impl Drop for ThreadPool {
 }
 
 fn worker(shared: Arc<Shared>, graph: Weak<GraphInner>) {
-    while let Some(node) = shared.take() {
+    while let Some(task) = shared.take() {
         // upgrade 失败 = 图已销毁。此时丢弃任务是正确的:节点本身已不存在。
-        match graph.upgrade() {
-            Some(g) => g.run_node_on_worker(node),
-            None => break,
+        let Some(graph) = graph.upgrade() else { break };
+        match task {
+            Task::Run(node) => graph.run_node_on_worker(node),
+            Task::WakeSource(node, generation) => graph.wake_source_on_worker(node, generation),
         }
+        shared.stats.completed();
+        graph.executor_task_completed();
     }
 }
 
@@ -287,6 +428,7 @@ fn worker(shared: Arc<Shared>, graph: Weak<GraphInner>) {
 pub struct DelegatingExecutor {
     name: String,
     queue: Mutex<VecDeque<NodeId>>,
+    stats: ExecutorStats,
 }
 
 impl DelegatingExecutor {
@@ -294,6 +436,7 @@ impl DelegatingExecutor {
         Self {
             name: name.to_string(),
             queue: Mutex::new(VecDeque::new()),
+            stats: ExecutorStats::default(),
         }
     }
 
@@ -309,6 +452,7 @@ impl DelegatingExecutor {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .push_back(node);
+        self.stats.enqueued();
         true
     }
 
@@ -318,15 +462,35 @@ impl DelegatingExecutor {
 
     /// 弹一个待办交给宿主线程跑;`None` = 队列空。
     pub fn take(&self) -> Option<NodeId> {
-        self.queue
+        let node = self
+            .queue
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .pop_front()
+            .pop_front();
+        if node.is_some() {
+            self.stats.started();
+        }
+        node
+    }
+
+    pub fn complete(&self) {
+        self.stats.completed();
+    }
+
+    pub(crate) fn stats(&self) -> ExecutorStatsSnapshot {
+        self.stats.snapshot()
     }
 
     /// 清空队列(`reset` 用:上一轮的残留不能带进下一轮)。
     pub fn clear(&self) {
-        self.queue.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        let mut queue = self.queue.lock().unwrap_or_else(|e| e.into_inner());
+        let count = queue.len();
+        queue.clear();
+        self.stats.dropped(count);
+    }
+
+    pub fn reset_stats(&self) {
+        self.stats.reset();
     }
 }
 
@@ -408,6 +572,13 @@ impl Executor {
         }
     }
 
+    pub fn submit_source_wake(&self, node: NodeId, generation: u64, delay: Duration) -> bool {
+        match self {
+            Self::Pool(p) => p.submit_source_wake(node, generation, delay),
+            Self::Delegating(_) => false,
+        }
+    }
+
     pub fn pending(&self) -> usize {
         match self {
             Self::Pool(p) => p.pending(),
@@ -431,11 +602,43 @@ impl Executor {
         }
     }
 
+    pub fn complete_delegated(&self) {
+        if let Self::Delegating(d) = self {
+            d.complete();
+        }
+    }
+
+    pub(crate) fn stats(&self) -> ExecutorStatsSnapshot {
+        match self {
+            Self::Pool(p) => p.stats(),
+            Self::Delegating(d) => d.stats(),
+        }
+    }
+
     /// 清空待宿主执行的队列(`reset` 用);线程池是 no-op。
     pub fn clear_delegated(&self) {
         match self {
             Self::Pool(_) => {}
             Self::Delegating(d) => d.clear(),
+        }
+    }
+
+    pub fn reset_run_state(&self) {
+        match self {
+            Self::Pool(p) => {
+                p.clear_delayed();
+                p.reset_stats();
+            }
+            Self::Delegating(d) => {
+                d.clear();
+                d.reset_stats();
+            }
+        }
+    }
+
+    pub fn clear_delayed(&self) {
+        if let Self::Pool(p) = self {
+            p.clear_delayed();
         }
     }
 }

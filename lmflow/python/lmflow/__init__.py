@@ -405,7 +405,8 @@ class Graph:
         Subgraph namespaces are restored as nested clusters; each node is
         coloured by the thread pool it runs on, and a legend lists every
         executor's thread count, pinned CPU cores (affinity), and realtime
-        priority.
+        priority. Compact/diagnostics views also show queued, running,
+        peak-queued, and completed executor tasks.
 
         ``view="compact"`` adds node state plus core throughput/latency counters
         without per-port and Poller diagnostics. ``view="diagnostics"`` adds the

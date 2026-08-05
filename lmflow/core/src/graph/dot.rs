@@ -1164,10 +1164,24 @@ impl GraphInner {
             for (i, ex) in self.executors.iter().enumerate() {
                 // 委托执行器没有线程/绑核/优先级可言 —— 标出「交还宿主线程」而不是 0t。
                 if ex.is_delegating() {
+                    let stats = ex.stats();
+                    let runtime = if with_stats {
+                        format!(
+                            "\\nqueued {} · running {}/1 · peak {} · done {}",
+                            stats.queued, stats.running, stats.peak_queued, stats.completed
+                        )
+                    } else {
+                        String::new()
+                    };
                     out.push_str(&format!(
-                        "    legend_e{i} [shape=box, style=filled, fillcolor=white, label=\"{}\\nhost thread (delegating)\", tooltip=\"executor {}\"];\n",
+                        "    legend_e{i} [shape=box, style=filled, fillcolor=white, label=\"{}\\nhost thread (delegating){}\", tooltip=\"executor {}: queued {}, running {}/1, peak queued {}, completed {}\"];\n",
                         escape_dot(&truncate_label(ex.name(), NODE_LABEL_CHARS)),
+                        runtime,
                         escape_dot(ex.name()),
+                        stats.queued,
+                        stats.running,
+                        stats.peak_queued,
+                        stats.completed,
                     ));
                     continue;
                 }
@@ -1188,14 +1202,33 @@ impl GraphInner {
                 } else {
                     String::new()
                 };
+                let stats = ex.stats();
+                let runtime = if with_stats {
+                    format!(
+                        "\\nqueued {} · running {}/{} · peak {} · done {}",
+                        stats.queued,
+                        stats.running,
+                        ex.num_threads(),
+                        stats.peak_queued,
+                        stats.completed
+                    )
+                } else {
+                    String::new()
+                };
                 out.push_str(&format!(
-                    "    legend_e{i} [shape=box, style=filled, fillcolor=\"{}\", label=\"{}\\n{}t · {}{}\", tooltip=\"executor {}\"];\n",
+                    "    legend_e{i} [shape=box, style=filled, fillcolor=\"{}\", label=\"{}\\n{}t · {}{}{}\", tooltip=\"executor {}: queued {}, running {}/{}, peak queued {}, completed {}\"];\n",
                     COLORS[i % COLORS.len()],
                     escape_dot(&truncate_label(ex.name(), NODE_LABEL_CHARS)),
                     ex.num_threads(),
                     cores,
                     prio,
+                    runtime,
                     escape_dot(ex.name()),
+                    stats.queued,
+                    stats.running,
+                    ex.num_threads(),
+                    stats.peak_queued,
+                    stats.completed,
                 ));
             }
             out.push_str("  }\n");

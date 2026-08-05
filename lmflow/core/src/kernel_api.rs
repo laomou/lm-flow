@@ -131,6 +131,11 @@ impl KernelCtx<'_> {
     pub fn source_done(&mut self) {
         self.inner.source_done = true;
     }
+    /// For a source kernel (no inputs): cooperatively release the worker and ask the engine to
+    /// invoke the source again after `delay`.
+    pub fn source_yield(&mut self, delay: std::time::Duration) {
+        self.inner.source_yield = Some(delay);
+    }
     /// Record a failure reason (usually paired with `return Err(cc.fail(...))`).
     pub fn set_error(&mut self, msg: &str) {
         self.inner.set_error(msg);

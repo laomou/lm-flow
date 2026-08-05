@@ -5,7 +5,7 @@
 
 use std::time::{Duration, Instant};
 
-use lmflow::{register_kernel, Graph, Kernel, KernelCtx, Packet};
+use lmflow::{register_kernel, Graph, Kernel, KernelCtx, Packet, Timestamp};
 
 /// 产 `count` 个整数(0..count)后自报产完。不自带 sleep —— 定速交给引擎。
 #[derive(Default)]
@@ -29,8 +29,37 @@ impl Kernel for Counter {
     }
 }
 
+#[derive(Default)]
+struct CooperativeSource {
+    calls: usize,
+}
+
+impl Kernel for CooperativeSource {
+    fn process(&mut self, cc: &mut KernelCtx) -> lmflow::Result<()> {
+        if self.calls == 0 {
+            self.calls += 1;
+            cc.source_yield(Duration::from_millis(200));
+        } else {
+            cc.source_done();
+        }
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+struct InvalidYield;
+
+impl Kernel for InvalidYield {
+    fn process(&mut self, cc: &mut KernelCtx) -> lmflow::Result<()> {
+        cc.source_yield(Duration::ZERO);
+        cc.forward(0, 0)
+    }
+}
+
 fn reg() {
     let _ = register_kernel::<Counter>("RateCounter");
+    let _ = register_kernel::<CooperativeSource>("CooperativeSource");
+    let _ = register_kernel::<InvalidYield>("InvalidYield");
 }
 
 fn run(rate: &str, count: i64) -> (Vec<i64>, Duration) {
@@ -112,4 +141,128 @@ fn non_positive_rate_rejected() {
     .unwrap_err()
     .to_string();
     assert!(err.contains("positive, finite"), "{err}");
+}
+
+#[test]
+fn cooperative_source_does_not_occupy_single_worker_while_waiting() {
+    reg();
+    let graph = Graph::from_yaml(
+        r#"
+executors:
+  - { name: solo, type: ThreadPoolExecutor, num_threads: 1 }
+nodes:
+  - { name: source, kernel: CooperativeSource, executor: solo, input_ports: [], output_ports: [] }
+  - { name: relay, kernel: PassThrough, executor: solo, input_ports: [in], output_ports: [out] }
+input_ports: [in]
+output_ports: [out]
+"#,
+    )
+    .unwrap();
+    let output = graph.add_poller("out").unwrap();
+    graph.start().unwrap();
+
+    let started = Instant::now();
+    graph
+        .input("in")
+        .unwrap()
+        .send(Packet::from_i64(7).at(Timestamp(0)))
+        .unwrap();
+    let packet = output
+        .next_timeout(Duration::from_millis(100))
+        .expect("poller should not time out")
+        .expect("ordinary node should run while the source is waiting");
+    assert_eq!(packet.as_i64(), Some(7));
+    assert!(
+        started.elapsed() < Duration::from_millis(180),
+        "source_yield must release the only worker"
+    );
+
+    graph.close_all_inputs();
+    graph
+        .wait_done_timeout(Duration::from_secs(2))
+        .expect("source should wake and finish");
+}
+
+#[test]
+fn source_done_overrides_source_yield() {
+    #[derive(Default)]
+    struct DoneAndYield;
+    impl Kernel for DoneAndYield {
+        fn process(&mut self, cc: &mut KernelCtx) -> lmflow::Result<()> {
+            cc.source_yield(Duration::from_secs(60));
+            cc.source_done();
+            Ok(())
+        }
+    }
+    let _ = register_kernel::<DoneAndYield>("DoneAndYield");
+    let graph = Graph::from_yaml(
+        "nodes:\n  - { name: source, kernel: DoneAndYield, input_ports: [], output_ports: [] }\n",
+    )
+    .unwrap();
+    graph.start().unwrap();
+    graph
+        .wait_done_timeout(Duration::from_millis(500))
+        .expect("source_done must cancel the requested yield");
+}
+
+#[test]
+fn source_yield_on_non_source_is_an_error() {
+    reg();
+    let graph = Graph::from_yaml(
+        "nodes:\n  - { name: invalid, kernel: InvalidYield, input_ports: [in], output_ports: [out] }\ninput_ports: [in]\noutput_ports: [out]\n",
+    )
+    .unwrap();
+    graph.start().unwrap();
+    graph
+        .input("in")
+        .unwrap()
+        .send(Packet::from_i64(1).at(Timestamp(0)))
+        .unwrap();
+    graph.close_all_inputs();
+    let error = graph.wait_done_timeout(Duration::from_secs(1)).unwrap_err();
+    assert!(
+        error.to_string().contains("only valid for source"),
+        "{error}"
+    );
+}
+
+#[test]
+fn cancel_clears_a_long_source_yield_and_allows_reset() {
+    #[derive(Default)]
+    struct YieldOnce {
+        calls: usize,
+    }
+    impl Kernel for YieldOnce {
+        fn process(&mut self, cc: &mut KernelCtx) -> lmflow::Result<()> {
+            if self.calls == 0 {
+                self.calls += 1;
+                cc.source_yield(Duration::from_secs(60));
+            } else {
+                cc.source_done();
+            }
+            Ok(())
+        }
+    }
+    let _ = register_kernel::<YieldOnce>("YieldOnce");
+    let graph = Graph::from_yaml(
+        "nodes:\n  - { name: source, kernel: YieldOnce, input_ports: [], output_ports: [] }\n",
+    )
+    .unwrap();
+
+    graph.start().unwrap();
+    std::thread::sleep(Duration::from_millis(20));
+    graph.cancel();
+    assert!(
+        matches!(
+            graph.wait_done_timeout(Duration::from_millis(500)),
+            Err(lmflow::Error::Cancelled)
+        ),
+        "cancel must not wait for the 60-second source delay"
+    );
+
+    graph.reset().unwrap();
+    graph.start().unwrap();
+    graph
+        .wait_done_timeout(Duration::from_millis(500))
+        .expect("the old delayed wake must not leak into the reset run");
 }

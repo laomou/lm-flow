@@ -32,9 +32,9 @@ to each GitHub Release.
   against "did you write an `executor` field". Since the default pool is multi-threaded, a node on
   the default executor may now set `max_in_flight > 1` (ADR #29). Single-threaded pools and
   delegating executors still reject it.
-- **Source nodes are now rejected only on delegating executors**, not on "no executor" — the default
-  pool is a perfectly good home for a source. A new check rejects a pool carrying as many source
-  nodes as it has threads, which is provable starvation.
+- **Source nodes are rejected only on delegating executors**, not on "no executor" — the default
+  pool is a valid home for a source. Multiple cooperative sources may share even a single-thread
+  pool; a source that blocks inside its own `process` still occupies that worker.
 
 ### Added
 
@@ -62,6 +62,13 @@ to each GitHub Release.
 - **Delegated execution is serialized and fair per graph.** Concurrent host callers cannot execute
   delegated kernels simultaneously, and multiple `DelegatingExecutor` queues are pumped
   round-robin instead of giving permanent priority to the first one.
+- **Cooperative source scheduling.** Source kernels can call Rust `source_yield(Duration)`, C/C++
+  `lmflow_ctx_source_yield` / `Context::SourceYield(delay_ms)`, or Python
+  `cc.source_yield(delay_seconds)` to release their worker and request a later invocation. YAML
+  `rate: N` now uses the same delayed executor queue instead of sleeping on a worker thread.
+- **Executor runtime state in DOT diagnostics.** Executor legend boxes now show current queued and
+  running tasks, thread capacity, peak queued tasks, and completed tasks. These counters are
+  embedded in compact/diagnostics visualization rather than exposed as another public stats API.
 
 ### Fixed
 

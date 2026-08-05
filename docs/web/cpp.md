@@ -580,6 +580,7 @@ void Emit(size_t i, Packet p);
 void Forward(size_t in, size_t out);                  // zero-copy passthrough
 void SetNextTimestampBound(size_t i, int64_t bound);  // when producing nothing
 void SourceDone() const;                              // source kernels: "I am finished"
+void SourceYield(uint64_t delay_ms) const;             // source kernels: release worker, retry later
 
 /* options (from the node's YAML `options:`) */
 bool        HasOption(const char* key) const;
@@ -690,7 +691,7 @@ nodes:
     kernel: MySourceKernel
     executor: cpu         # a source (no inputs) must be on a pool, not a delegating executor
     output_ports: ["frames"]
-    rate: 30              # Hz — the engine paces it; no sleep in the kernel
+    rate: 30              # Hz — delayed rescheduling, no worker sleep
 
   - name: detect
     kernel: MyDetectorKernel
@@ -780,6 +781,10 @@ The engine cannot interrupt a stuck kernel, so it makes stuckness *visible*. If 
 socket or a lock it occupies an executor thread; a few of those drain the pool and the graph goes
 quiet. `wait_done_timeout` would only tell you "timed out" — not which node.
 
+Source kernels should return quickly and call `cc.SourceYield(delay_ms)` when no input is currently
+available. The engine then retries through the pool's delayed queue, leaving the worker free.
+`rate:` uses the same mechanism. A source that blocks inside `Process` still occupies its worker.
+
 ```c
 LMFlowNodeStats st = { .struct_size = sizeof(st) };
 if (lmflow_graph_node_stats(graph, i, &st) && st.running && st.running_for_us > 5000000) {
@@ -860,6 +865,8 @@ for inactive nodes so large graphs remain scannable. Long visible labels are tru
 ellipsis, while SVG tooltips keep the complete node, kernel, namespace, executor, edge, and port
 names. Nodes carry executor groups and stable state ordering; Graphviz rank/node spacing is tuned
 without `concentrate`, so separate multi-port edges are never merged.
+Compact and diagnostics executor legend boxes also show queued tasks, running/thread capacity,
+peak queued tasks, and completed tasks.
 
 Statistics-enabled views also show a sampling window. The first export covers the current run from
 `start`; later exports use the interval since the previous export of the same view. Node labels keep
@@ -942,7 +949,8 @@ The rules that actually bite, in one place:
    during blocking host calls).
 5. **A source node (no input ports) cannot run on a delegating executor.** Its `process` typically
    blocks waiting for the next frame, which would monopolise the host thread and stall the graph.
-   Nor may a pool carry as many source nodes as it has threads — that starves everything else on it.
+   On a thread pool, use `SourceYield` or `rate` for cooperative waiting. Multiple cooperative
+   sources may share one worker; a source that blocks in user code still consumes one.
 6. **Graph input timestamps must strictly increase**, and `LMFLOW_TS_UNSET` is not allowed there.
    Sentinels: `UNSET` < `UNSTARTED` < `PRE_STREAM` < `MIN` … `MAX` < `POST_STREAM` <
    `ONE_OVER_POST_STREAM` < `DONE`.

@@ -217,6 +217,8 @@ pub(super) struct NodeSched {
     pub(super) blocked_flush: Option<BlockedFlush>,
     /// 是否已有线程在做刷新 —— 保证刷新按序、串行(否则并发刷新会打乱下游顺序)。
     pub(super) flushing: bool,
+    /// Source 本次调用刷新完成后，延迟多久再唤醒。
+    pub(super) source_reschedule: Option<std::time::Duration>,
 }
 impl NodeSched {
     pub(super) fn new(max_in_flight: usize) -> Self {
@@ -232,6 +234,7 @@ impl NodeSched {
             pending_flush: BTreeMap::new(),
             blocked_flush: None,
             flushing: false,
+            source_reschedule: None,
         }
     }
 }
@@ -348,6 +351,10 @@ pub struct Node {
     pub(super) input_is_back_edge: Vec<bool>,
     /// 源节点(0 输入口)自报「已产完」。置位后 readiness 不再放行、节点可关流终止。
     pub(super) source_done: AtomicBool,
+    /// Source 正在协作式等待下一次唤醒；等待期间不可再次认领。
+    pub(super) source_waiting: AtomicBool,
+    /// Source 唤醒代次。reset/取消后旧延迟任务会因代次不匹配而失效。
+    pub(super) source_wake_generation: AtomicU64,
     /// 每个输入口的**时间戳边界**:保证「不会再有时间戳 < bound 的包到来」。
     /// 这是多输入口对齐的依据 —— 只有确知某口不会再来更早的包,
     /// 才能安全地在当前最小时间戳上组一次 Process。
@@ -419,7 +426,9 @@ impl Node {
         let n = self.input_queues.len();
         if n == 0 {
             // 源节点:无输入口。未自报完成即「可产出」;ts 占位(try_claim 用 seq 覆盖成单调时间戳)。
-            return (!self.source_done.load(Ordering::SeqCst)).then_some(Ready {
+            return (!self.source_done.load(Ordering::SeqCst)
+                && !self.source_waiting.load(Ordering::SeqCst))
+            .then_some(Ready {
                 ts: Timestamp::unset(),
                 ports: None,
                 batch: None,

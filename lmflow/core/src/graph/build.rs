@@ -334,6 +334,8 @@ impl GraphInner {
                 last_fire: Mutex::new(None),
                 input_is_back_edge: back_edge_mask[idx].clone(),
                 source_done: AtomicBool::new(false),
+                source_waiting: AtomicBool::new(false),
+                source_wake_generation: AtomicU64::new(0),
                 input_bounds: (0..ins.len())
                     .map(|_| Mutex::new(Timestamp::pre_stream()))
                     .collect(),
@@ -442,9 +444,6 @@ fn build_executor(name: &str, e: &crate::config::ExecutorConfig) -> Result<Execu
 /// 节点与它所属执行器是否匹配。**必须在执行器建好之后**判 —— 这两条规则问的都是
 /// 「解析出来的执行器长什么样」,光看 YAML 里的名字答不上来。
 fn check_node_executor_fit(cfg: &GraphConfig, executors: &[Executor]) -> Result<()> {
-    // 每个池上挂了几个源节点 —— 源的 process 常年阻塞(等帧 / 读下一条),
-    // 占满线程就没人跑别的节点了。
-    let mut sources_per_executor = vec![0usize; executors.len()];
     for (idx, n) in cfg.nodes.iter().enumerate() {
         let who = node_label(n, idx);
         let ei = executors
@@ -477,29 +476,6 @@ fn check_node_executor_fit(cfg: &GraphConfig, executors: &[Executor]) -> Result<
                     ex.name()
                 )));
             }
-            sources_per_executor[ei] += 1;
-        }
-    }
-    // 源节点数 >= 线程数 = 可证明的饿死:每个源占一个线程不放,同池的其它节点永远排不上。
-    for (ei, count) in sources_per_executor.iter().enumerate() {
-        let ex = &executors[ei];
-        if *count == 0 || *count < ex.num_threads() {
-            continue;
-        }
-        let others = cfg
-            .nodes
-            .iter()
-            .any(|n| !n.input_ports.is_empty() && exec_name(&n.executor) == ex.name());
-        if *count > ex.num_threads() || others {
-            return Err(Error::InvalidArg(format!(
-                "executor `{}` has {} threads but {} source node(s) on it -- \
-                 sources block in process, so they would occupy every thread and starve \
-                 the rest of the pool. Raise num_threads above {} or move sources elsewhere",
-                ex.name(),
-                ex.num_threads(),
-                count,
-                count
-            )));
         }
     }
     Ok(())

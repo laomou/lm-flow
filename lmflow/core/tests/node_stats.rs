@@ -157,6 +157,12 @@ fn dot_with_stats_annotates_and_keeps_structure() {
     assert!(!plain.contains("pkts"), "普通版不应带统计");
     assert!(stats.contains("3 pkts"), "应标出处理包数:\n{stats}");
     assert!(stats.contains("peakQ"), "应标出队列峰值");
+    assert!(
+        stats.contains("queued 0 · running 0/"),
+        "应标出执行器当前队列/运行数"
+    );
+    assert!(stats.contains("· peak "), "应标出执行器峰值队列");
+    assert!(stats.contains("· done "), "应标出执行器完成任务数");
     assert!(stats.contains("peakQ 1 / 8B"), "应标出队列字节峰值");
     assert!(
         stats.contains("in 3 (+3) / out 3 (+3)"),

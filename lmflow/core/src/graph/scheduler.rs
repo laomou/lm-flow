@@ -270,6 +270,30 @@ impl GraphInner {
         self.notify_activity();
     }
 
+    /// 线程池延迟任务入口：只有当前代次的等待 Source 会被重新放行。
+    pub fn wake_source_on_worker(&self, n: NodeId, generation: u64) {
+        let node = &self.nodes[n];
+        if node.source_wake_generation.load(Ordering::SeqCst) != generation {
+            self.notify_activity();
+            return;
+        }
+        node.source_waiting.store(false, Ordering::SeqCst);
+        if matches!(self.state(), State::Running | State::Draining)
+            && !self.shared.is_cancelled()
+            && !self.shared.has_error()
+            && !node.source_done.load(Ordering::SeqCst)
+        {
+            self.schedule_node(n);
+        } else {
+            self.maybe_close(n);
+        }
+        self.notify_activity();
+    }
+
+    pub fn executor_task_completed(&self) {
+        self.notify_activity();
+    }
+
     /// 执行器空闲 = 没有已认领调用,且没有委托给宿主线程的待办。
     ///
     /// `in_flight` 在 `try_claim` 内、仍持节点调度锁时递增,覆盖「已认领但尚未入队」
@@ -277,10 +301,10 @@ impl GraphInner {
     pub(super) fn workers_idle(&self) -> bool {
         self.in_flight.load(Ordering::SeqCst) == 0
             && !self.delegated_running.load(Ordering::Acquire)
-            && self
-                .executors
-                .iter()
-                .all(|executor| !executor.is_delegating() || executor.pending() == 0)
+            && self.executors.iter().all(|executor| {
+                let stats = executor.stats();
+                stats.queued == 0 && stats.running == 0
+            })
     }
 
     /// 逻辑空闲还要求没有因内部容量不足而保留的待刷新 staging。
@@ -525,6 +549,7 @@ impl GraphInner {
                     .store(index.wrapping_add(1), Ordering::Relaxed);
                 self.run_node(n);
                 self.in_flight.fetch_sub(1, Ordering::SeqCst);
+                self.executors[index].complete_delegated();
                 self.notify_activity();
                 true
             }
@@ -558,9 +583,49 @@ impl GraphInner {
             Err(e) => self.on_node_error(n, slot, e),
             Ok(()) => {
                 let rc = self.call_kernel(n, slot, KernelPhase::Process);
-                // 源节点:内核调了 source_done() → 记下,readiness 不再放行、随后关流终止。
-                if node.is_source() && unsafe { node.ctx_slot(slot) }.source_done {
-                    node.source_done.store(true, Ordering::SeqCst);
+                let ctx = unsafe { node.ctx_slot(slot) };
+                if node.is_source() {
+                    if ctx.source_done {
+                        node.source_done.store(true, Ordering::SeqCst);
+                        node.source_waiting.store(false, Ordering::SeqCst);
+                        node.sched
+                            .lock()
+                            .expect("scheduler lock poisoned")
+                            .source_reschedule = None;
+                    } else {
+                        let rate_delay = node.min_period.and_then(|period| {
+                            let last = node.last_fire.lock().expect("last_fire lock poisoned");
+                            last.and_then(|started| period.checked_sub(started.elapsed()))
+                        });
+                        let delay = match (ctx.source_yield, rate_delay) {
+                            (Some(yield_delay), Some(rate_delay)) => {
+                                Some(yield_delay.max(rate_delay))
+                            }
+                            (Some(delay), None) | (None, Some(delay)) => Some(delay),
+                            (None, None) => None,
+                        };
+                        if let Some(delay) = delay {
+                            node.source_waiting.store(true, Ordering::SeqCst);
+                            node.sched
+                                .lock()
+                                .expect("scheduler lock poisoned")
+                                .source_reschedule = Some(delay);
+                        }
+                    }
+                } else if ctx.source_yield.is_some() && rc == 0 {
+                    return self.complete_invocation(
+                        n,
+                        slot,
+                        seq,
+                        self.on_node_error(
+                            n,
+                            slot,
+                            Error::Kernel(format!(
+                                "[{}] source_yield is only valid for source nodes",
+                                node.name
+                            )),
+                        ),
+                    );
                 }
                 if rc != 0 {
                     let e = unsafe { node.ctx_slot(slot) }.take_error(rc);
@@ -643,6 +708,38 @@ impl GraphInner {
             self.drive_invocation_flushes(n, first);
         }
         self.finish(n);
+    }
+
+    /// Source 的输出必须先按序刷新并释放槽，之后才能安排下一次延迟唤醒。
+    pub(super) fn schedule_source_resumption(&self, n: NodeId) {
+        let node = &self.nodes[n];
+        if !node.is_source() || !node.source_waiting.load(Ordering::SeqCst) {
+            return;
+        }
+        if self.shared.is_cancelled()
+            || self.shared.has_error()
+            || !matches!(self.state(), State::Running | State::Draining)
+        {
+            node.source_waiting.store(false, Ordering::SeqCst);
+            node.sched
+                .lock()
+                .expect("scheduler lock poisoned")
+                .source_reschedule = None;
+            return;
+        }
+        let delay = {
+            let mut sched = node.sched.lock().expect("scheduler lock poisoned");
+            if sched.in_flight != 0 || sched.blocked_flush.is_some() || sched.flushing {
+                return;
+            }
+            sched.source_reschedule.take()
+        };
+        let Some(delay) = delay else { return };
+        let generation = node.source_wake_generation.fetch_add(1, Ordering::SeqCst) + 1;
+        if !self.executors[node.executor].submit_source_wake(n, generation, delay) {
+            node.source_waiting.store(false, Ordering::SeqCst);
+        }
+        self.notify_activity();
     }
 
     /// 契约声明的输入类型校验。类型不符宁可报错,也不让算子按错误类型解读内存。
@@ -784,27 +881,9 @@ impl GraphInner {
             }
         }
 
-        // 源节点定速(见 `NodeConfig::rate`):在**调算子之前**、于本节点的池线程里
-        // sleep 到点,保证相邻两次 process 至少隔 min_period。R1 未被破坏 —— 此刻不持任何
-        // 引擎锁(last_fire 那把在 sleep 前已释放)。只有源节点会设 min_period;它本就串行
-        // 自续产(finish→schedule_node→try_claim 紧循环),故这里节流就等于给整条产出限速。
-        if matches!(phase, KernelPhase::Process) {
-            if let Some(period) = node.min_period {
-                let now = Instant::now();
-                let wait = {
-                    let mut last = node.last_fire.lock().expect("last_fire lock poisoned");
-                    let w = match *last {
-                        Some(prev) => period.checked_sub(now.duration_since(prev)),
-                        None => None, // 首次不等
-                    };
-                    // 预支下一次的基准:按「本次实际放行时刻」记,避免累积漂移。
-                    *last = Some(now + w.unwrap_or_default());
-                    w
-                }; // 锁在此释放,再 sleep —— 不持锁阻塞
-                if let Some(w) = wait {
-                    std::thread::sleep(w);
-                }
-            }
+        // Source rate 只记录本次实际开始时刻；完成后由延迟唤醒节流，不在 worker 内 sleep。
+        if matches!(phase, KernelPhase::Process) && node.min_period.is_some() {
+            *node.last_fire.lock().expect("last_fire lock poisoned") = Some(Instant::now());
         }
 
         // 安全性:ctx_ptr 来自本槽的 UnsafeCell,该槽此刻独占。

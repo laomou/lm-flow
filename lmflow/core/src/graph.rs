@@ -194,6 +194,13 @@ impl Graph {
 
     pub fn cancel(&self) {
         self.inner.shared.cancel();
+        for node in &self.inner.nodes {
+            node.source_waiting.store(false, Ordering::SeqCst);
+            node.source_wake_generation.fetch_add(1, Ordering::SeqCst);
+        }
+        for executor in &self.inner.executors {
+            executor.clear_delayed();
+        }
         self.inner.resume_blocked_flushes();
         self.inner.finish_all_backpressure_blocks();
         self.inner.notify_activity();

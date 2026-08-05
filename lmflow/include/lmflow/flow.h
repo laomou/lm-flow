@@ -424,6 +424,8 @@ void lmflow_ctx_counter_add(const LMFlowContext*, const char* name, int64_t delt
 /* 源算子(0 输入口的生成型算子)自报「已产完」。调用后引擎不再触发本节点的 process,
  * 并关闭其输出边(下游据此收流),图随之正常终止。仅对源节点有意义。 */
 void lmflow_ctx_source_done(const LMFlowContext*);
+/* 源算子协作式让出 worker，并在 delay_ms 后再次触发 process。 */
+void lmflow_ctx_source_yield(const LMFlowContext*, uint64_t delay_ms);
 
 /* ---------- 关闭原因 ----------
  * 算子在 close 里据此决定是否写出结果 / 提交事务 / 落盘。 */
