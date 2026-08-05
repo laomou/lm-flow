@@ -591,7 +591,8 @@ impl GraphInner {
     /// 导出 Graphviz DOT(`dot -Tsvg` 可渲染的拓扑图)。只读快照。
     ///
     /// - 节点按名字里的 `/`(子图展开留下的命名空间)还原成嵌套 cluster;
-    /// - 节点填色 = 所在执行器(线程池),`@名` 标注;`@main` = 宿主主线程;
+    /// - 节点填色 = 所在执行器,`@名` 标注(默认执行器是 `@default`);
+    ///   委托执行器(交还宿主线程)留白底,线程池按序取色;
     /// - 图例列出各执行器的线程数、绑定核(亲和力)、实时优先级;
     /// - 边标注端口名;图输入/输出口画成独立形状。
     ///
@@ -746,14 +747,15 @@ impl GraphInner {
             let short_label = truncate_label(short, NODE_LABEL_CHARS);
             let kernel_label = truncate_label(&n.kernel_name, KERNEL_LABEL_CHARS);
             let node_state = node_states[i];
-            let executor_group = n.executor.map_or(0, |executor| executor + 1);
+            let executor_group = n.executor;
             layout_keys[i] = (executor_group, node_state.sort_order());
-            let (exec, mut fill) = match n.executor {
-                None => ("@main".to_string(), "white".to_string()),
-                Some(ei) => (
-                    format!("@{}", self.executors[ei].name()),
-                    COLORS[ei % COLORS.len()].to_string(),
-                ),
+            let ex = &self.executors[n.executor];
+            let exec = format!("@{}", ex.name());
+            // 委托执行器留白底(它不拥有线程,和「有色的池」区分开);池按下标取色。
+            let mut fill = if ex.is_delegating() {
+                "white".to_string()
+            } else {
+                COLORS[n.executor % COLORS.len()].to_string()
             };
             let capacities = n
                 .input_queue_capacity
@@ -1148,8 +1150,9 @@ impl GraphInner {
             }
         }
 
-        // 执行器图例:拓扑模式填色 → 线程池;统计模式仍用标签标出 placement。
-        if !self.executors.is_empty() {
+        // 执行器图例:拓扑模式填色 → 执行器;统计模式仍用标签标出 placement。
+        // executors 恒非空(默认执行器一定在),故图例总会出现。
+        {
             let legend_label = if with_stats {
                 "executors (node label = placement)"
             } else {
@@ -1159,6 +1162,15 @@ impl GraphInner {
                 "  subgraph cluster_legend {{\n    label=\"{legend_label}\"; style=dashed; color=\"#888888\";\n",
             ));
             for (i, ex) in self.executors.iter().enumerate() {
+                // 委托执行器没有线程/绑核/优先级可言 —— 标出「交还宿主线程」而不是 0t。
+                if ex.is_delegating() {
+                    out.push_str(&format!(
+                        "    legend_e{i} [shape=box, style=filled, fillcolor=white, label=\"{}\\nhost thread (delegating)\", tooltip=\"executor {}\"];\n",
+                        escape_dot(&truncate_label(ex.name(), NODE_LABEL_CHARS)),
+                        escape_dot(ex.name()),
+                    ));
+                    continue;
+                }
                 let cores = if ex.affinity().is_empty() {
                     "cores: any".to_string()
                 } else {
@@ -1186,9 +1198,6 @@ impl GraphInner {
                     escape_dot(ex.name()),
                 ));
             }
-            out.push_str(
-                "    legend_main [shape=box, style=filled, fillcolor=white, label=\"main thread\\n(default)\"];\n",
-            );
             out.push_str("  }\n");
         }
         if with_stats {

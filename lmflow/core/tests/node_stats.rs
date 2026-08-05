@@ -53,7 +53,11 @@ impl Kernel for DotError {
     }
 }
 
+// 显式跑委托执行器:这些是 DOT / 状态渲染测试,要的是「状态转换可复现」,
+// 不是并发。默认执行器是线程池,节点状态会随 worker 调度抖动。
 const CHAIN: &str = r#"
+executors:
+  - { name: "", type: "DelegatingExecutor" }
 nodes:
   - { name: a, kernel: PassThrough, input_ports: ["in"],  output_ports: ["mid"] }
   - { name: b, kernel: PassThrough, input_ports: ["mid"], output_ports: ["out"] }
@@ -215,8 +219,8 @@ fn dot_view_modes_separate_compact_and_diagnostics() {
     let explicit = graph.to_dot_with_view(DotView::Compact);
     let diagnostics = graph.to_dot_with_stats();
 
-    assert!(compact.contains("@main\\nCREATED"));
-    assert!(explicit.contains("@main\\nCREATED"));
+    assert!(compact.contains("@default\\nCREATED"));
+    assert!(explicit.contains("@default\\nCREATED"));
     assert!(compact.contains("window since start"));
     assert!(explicit.contains("window "));
     assert!(!compact.contains("CREATED · 0 pkts"));
@@ -234,6 +238,8 @@ fn dot_node_state_tracks_idle_running_closed_and_error() {
 
     let idle = Graph::from_yaml(
         r#"
+executors:
+  - { name: "", type: "DelegatingExecutor" }
 nodes:
   - { name: idle, kernel: PassThrough, input_ports: [in], output_ports: [] }
 input_ports: [in]
@@ -242,13 +248,13 @@ input_ports: [in]
     .unwrap();
     idle.start().unwrap();
     let idle_dot = idle.to_dot_compact();
-    assert!(idle_dot.contains("@main\\nIDLE"));
+    assert!(idle_dot.contains("@default\\nIDLE"));
     assert!(idle_dot.contains("hotspots running 0 · error 0"));
     assert!(idle_dot.contains("color=\"#4c78a8\""));
     idle.close_all_inputs();
     idle.wait_done_timeout(Duration::from_secs(2)).unwrap();
     let closed_dot = idle.to_dot_compact();
-    assert!(closed_dot.contains("@main\\nCLOSED"));
+    assert!(closed_dot.contains("@default\\nCLOSED"));
 
     let running = Graph::from_yaml(
         r#"
@@ -287,6 +293,8 @@ input_ports: [in]
 
     let failed = Graph::from_yaml(
         r#"
+executors:
+  - { name: "", type: "DelegatingExecutor" }
 nodes:
   - { name: failed, kernel: DotError, input_ports: [in], output_ports: [] }
 input_ports: [in]
@@ -305,7 +313,7 @@ input_ports: [in]
         .unwrap_err();
     assert!(error.to_string().contains("intentional DOT state error"));
     let error_dot = failed.to_dot_compact();
-    assert!(error_dot.contains("@main"));
+    assert!(error_dot.contains("@default"));
     assert!(error_dot.contains("\\nERROR"));
     assert!(error_dot.contains("hotspots running 0 · error 1"));
     assert!(error_dot.contains("color=\"#d62728\", penwidth=3"));

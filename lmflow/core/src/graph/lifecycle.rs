@@ -237,7 +237,7 @@ impl GraphInner {
     /// **不碰线程池**:worker 随图存活、此刻都 park 在 condvar 上、`stop` 仍为 false,
     /// 下一轮 `start` 直接复用(见 executor.rs 模块头);shutdown+join 只发生在 Drop。
     pub(super) fn reset(&self) -> Result<()> {
-        // 1. 校验静止。in_flight==0 且 main_queue 空 ⇒ 没有 worker 在 run_node 中途,
+        // 1. 校验静止。in_flight==0 且委托队列为空 ⇒ 没有 worker 在 run_node 中途,
         //    故下面所有「无并发」的复位都成立(与 Drop / start 用同一条静止依据)。
         {
             let st = *self.state.lock().expect("state lock poisoned");
@@ -315,10 +315,9 @@ impl GraphInner {
 
         // 5. GraphInner 顶层。side_packets 保留(下一轮 start 会自动 clone 进各 ctx)。
         //    epoch 不动:它只是各诊断时间戳的单调基准。
-        self.main_queue
-            .lock()
-            .expect("main queue lock poisoned")
-            .clear();
+        for executor in &self.executors {
+            executor.clear_delegated();
+        }
         self.in_flight.store(0, Ordering::SeqCst);
         {
             let mut a = self.activity.0.lock().unwrap_or_else(|e| e.into_inner());

@@ -51,27 +51,53 @@ output_ports: ["out"]
 "#,
     )
     .unwrap();
-    assert_eq!(g.executor_names(), vec!["cpu"]);
+    // 默认执行器恒在首位 —— 它是引擎补的,不写 executor 的 "p" 就归它。
+    assert_eq!(g.executor_names(), vec!["default", "cpu"]);
 }
 
 #[test]
-fn rejects_unnamed_and_duplicate_executors() {
+fn empty_executor_name_configures_the_default() {
+    init();
+    // 空名 = 配置默认执行器,而不是「一个没名字的池」。
+    let g = Graph::from_yaml(
+        r#"
+executors:
+  - { name: "", type: "ThreadPoolExecutor", num_threads: 3 }
+nodes:
+  - { name: "p", kernel: "PassThroughKernel", input_ports: ["in"], output_ports: ["out"] }
+input_ports: ["in"]
+output_ports: ["out"]
+"#,
+    )
+    .unwrap();
+    assert_eq!(
+        g.executor_names(),
+        vec!["default"],
+        "空名条目应当配置默认执行器,而不是再添一个"
+    );
+}
+
+#[test]
+fn rejects_duplicate_executors_including_the_default() {
     init();
     let err = Graph::from_yaml(
         r#"
 executors:
-  - { type: "ThreadPoolExecutor", num_threads: 2 }
+  - { name: "a", type: "ThreadPoolExecutor", num_threads: 1 }
+  - { name: "a", type: "ThreadPoolExecutor", num_threads: 1 }
 nodes: []
 "#,
     )
     .unwrap_err();
-    assert!(err.to_string().contains("name"), "{err}");
+    assert!(err.to_string().contains("defined more than once"), "{err}");
 
+    // 空名归一化成 "default",故这两条是同一个执行器 —— 必须当重名拒掉,
+    // 不能悄悄让后一条覆盖前一条。
     let err = Graph::from_yaml(
         r#"
 executors:
-  - { name: "a", type: "ThreadPoolExecutor", num_threads: 1 }
-  - { name: "a", type: "ThreadPoolExecutor", num_threads: 1 }
+  - { name: "", type: "ThreadPoolExecutor", num_threads: 1 }
+  - { name: "default", type: "ThreadPoolExecutor", num_threads: 2 }
 nodes: []
 "#,
     )
@@ -162,6 +188,230 @@ output_ports: ["out"]
         names.iter().all(|n| n.starts_with("cpu-")),
         "a kernel with an assigned executor must actually run on a cpu-N pool thread, actual: {names:?}"
     );
+}
+
+// ------------------------------------------------------- 默认执行器(空名归一化)
+
+/// 不写 `executors` 时:引擎补一个名叫 `default` 的线程池,不写 `executor` 的节点
+/// 真的跑在它的 worker 线程上(而不是宿主线程)。
+#[test]
+fn default_executor_is_a_named_thread_pool() {
+    init();
+    let seen = std::sync::Arc::new(Mutex::new(Vec::<String>::new()));
+
+    {
+        let graph = Graph::from_yaml(
+            r#"
+nodes:
+  - { name: "p", kernel: "PassThroughKernel", input_ports: ["in"], output_ports: ["out"] }
+input_ports: ["in"]
+output_ports: ["out"]
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            graph.executor_names(),
+            vec!["default"],
+            "默认执行器必须可见、有名字"
+        );
+
+        let rec = seen.clone();
+        graph
+            .observe("out", move |_pkt| {
+                let name = std::thread::current()
+                    .name()
+                    .unwrap_or("(unnamed)")
+                    .to_string();
+                rec.lock().expect("lock poisoned").push(name);
+            })
+            .unwrap();
+        graph.start().unwrap();
+        let input = graph.input("in").unwrap();
+        for i in 0..5i32 {
+            input.send(Packet::new(i).at(Timestamp(i as i64))).unwrap();
+        }
+        graph.close_all_inputs();
+        graph.wait_done_timeout(Duration::from_secs(30)).unwrap();
+    }
+
+    let names = seen.lock().expect("lock poisoned").clone();
+    assert_eq!(names.len(), 5, "observer should receive all 5 packets");
+    // 只断言前缀,不钉死具体线程序号 —— 默认池按核数开,跑在哪个 worker 上无所谓。
+    assert!(
+        names.iter().all(|n| n.starts_with("default-")),
+        "不写 executor 的节点应跑在默认池的 worker 上,actual: {names:?}"
+    );
+}
+
+/// 空名条目能覆盖默认池的配置(线程数/绑核/优先级)。
+#[test]
+fn default_pool_config_can_be_overridden() {
+    init();
+    let seen = std::sync::Arc::new(Mutex::new(Vec::<String>::new()));
+
+    {
+        let graph = Graph::from_yaml(
+            r#"
+executors:
+  - { name: "", type: "ThreadPoolExecutor", num_threads: 1 }
+nodes:
+  - { name: "p", kernel: "PassThroughKernel", input_ports: ["in"], output_ports: ["out"] }
+input_ports: ["in"]
+output_ports: ["out"]
+"#,
+        )
+        .unwrap();
+        let rec = seen.clone();
+        graph
+            .observe("out", move |_pkt| {
+                let name = std::thread::current()
+                    .name()
+                    .unwrap_or("(unnamed)")
+                    .to_string();
+                rec.lock().expect("lock poisoned").push(name);
+            })
+            .unwrap();
+        graph.start().unwrap();
+        let input = graph.input("in").unwrap();
+        for i in 0..5i32 {
+            input.send(Packet::new(i).at(Timestamp(i as i64))).unwrap();
+        }
+        graph.close_all_inputs();
+        graph.wait_done_timeout(Duration::from_secs(30)).unwrap();
+    }
+
+    let names = seen.lock().expect("lock poisoned").clone();
+    // num_threads: 1 ⇒ 只可能有 default-0 这一个 worker。
+    assert!(
+        names.iter().all(|n| n == "default-0"),
+        "num_threads: 1 应当只开一个 worker,actual: {names:?}"
+    );
+}
+
+/// 把默认执行器改成 `DelegatingExecutor` 就回到「跑宿主线程」的老语义:
+/// 只 `send` 而不进阻塞接口,节点**不会推进**;进了才推进。
+#[test]
+fn default_can_be_switched_back_to_the_host_thread() {
+    init();
+    let graph = Graph::from_yaml(
+        r#"
+executors:
+  - { name: "", type: "DelegatingExecutor" }
+nodes:
+  - { name: "p", kernel: "PassThroughKernel", input_ports: ["in"], output_ports: ["out"] }
+input_ports: ["in"]
+output_ports: ["out"]
+"#,
+    )
+    .unwrap();
+    assert_eq!(graph.executor_names(), vec!["default"]);
+
+    let poller = graph.add_poller("out").unwrap();
+    graph.start().unwrap();
+    let input = graph.input("in").unwrap();
+    for i in 0..5i32 {
+        input.send(Packet::new(i).at(Timestamp(i as i64))).unwrap();
+    }
+    // 引擎不能凭空占宿主线程:只 send 不进引擎 ⇒ 一个包都没产出。
+    assert!(
+        poller.try_next().is_none(),
+        "委托执行器上的节点在宿主进入引擎之前不该推进"
+    );
+
+    graph.close_all_inputs();
+    graph.wait_done_timeout(Duration::from_secs(30)).unwrap();
+    let mut got = Vec::new();
+    while let Some(p) = poller.try_next() {
+        got.push(*p.get::<i32>().unwrap());
+    }
+    assert_eq!(
+        got,
+        (0..5).collect::<Vec<_>>(),
+        "进了阻塞接口之后必须全部推进,且顺序确定"
+    );
+}
+
+/// 默认池是多线程的,所以默认节点配 `max_in_flight > 1` 现在**合法**(ADR #29 新语义)。
+/// 单核机器上默认池只有 1 个线程,那时该报错 —— 两种结果都对,别把机器规格写进断言。
+#[test]
+fn max_in_flight_on_default_pool_follows_its_thread_count() {
+    init();
+    let threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
+    let built = Graph::from_yaml(
+        r#"
+nodes:
+  - { name: "p", kernel: "PassThroughKernel", input_ports: ["in"], output_ports: ["out"], max_in_flight: 4 }
+input_ports: ["in"]
+output_ports: ["out"]
+"#,
+    );
+    if threads > 1 {
+        assert!(
+            built.is_ok(),
+            "默认池有 {threads} 个线程,max_in_flight>1 应当合法:{:?}",
+            built.err()
+        );
+    } else {
+        let err = built.expect_err("单线程默认池下并行度恒为 1,必须报错");
+        assert!(err.to_string().contains("more than one thread"), "{err}");
+    }
+}
+
+/// `DelegatingExecutor` 不拥有线程,故线程相关字段配在它上面是**报错**而不是静默忽略。
+#[test]
+fn delegating_executor_rejects_thread_fields() {
+    init();
+    for field in ["num_threads: 2", "affinity: [0]", "priority: 10"] {
+        let err = Graph::from_yaml(&format!(
+            r#"
+executors:
+  - {{ name: "host", type: "DelegatingExecutor", {field} }}
+nodes:
+  - {{ name: "p", kernel: "PassThroughKernel", executor: "host", input_ports: ["in"], output_ports: ["out"] }}
+input_ports: ["in"]
+output_ports: ["out"]
+"#
+        ))
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("owns no threads"),
+            "`{field}` 配在委托执行器上必须报错,actual: {err}"
+        );
+    }
+}
+
+/// 源节点会常年阻塞在 `process` 里,占满线程就没人跑同池的其它节点 —— 可证明的饿死。
+#[test]
+fn sources_cannot_starve_their_pool() {
+    init();
+    // 单线程池 + 1 个源 + 1 个普通节点:源会独占那唯一的线程。
+    let err = Graph::from_yaml(
+        r#"
+executors:
+  - { name: "solo", type: "ThreadPoolExecutor", num_threads: 1 }
+nodes:
+  - { name: "src", kernel: "RangeSourceKernel", executor: "solo", input_ports: [], output_ports: ["mid"] }
+  - { name: "p", kernel: "PassThroughKernel", executor: "solo", input_ports: ["mid"], output_ports: ["out"] }
+output_ports: ["out"]
+"#,
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("starve"), "{err}");
+
+    // 线程够(2 线程 1 源)就该放行。
+    Graph::from_yaml(
+        r#"
+executors:
+  - { name: "duo", type: "ThreadPoolExecutor", num_threads: 2 }
+nodes:
+  - { name: "src", kernel: "RangeSourceKernel", executor: "duo", input_ports: [], output_ports: ["mid"] }
+  - { name: "p", kernel: "PassThroughKernel", executor: "duo", input_ports: ["mid"], output_ports: ["out"] }
+output_ports: ["out"]
+"#,
+    )
+    .expect("2 threads for 1 source + 1 node is fine");
 }
 
 /// 混合执行器:一部分节点在池里、一部分在主线程 —— 最容易死锁的组合。

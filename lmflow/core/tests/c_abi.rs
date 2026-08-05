@@ -35,7 +35,11 @@ fn make_int_packet(v: i32, ts: i64) -> LMFlowPacket {
     }
 }
 
+// 显式跑委托执行器(交还宿主线程):本文件以 C 调用方的方式驱动引擎,靠的正是
+// 「宿主进入阻塞接口时任务被抽取」这条语义 —— 顺序确定,断言才写得死。
 const CONFIG: &str = r#"
+executors:
+  - { name: "", type: "DelegatingExecutor" }
 nodes:
   - name: "n1"
     kernel: "PassThroughKernel"
@@ -593,7 +597,7 @@ fn introspection_through_c_abi() {
             .to_str()
             .unwrap()
             .to_string();
-        assert!(dot_compact.contains("@main\\nCREATED"));
+        assert!(dot_compact.contains("@default\\nCREATED"));
         assert!(!dot_compact.contains("CREATED · 0 pkts"));
         assert!(!dot_compact.contains("ports:"));
         assert!(CStr::from_ptr(lmflow_graph_to_dot_view(g, 99))
@@ -673,7 +677,7 @@ fn observer_receives_packets() {
                 lmflow_input_send(input, make_int_packet(i * 10, i as i64)),
                 0
             );
-            // 主线程执行器:需要进入引擎才会推进(见 docs/design.md §7.9)
+            // 委托执行器:需要进入引擎才会推进(见 docs/design.md §7.9)
             assert_eq!(lmflow_graph_wait_until_idle(g), 0);
         }
         lmflow_graph_close_all_inputs(g);

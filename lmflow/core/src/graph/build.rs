@@ -17,7 +17,7 @@ use std::time::Instant;
 
 use crate::config::GraphConfig;
 use crate::context::{Context, Options};
-use crate::executor::ThreadPool;
+use crate::executor::{DelegatingExecutor, Executor, ThreadPool, DEFAULT_EXECUTOR_NAME};
 use crate::kernel::{Contract, KernelInstance, PortTable};
 use crate::runtime::{self, GraphShared};
 use crate::status::{Error, Result};
@@ -168,29 +168,29 @@ impl GraphInner {
         check_acyclic(&cfg, &edges, &back_edge_mask)?;
 
         // ---- 校验 5 + 建执行器 ----
-        let mut executors: Vec<ThreadPool> = Vec::new();
+        //
+        // 归一化:`executors` 条目名为空 = 配置**默认执行器**,节点不写 `executor` 也归到它。
+        // 归一化之后默认执行器和其它执行器完全同构 —— 有名字、可索引、可提交任务,
+        // 于是重名 / 未定义名这两条既有校验自动覆盖它,派任务时也无需为它开特例。
+        let mut executors: Vec<Executor> = Vec::new();
         for e in &cfg.executors {
-            if e.name.is_empty() {
-                return Err(Error::InvalidArg(
-                    "executors entry must have a name; nodes select a thread pool by it".into(),
-                ));
-            }
-            if executors.iter().any(|p| p.name() == e.name) {
+            let name = exec_name(&e.name);
+            if executors.iter().any(|p| p.name() == name) {
                 return Err(Error::InvalidArg(format!(
-                    "executor `{}` defined more than once",
-                    e.name
+                    "executor `{name}` defined more than once \
+                     (an entry with an empty name configures the default executor `{DEFAULT_EXECUTOR_NAME}`)"
                 )));
             }
-            executors.push(ThreadPool::new(
-                &e.name,
-                e.num_threads,
-                e.affinity.clone(),
-                e.priority,
-            ));
+            executors.push(build_executor(name, e)?);
+        }
+        // 宿主没配默认执行器就补一个:按核数开的线程池。它必须存在且在下标 0 ——
+        // 不写 `executor` 的节点全归它,`Node::executor` 因此没有「不属于任何执行器」这种状态。
+        if !executors.iter().any(|p| p.name() == DEFAULT_EXECUTOR_NAME) {
+            executors.insert(0, Executor::Pool(default_thread_pool()));
         }
         let known: Vec<&str> = executors.iter().map(|p| p.name()).collect();
         for (idx, n) in cfg.nodes.iter().enumerate() {
-            if !n.executor.is_empty() && !known.contains(&n.executor.as_str()) {
+            if !known.contains(&exec_name(&n.executor)) {
                 return Err(Error::InvalidArg(format!(
                     "node `{}` references undefined executor `{}` (defined: [{}])",
                     node_label(n, idx),
@@ -199,9 +199,13 @@ impl GraphInner {
                 )));
             }
         }
-        // 定义了却没人用的池只会白占线程,出声提醒
+        // 定义了却没人用的池只会白占线程,出声提醒。默认执行器豁免:它是引擎补的,
+        // 没人用不是宿主的错(而且一句名字为空的警告只会让人困惑)。
         for p in &executors {
-            if !cfg.nodes.iter().any(|n| n.executor == p.name()) {
+            if p.name() == DEFAULT_EXECUTOR_NAME || p.is_delegating() {
+                continue;
+            }
+            if !cfg.nodes.iter().any(|n| exec_name(&n.executor) == p.name()) {
                 runtime::log_warn(&format!(
                     "executor `{}` is defined but not used by any node ({} threads will idle)",
                     p.name(),
@@ -209,6 +213,8 @@ impl GraphInner {
                 ));
             }
         }
+        // ---- 校验 5b:节点与执行器的匹配(需要执行器已建好才判得了)----
+        check_node_executor_fit(&cfg, &executors)?;
 
         // ---- 收集契约 + 静态类型检查 ----
         //
@@ -269,11 +275,11 @@ impl GraphInner {
             let ctxs: Vec<UnsafeCell<Context>> =
                 (0..mif).map(|_| UnsafeCell::new(make_ctx())).collect();
 
-            let executor = if n.executor.is_empty() {
-                None
-            } else {
-                executors.iter().position(|p| p.name() == n.executor)
-            };
+            // 上面已校验过名字存在(空名归一化到默认执行器),故必有下标。
+            let executor = executors
+                .iter()
+                .position(|p| p.name() == exec_name(&n.executor))
+                .expect("executor name was validated above");
 
             nodes.push(Node {
                 name,
@@ -355,7 +361,6 @@ impl GraphInner {
             output_by_name,
             edge_by_name,
             state: Mutex::new(State::Initialized),
-            main_queue: Mutex::new(VecDeque::new()),
             executors,
             in_flight: AtomicUsize::new(0),
             activity: (Mutex::new(Activity::default()), Condvar::new()),
@@ -369,6 +374,124 @@ impl GraphInner {
             timing,
         })
     }
+}
+
+/// 节点 `executor` 字段的归一化:空 = 默认执行器。
+///
+/// `executors` 条目名走同一条规则,于是「不写 executor」和「写了空名条目」
+/// 天然指向同一个执行器。
+fn exec_name(n: &str) -> &str {
+    if n.is_empty() {
+        DEFAULT_EXECUTOR_NAME
+    } else {
+        n
+    }
+}
+
+/// 默认执行器(宿主没配时引擎补的那个):按 CPU 核数开线程的线程池。
+///
+/// 不绑核、不设实时优先级 —— 那些是场景相关的调优,宿主想改就在 YAML 里写一条空名
+/// `executors` 条目覆盖(含改成 `DelegatingExecutor`)。
+fn default_thread_pool() -> ThreadPool {
+    let n = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
+    ThreadPool::new(DEFAULT_EXECUTOR_NAME, n, Vec::new(), 0)
+}
+
+/// 按 `type` 建一个执行器。空 `type` 视作 `ThreadPoolExecutor`(历史默认)。
+///
+/// `DelegatingExecutor` 不拥有线程,故 `num_threads`/`affinity`/`priority` 对它没有意义 ——
+/// 写了就报错,不静默忽略(与「未知值明确拒掉」同规矩)。
+fn build_executor(name: &str, e: &crate::config::ExecutorConfig) -> Result<Executor> {
+    if e.r#type == "DelegatingExecutor" {
+        for (field, set) in [
+            ("num_threads", e.num_threads != 0),
+            ("affinity", !e.affinity.is_empty()),
+            ("priority", e.priority != 0),
+        ] {
+            if set {
+                return Err(Error::InvalidArg(format!(
+                    "executor `{name}`: DelegatingExecutor owns no threads, so `{field}` is \
+                     meaningless -- it hands ready nodes back to the host thread. Drop the field, \
+                     or use type: \"ThreadPoolExecutor\" if you wanted engine-owned threads"
+                )));
+            }
+        }
+        return Ok(Executor::Delegating(DelegatingExecutor::new(name)));
+    }
+    Ok(Executor::Pool(ThreadPool::new(
+        name,
+        e.num_threads,
+        e.affinity.clone(),
+        e.priority,
+    )))
+}
+
+/// 节点与它所属执行器是否匹配。**必须在执行器建好之后**判 —— 这两条规则问的都是
+/// 「解析出来的执行器长什么样」,光看 YAML 里的名字答不上来。
+fn check_node_executor_fit(cfg: &GraphConfig, executors: &[Executor]) -> Result<()> {
+    // 每个池上挂了几个源节点 —— 源的 process 常年阻塞(等帧 / 读下一条),
+    // 占满线程就没人跑别的节点了。
+    let mut sources_per_executor = vec![0usize; executors.len()];
+    for (idx, n) in cfg.nodes.iter().enumerate() {
+        let who = node_label(n, idx);
+        let ei = executors
+            .iter()
+            .position(|p| p.name() == exec_name(&n.executor))
+            .expect("executor name was validated above");
+        let ex = &executors[ei];
+
+        // max_in_flight > 1 只有落在多线程池上才真有并行度。委托执行器(0 线程)
+        // 与单线程池都恒为 1,宁可报错也不让宿主误以为开了并行。
+        if n.max_in_flight > 1 && ex.num_threads() < 2 {
+            return Err(Error::InvalidArg(format!(
+                "node `{who}`: max_in_flight={} needs an executor with more than one thread, \
+                 but `{}` provides {} -- there would be no parallelism",
+                n.max_in_flight,
+                ex.name(),
+                ex.num_threads()
+            )));
+        }
+
+        if n.input_ports.is_empty() {
+            // 源节点跑在委托执行器上会独占宿主线程、拖垮全图 —— 宿主还得回来
+            // 抽取别的委托任务,而它正卡在源的 process 里。
+            if ex.is_delegating() {
+                return Err(Error::InvalidArg(format!(
+                    "node `{who}`: a source node (no input ports) cannot run on the delegating \
+                     executor `{}` -- its process typically blocks waiting for the next item, \
+                     which would monopolise the host thread and stall the whole graph. \
+                     Give it a ThreadPoolExecutor",
+                    ex.name()
+                )));
+            }
+            sources_per_executor[ei] += 1;
+        }
+    }
+    // 源节点数 >= 线程数 = 可证明的饿死:每个源占一个线程不放,同池的其它节点永远排不上。
+    for (ei, count) in sources_per_executor.iter().enumerate() {
+        let ex = &executors[ei];
+        if *count == 0 || *count < ex.num_threads() {
+            continue;
+        }
+        let others = cfg
+            .nodes
+            .iter()
+            .any(|n| !n.input_ports.is_empty() && exec_name(&n.executor) == ex.name());
+        if *count > ex.num_threads() || others {
+            return Err(Error::InvalidArg(format!(
+                "executor `{}` has {} threads but {} source node(s) on it -- \
+                 sources block in process, so they would occupy every thread and starve \
+                 the rest of the pool. Raise num_threads above {} or move sources elsewhere",
+                ex.name(),
+                ex.num_threads(),
+                count,
+                count
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn reject_reserved_contract_types(name: &str, contract: &Contract) -> Result<()> {

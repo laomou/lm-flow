@@ -17,7 +17,7 @@ use std::time::Instant;
 
 use crate::config::GraphConfig;
 use crate::context::Context;
-use crate::executor::ThreadPool;
+use crate::executor::Executor;
 use crate::kernel::{KernelInstance, PortTable};
 use crate::packet::Packet;
 use crate::runtime::{self, GraphShared};
@@ -70,13 +70,11 @@ pub struct GraphInner {
     output_by_name: BTreeMap<String, EdgeId>,
     edge_by_name: BTreeMap<String, EdgeId>,
     state: Mutex<State>,
-    /// 主线程执行器的任务队列(默认执行器,见 ADR #16)
-    main_queue: Mutex<VecDeque<NodeId>>,
-    /// 命名线程池,按 YAML 的 executors 顺序
-    executors: Vec<ThreadPool>,
-    /// 已投递到线程池、尚未跑完的任务数。用于「是否空闲」与终止判定。
+    /// 所有执行器；委托执行器自持交还宿主线程执行的任务队列。
+    executors: Vec<Executor>,
+    /// 已投递到执行器、尚未跑完的任务数。用于「是否空闲」与终止判定。
     in_flight: AtomicUsize,
-    /// 有任何进展时唤醒阻塞中的宿主线程(取到输出、节点关闭、出错、主线程任务入队)
+    /// 有任何进展时唤醒阻塞中的宿主线程(取到输出、节点关闭、出错、任务入队)
     activity: (Mutex<Activity>, Condvar),
     /// 暂停调度(调试/限速)。已在执行的算子不受影响。
     paused: AtomicBool,

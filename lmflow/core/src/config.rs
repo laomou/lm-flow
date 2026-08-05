@@ -14,10 +14,17 @@ fn default_max_queue_size() -> usize {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExecutorConfig {
+    /// 执行器名,节点用 `executor:` 按名引用。**空 = 配置默认执行器**
+    /// (归一化成 `"default"`);不写这条时引擎按 CPU 核数补一个默认线程池。
     #[serde(default)]
     pub name: String,
+    /// `"ThreadPoolExecutor"`(默认,空也算)= 自有工作线程的线程池;
+    /// `"DelegatingExecutor"` = 不拥有线程,把就绪节点交还**宿主线程**跑
+    /// (零并发、顺序确定、Python 算子不抢 GIL,但要宿主进入引擎才推进)。
     #[serde(default)]
     pub r#type: String,
+    /// 工作线程数。`0` 视作 1。仅 `ThreadPoolExecutor` 有意义 ——
+    /// 配在 `DelegatingExecutor` 上会报错而不是静默忽略。
     #[serde(default)]
     pub num_threads: usize,
     /// CPU 亲和力:worker `i` 绑到 `affinity[i % len]` 号核。空 = 不绑(默认)。
@@ -88,10 +95,11 @@ pub struct NodeConfig {
     pub input_ports: Vec<String>,
     #[serde(default)]
     pub output_ports: Vec<String>,
+    /// 本节点跑在哪个执行器上(按 `executors[].name` 引用)。**空 = 默认执行器**。
     #[serde(default)]
     pub executor: String,
-    /// 该节点允许的并发 `process` 数。`0`/`1` = 串行(默认);`>1` 需同时配 `executor`
-    /// (默认执行器是宿主主线程,单线程下并行度恒为 1,故校验阶段会报错)。
+    /// 该节点允许的并发 `process` 数。`0`/`1` = 串行(默认);`>1` 要求所属执行器
+    /// 有**多于一个线程**(委托执行器 0 线程、单线程池并行度恒为 1,均会在建图期报错)。
     #[serde(default)]
     pub max_in_flight: usize,
     #[serde(default)]
@@ -279,23 +287,9 @@ impl GraphConfig {
             } else {
                 n.name.clone()
             };
-            if n.max_in_flight > 1 && n.executor.is_empty() {
-                // max_in_flight > 1 只有配了线程池才有意义:默认执行器是宿主主线程,
-                // 单线程下并行度恒为 1。宁可报错也不让用户误以为开了并行。
-                return Err(Error::InvalidArg(format!(
-                    "node `{who}`: max_in_flight={} requires an executor (thread pool) as well -- \
-                     the default executor is the host main thread, so there is no parallelism",
-                    n.max_in_flight
-                )));
-            }
-            if n.input_ports.is_empty() && n.executor.is_empty() {
-                // 源节点(0 输入)由内核自产,process 常会阻塞(等帧 / 读下一条);跑在宿主
-                // 主线程会独占单线程、拖垮全图。必须挂线程池 executor。
-                return Err(Error::InvalidArg(format!(
-                    "node `{who}`: a source node (no input ports) requires an executor (thread pool) -- \
-                     it would otherwise block the host main thread and stall the whole graph"
-                )));
-            }
+            // `max_in_flight` 与「源节点该挂什么执行器」都要看解析出的执行器长什么样
+            // (是池还是委托、几个线程),光看 YAML 里的名字答不上来 ——
+            // 那两条校验在 Graph::build 的 check_node_executor_fit 里。
             // rate 定速:只对源节点有意义(非源由上游数据驱动),且必须为正。
             if n.rate != 0.0 {
                 if !n.input_ports.is_empty() {
@@ -418,9 +412,14 @@ impl GraphConfig {
             }
         }
         for e in &self.executors {
-            if e.r#type != "ThreadPoolExecutor" && !e.r#type.is_empty() {
+            // 空 type 视作 ThreadPoolExecutor(历史默认)。字段是否对得上类型
+            // (如 DelegatingExecutor 不该配 num_threads)在 Graph::build 里查。
+            if !matches!(
+                e.r#type.as_str(),
+                "" | "ThreadPoolExecutor" | "DelegatingExecutor"
+            ) {
                 return Err(Error::InvalidArg(format!(
-                    "unknown executor type `{}` (only ThreadPoolExecutor is currently supported)",
+                    "unknown executor type `{}` (supported: ThreadPoolExecutor, DelegatingExecutor)",
                     e.r#type
                 )));
             }
@@ -569,20 +568,24 @@ nodes:
 
     #[test]
     fn rejects_unsupported_features_loudly() {
-        // 静默忽略是最坏的结果 —— 用户会以为开了某个特性,实际没有
-        // max_in_flight>1 但没配 executor:单线程下并行度恒为 1,必须报错
+        // 静默忽略是最坏的结果 —— 用户会以为开了某个特性,实际没有。
         let err = GraphConfig::from_yaml(
             r#"
+executors:
+  - name: "nope"
+    type: "FiberExecutor"
 nodes:
   - name: "n"
     kernel: "K"
-    max_in_flight: 4
 "#,
         )
         .unwrap_err();
         assert_eq!(err.code(), crate::status::code::INVALID_ARG);
-        assert!(err.to_string().contains("max_in_flight"), "{err}");
+        assert!(err.to_string().contains("unknown executor type"), "{err}");
 
+        // max_in_flight>1 与「源节点该挂什么执行器」现在要看解析出的执行器长什么样
+        // (是池还是委托、几个线程),校验在 Graph::build 里 —— 见 tests/max_in_flight.rs
+        // 与 tests/concurrency.rs。
         // fixed_size 现已实现;仍保留「未实现的特性必须报错」这条原则的其它用例
     }
 

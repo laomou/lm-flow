@@ -225,9 +225,9 @@ output_ports: ["out"]
         dot.contains("label=\"p\""),
         "cluster should be labelled p:\n{dot}"
     );
-    // 执行器落位:p/a 在 cpu,p/b 在主线程
+    // 执行器落位:p/a 在 cpu,p/b 没写 executor → 归默认执行器
     assert!(dot.contains("@cpu"), "{dot}");
-    assert!(dot.contains("@main"), "{dot}");
+    assert!(dot.contains("@default"), "{dot}");
     // 图例含线程数与绑定核(线程亲和度可视化)
     assert!(dot.contains("cluster_legend"), "{dot}");
     assert!(
@@ -247,9 +247,10 @@ output_ports: ["out"]
     );
 }
 
-/// 无子图、无执行器的普通图:不产生任何 cluster(聚簇仅在有命名空间时出现)。
+/// 无子图的普通图:不产生**命名空间** cluster(聚簇仅在有命名空间时出现)。
+/// 执行器图例那个 `cluster_legend` 是另一回事 —— 默认执行器恒存在,故它总会出现。
 #[test]
-fn to_dot_plain_graph_has_no_clusters() {
+fn to_dot_plain_graph_has_no_namespace_clusters() {
     init();
     let graph = Graph::from_yaml(
         r#"
@@ -264,11 +265,11 @@ output_ports: ["out"]
     let dot = graph.to_dot();
     assert!(dot.contains("digraph lmflow"), "{dot}");
     assert!(
-        !dot.contains("cluster_"),
-        "plain graph must have no clusters:\n{dot}"
+        !dot.contains("subgraph cluster_n"),
+        "plain graph must have no namespace clusters:\n{dot}"
     );
     assert!(
-        dot.contains("@main"),
-        "nodes run on the host main thread:\n{dot}"
+        dot.contains("@default"),
+        "nodes without an explicit executor run on the default executor:\n{dot}"
     );
 }

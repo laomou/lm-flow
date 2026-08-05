@@ -251,23 +251,12 @@ impl GraphInner {
     /// `try_claim` 返回到任务真正入队之间会出现「节点已有已认领调用、全局仍显示空闲」
     /// 的窗口,`wait_done` 可能把正常排空误报成卡死。
     pub(super) fn dispatch_task(&self, n: NodeId) {
-        match self.nodes[n].executor {
-            None => {
-                self.main_queue
-                    .lock()
-                    .expect("main queue lock poisoned")
-                    .push_back(n);
-                self.notify_activity();
-            }
-            Some(i) => {
-                if !self.executors[i].submit(n) {
-                    // 池已关停(仅发生在拆图时):撤销全局计数。该次认领残留在 ready 里,
-                    // 但拆图路径不依赖精确排空(GraphInner::drop 兜底关流),不会死锁。
-                    self.in_flight.fetch_sub(1, Ordering::SeqCst);
-                }
-                self.notify_activity();
-            }
+        if !self.executors[self.nodes[n].executor].submit(n) {
+            // 池已关停(仅发生在拆图时):撤销全局计数。该次认领残留在 ready 里,
+            // 但拆图路径不依赖精确排空(GraphInner::drop 兜底关流),不会死锁。
+            self.in_flight.fetch_sub(1, Ordering::SeqCst);
         }
+        self.notify_activity();
     }
 
     /// 线程池工作线程的入口。
@@ -281,17 +270,16 @@ impl GraphInner {
         self.notify_activity();
     }
 
-    /// 执行器空闲 = 没有已认领调用,且主线程队列为空。
+    /// 执行器空闲 = 没有已认领调用,且没有委托给宿主线程的待办。
     ///
     /// `in_flight` 在 `try_claim` 内、仍持节点调度锁时递增,覆盖「已认领但尚未入队」
     /// 的阶段;否则并发关流可能撞上瞬时假空闲。
     pub(super) fn workers_idle(&self) -> bool {
         self.in_flight.load(Ordering::SeqCst) == 0
             && self
-                .main_queue
-                .lock()
-                .expect("main queue lock poisoned")
-                .is_empty()
+                .executors
+                .iter()
+                .all(|executor| !executor.is_delegating() || executor.pending() == 0)
     }
 
     /// 逻辑空闲还要求没有因内部容量不足而保留的待刷新 staging。
@@ -502,17 +490,16 @@ impl GraphInner {
         }
     }
 
-    /// 跑一个主线程任务。返回是否真的跑了。
+    /// 跑一个委托给宿主线程的任务。返回是否真的跑了。
     ///
     /// ⚠ 必须先把 pop 的结果落到局部变量:在 edition 2021 里,`if let` 表达式中的
     /// 临时值(此处是 MutexGuard)会存活到整个 if-let 块结束 —— 那样 `run_node`
-    /// 内部再去 `main_queue.lock()` 就自锁死。这也是 R2 锁序规则的实例。
+    /// 内部再去锁同一个委托队列就自锁死。这也是 R2 锁序规则的实例。
     pub(super) fn run_one_main_task(&self) -> bool {
         let next = self
-            .main_queue
-            .lock()
-            .expect("main queue lock poisoned")
-            .pop_front();
+            .executors
+            .iter()
+            .find_map(|executor| executor.take_delegated());
         match next {
             Some(n) => {
                 self.run_node(n);
@@ -999,7 +986,7 @@ impl GraphInner {
         self.shutdown_executors();
     }
 
-    /// 关停所有线程池并 join。**必须在动节点之前做**。
+    /// 关停所有线程池并 join。委托执行器是 no-op。**必须在动节点之前做**。
     pub(super) fn shutdown_executors(&self) {
         for p in &self.executors {
             p.shutdown();

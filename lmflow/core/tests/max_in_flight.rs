@@ -205,12 +205,17 @@ output_ports: ["out"]
     );
 }
 
-/// max_in_flight>1 但没配 executor:必须报错,不静默(单线程无并行可言)。
+/// max_in_flight>1 落在只有一个线程的执行器上:必须报错,不静默(无并行可言)。
+///
+/// 注意默认执行器是**按核数**的线程池,所以「不写 executor」本身不再是错 ——
+/// 要构造这个错误得显式给一个单线程执行器(这里用委托执行器,它 0 线程)。
 #[test]
-fn max_in_flight_without_executor_is_rejected() {
+fn max_in_flight_on_single_threaded_executor_is_rejected() {
     init();
     let err = Graph::from_yaml(
         r#"
+executors:
+  - { name: "", type: "DelegatingExecutor" }
 nodes:
   - { name: "s", kernel: "PassThroughKernel", input_ports: ["in"], output_ports: ["out"], max_in_flight: 4 }
 input_ports: ["in"]
@@ -219,7 +224,21 @@ output_ports: ["out"]
     )
     .unwrap_err();
     assert!(err.to_string().contains("max_in_flight"), "{err}");
-    assert!(err.to_string().contains("executor"), "{err}");
+    assert!(err.to_string().contains("more than one thread"), "{err}");
+
+    // 单线程池同理 —— 并行度恒为 1。
+    let err = Graph::from_yaml(
+        r#"
+executors:
+  - { name: "solo", type: "ThreadPoolExecutor", num_threads: 1 }
+nodes:
+  - { name: "s", kernel: "PassThroughKernel", input_ports: ["in"], output_ports: ["out"], executor: "solo", max_in_flight: 4 }
+input_ports: ["in"]
+output_ports: ["out"]
+"#,
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("more than one thread"), "{err}");
 }
 
 /// **多输入对齐 × 并行 in-flight**:两个易错的子系统叠在一起。
