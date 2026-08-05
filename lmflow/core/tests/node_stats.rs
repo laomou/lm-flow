@@ -11,21 +11,38 @@ use std::time::Duration;
 
 use lmflow::{DotView, Graph, Kernel, KernelCtx, Packet, Timestamp};
 
-static RUNNING_GATE: (Mutex<bool>, Condvar) = (Mutex::new(false), Condvar::new());
+static RUNNING_STATE_GATE: (Mutex<bool>, Condvar) = (Mutex::new(false), Condvar::new());
+static EXECUTOR_QUEUE_GATE: (Mutex<bool>, Condvar) = (Mutex::new(false), Condvar::new());
 
 struct RunningGateGuard;
 
 impl RunningGateGuard {
     fn hold() -> Self {
-        *RUNNING_GATE.0.lock().unwrap() = false;
+        *RUNNING_STATE_GATE.0.lock().unwrap() = false;
         Self
     }
 }
 
 impl Drop for RunningGateGuard {
     fn drop(&mut self) {
-        *RUNNING_GATE.0.lock().unwrap() = true;
-        RUNNING_GATE.1.notify_all();
+        *RUNNING_STATE_GATE.0.lock().unwrap() = true;
+        RUNNING_STATE_GATE.1.notify_all();
+    }
+}
+
+struct ExecutorQueueGateGuard;
+
+impl ExecutorQueueGateGuard {
+    fn hold() -> Self {
+        *EXECUTOR_QUEUE_GATE.0.lock().unwrap() = false;
+        Self
+    }
+}
+
+impl Drop for ExecutorQueueGateGuard {
+    fn drop(&mut self) {
+        *EXECUTOR_QUEUE_GATE.0.lock().unwrap() = true;
+        EXECUTOR_QUEUE_GATE.1.notify_all();
     }
 }
 
@@ -34,7 +51,7 @@ struct DotRunning;
 
 impl Kernel for DotRunning {
     fn process(&mut self, context: &mut KernelCtx) -> lmflow::Result<()> {
-        let (lock, wake) = &RUNNING_GATE;
+        let (lock, wake) = &RUNNING_STATE_GATE;
         let mut released = lock.lock().unwrap();
         while !*released {
             released = wake.wait(released).unwrap();
@@ -58,7 +75,7 @@ struct DotQueued;
 
 impl Kernel for DotQueued {
     fn process(&mut self, _context: &mut KernelCtx) -> lmflow::Result<()> {
-        let (lock, wake) = &RUNNING_GATE;
+        let (lock, wake) = &EXECUTOR_QUEUE_GATE;
         let mut released = lock.lock().unwrap();
         while !*released {
             released = wake.wait(released).unwrap();
@@ -224,7 +241,7 @@ fn dot_with_stats_annotates_and_keeps_structure() {
 #[test]
 fn dot_marks_saturated_executor_and_lists_queued_nodes() {
     let _ = lmflow::register_kernel::<DotQueued>("DotQueued");
-    let gate = RunningGateGuard::hold();
+    let gate = ExecutorQueueGateGuard::hold();
     let graph = Graph::from_yaml(
         r#"
 executors:
