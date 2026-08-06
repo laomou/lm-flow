@@ -4,6 +4,7 @@
 //! (或丢帧策略),实际没有,而且无从察觉。见 docs/design.md §0.2。
 
 use serde::Deserialize;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::status::{Error, Result};
 
@@ -256,6 +257,103 @@ pub struct SubgraphConfig {
 }
 
 impl GraphConfig {
+    /// Parse, resolve includes, expand subgraphs, and validate configuration-only rules.
+    ///
+    /// This entry point deliberately does not access the kernel registry or create executors.
+    /// Use it for deployment-time checks where the host may not have linked its kernels yet.
+    pub fn preflight_from_yaml(text: &str) -> Result<Self> {
+        let config = Self::from_yaml(text)?;
+        config.validate_preflight()?;
+        Ok(config)
+    }
+
+    /// File equivalent of [`Self::preflight_from_yaml`].
+    pub fn preflight_from_yaml_file(path: &str) -> Result<Self> {
+        let config = Self::from_yaml_file(path)?;
+        config.validate_preflight()?;
+        Ok(config)
+    }
+
+    fn validate_preflight(&self) -> Result<()> {
+        let mut known_edges = BTreeSet::new();
+        let mut producers = BTreeMap::new();
+        for (index, declaration) in self.input_ports.iter().enumerate() {
+            let spec = parse_port_spec(declaration)
+                .map_err(|error| error.context(format!("input_ports[{index}]")))?;
+            if !known_edges.insert(spec.name.clone()) {
+                return Err(Error::InvalidArg(format!(
+                    "input_ports[{index}]: graph input port `{}` is declared more than once",
+                    spec.name
+                )));
+            }
+        }
+        let mut node_inputs = Vec::with_capacity(self.nodes.len());
+        for (index, node) in self.nodes.iter().enumerate() {
+            let inputs = crate::kernel::PortTable::build(
+                &node.input_ports,
+                &format!("nodes[{index}].input_ports"),
+            )
+            .map_err(|error| error.context(format!("nodes[{index}].input_ports")))?;
+            let outputs = crate::kernel::PortTable::build(
+                &node.output_ports,
+                &format!("nodes[{index}].output_ports"),
+            )
+            .map_err(|error| error.context(format!("nodes[{index}].output_ports")))?;
+            for name in outputs.names() {
+                if self.input_ports.iter().any(|decl| {
+                    parse_port_spec(decl)
+                        .map(|spec| spec.name == *name)
+                        .unwrap_or(false)
+                }) {
+                    return Err(Error::InvalidArg(format!(
+                        "nodes[{index}].output_ports: port `{name}` is also a graph input"
+                    )));
+                }
+                if let Some(previous) = producers.insert(name.clone(), index) {
+                    return Err(Error::InvalidArg(format!(
+                        "nodes[{index}].output_ports: port `{name}` has multiple producers \
+                         (nodes[{previous}] and nodes[{index}])"
+                    )));
+                }
+                known_edges.insert(name.clone());
+            }
+            node_inputs.push(inputs);
+        }
+        let graph_inputs: BTreeSet<String> = self
+            .input_ports
+            .iter()
+            .map(|decl| parse_port_spec(decl).map(|spec| spec.name))
+            .collect::<Result<_>>()?;
+        let mut adjacency = vec![Vec::new(); self.nodes.len()];
+        for (index, inputs) in node_inputs.iter().enumerate() {
+            for (port, name) in inputs.names().iter().enumerate() {
+                if !graph_inputs.contains(name) && !producers.contains_key(name) {
+                    return Err(Error::InvalidArg(format!(
+                        "nodes[{index}].input_ports[{port}]: port `{name}` has no producer"
+                    )));
+                }
+                if let Some(&producer) = producers.get(name) {
+                    if !self.nodes[index].back_edges.iter().any(|edge| edge == name) {
+                        adjacency[producer].push(index);
+                    }
+                }
+            }
+        }
+        for (index, declaration) in self.output_ports.iter().enumerate() {
+            let spec = parse_port_spec(declaration)
+                .map_err(|error| error.context(format!("output_ports[{index}]")))?;
+            if !known_edges.contains(&spec.name) {
+                return Err(Error::InvalidArg(format!(
+                    "output_ports[{index}]: graph output `{}` has no producer",
+                    spec.name
+                )));
+            }
+        }
+        check_preflight_acyclic(&adjacency, self)?;
+        validate_preflight_executors(self)?;
+        Ok(())
+    }
+
     pub fn effective_stats_level(&self) -> StatsLevel {
         if self.watchdog_ms > 0 {
             return StatsLevel::Full;
@@ -490,6 +588,159 @@ impl StatsLevel {
             Self::Basic => "basic",
             Self::Full => "full",
         }
+    }
+}
+
+fn validate_preflight_executors(config: &GraphConfig) -> Result<()> {
+    let mut names = BTreeSet::new();
+    for (index, executor) in config.executors.iter().enumerate() {
+        if executor.name.is_empty() {
+            return Err(Error::InvalidArg(format!(
+                "executors[{index}].name: executor name must not be empty"
+            )));
+        }
+        if executor.name == "default" {
+            return Err(Error::InvalidArg(format!(
+                "executors[{index}].name: `default` is reserved for the implicit executor"
+            )));
+        }
+        if !names.insert(&executor.name) {
+            return Err(Error::InvalidArg(format!(
+                "executors[{index}].name: executor `{}` is declared more than once",
+                executor.name
+            )));
+        }
+        if !matches!(
+            executor.r#type.as_str(),
+            "" | "ThreadPoolExecutor" | "DelegatingExecutor"
+        ) {
+            return Err(Error::InvalidArg(format!(
+                "executors[{index}].type: unknown executor type `{}`",
+                executor.r#type
+            )));
+        }
+        if executor.r#type == "DelegatingExecutor"
+            && (executor.num_threads != 0
+                || !executor.affinity.is_empty()
+                || executor.priority != 0)
+        {
+            return Err(Error::InvalidArg(format!(
+                "executors[{index}]: DelegatingExecutor cannot configure worker threads, affinity, or priority"
+            )));
+        }
+    }
+    for (index, node) in config.nodes.iter().enumerate() {
+        if !node.executor.is_empty() && !names.contains(&node.executor) {
+            return Err(Error::InvalidArg(format!(
+                "nodes[{index}].executor: undefined executor `{}`",
+                node.executor
+            )));
+        }
+        if node.max_in_flight > 1 {
+            let threads = if node.executor.is_empty() {
+                std::thread::available_parallelism()
+                    .map(|value| value.get())
+                    .unwrap_or(1)
+            } else {
+                config
+                    .executors
+                    .iter()
+                    .find(|executor| executor.name == node.executor)
+                    .map(|executor| executor.num_threads.max(1))
+                    .unwrap_or(1)
+            };
+            if threads < 2 {
+                return Err(Error::InvalidArg(format!(
+                    "nodes[{index}].max_in_flight: value {} requires an executor with at least two threads",
+                    node.max_in_flight
+                )));
+            }
+        }
+    }
+    for (index, node) in config.nodes.iter().enumerate() {
+        if node.input_ports.is_empty()
+            && !node.executor.is_empty()
+            && config.executors.iter().any(|executor| {
+                executor.name == node.executor && executor.r#type == "DelegatingExecutor"
+            })
+        {
+            return Err(Error::InvalidArg(format!(
+                "nodes[{index}].executor: source nodes cannot run on DelegatingExecutor"
+            )));
+        }
+        if node.input_policy.r#type == "sync_set" {
+            let ports: BTreeSet<String> = node
+                .input_ports
+                .iter()
+                .map(|declaration| parse_port_spec(declaration).map(|spec| spec.name))
+                .collect::<Result<_>>()?;
+            let mut seen = BTreeSet::new();
+            for (group_index, group) in node.input_policy.sets.iter().enumerate() {
+                if group.is_empty() {
+                    return Err(Error::InvalidArg(format!(
+                        "nodes[{index}].input_policy.sets[{group_index}]: group must not be empty"
+                    )));
+                }
+                for name in group {
+                    if !ports.contains(name) {
+                        return Err(Error::InvalidArg(format!(
+                                "nodes[{index}].input_policy.sets[{group_index}]: unknown input port `{name}`"
+                            )));
+                    }
+                    if !seen.insert(name) {
+                        return Err(Error::InvalidArg(format!(
+                                "nodes[{index}].input_policy.sets[{group_index}]: input port `{name}` appears in multiple groups"
+                            )));
+                    }
+                }
+            }
+            if let Some(name) = ports.iter().find(|name| !seen.contains(*name)) {
+                return Err(Error::InvalidArg(format!(
+                        "nodes[{index}].input_policy.sets: input port `{name}` is not assigned to a group"
+                    )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn check_preflight_acyclic(adjacency: &[Vec<usize>], config: &GraphConfig) -> Result<()> {
+    let mut marks = vec![0u8; adjacency.len()];
+    fn visit(
+        node: usize,
+        adjacency: &[Vec<usize>],
+        marks: &mut [u8],
+        config: &GraphConfig,
+    ) -> Result<()> {
+        marks[node] = 1;
+        for &next in &adjacency[node] {
+            if marks[next] == 1 {
+                let current = preflight_node_label(&config.nodes[node], node);
+                let target = preflight_node_label(&config.nodes[next], next);
+                return Err(Error::InvalidArg(format!(
+                    "topology cycle: node `{target}` -> ... -> `{current}`; mark a feedback input with `back_edges`"
+                )));
+            }
+            if marks[next] == 0 {
+                visit(next, adjacency, marks, config)?;
+            }
+        }
+        marks[node] = 2;
+        Ok(())
+    }
+    for node in 0..adjacency.len() {
+        if marks[node] == 0 {
+            visit(node, adjacency, &mut marks, config)?;
+        }
+    }
+    Ok(())
+}
+
+fn preflight_node_label(node: &NodeConfig, index: usize) -> String {
+    if node.name.is_empty() {
+        format!("{}#{index}", node.kernel)
+    } else {
+        node.name.clone()
     }
 }
 

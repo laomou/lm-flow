@@ -169,6 +169,22 @@ output_ports: ["out"]
 
 See [`docs/design.md`](docs/design.md) for the full design.
 
+### Validate a graph before deployment
+
+The core crate includes a configuration-only checker. It parses YAML, resolves
+`include`, expands subgraphs, and validates ports, topology, queue policies, and
+executor references without loading kernels or starting worker threads:
+
+```bash
+cargo run --manifest-path lmflow/core/Cargo.toml --bin lmflow -- \
+  check-config graph.yaml
+cargo run --manifest-path lmflow/core/Cargo.toml --bin lmflow -- \
+  check-config graph.yaml --json
+```
+
+The JSON output is suitable for CI tooling. An editor schema is available at
+[`docs/lmflow-config.schema.json`](docs/lmflow-config.schema.json).
+
 ## Native SDK (C / C++ / mobile)
 
 C/C++ and mobile hosts don't use pip — they use the **headers + library** directly. Each tagged GitHub Release ships per-platform `lmflow-<version>-<platform>.tar.gz` (Linux x86_64/aarch64, macOS arm64, iOS arm64, Android arm64):
