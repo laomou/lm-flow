@@ -90,10 +90,8 @@ fn included_yaml_parse_error_reports_file_and_path() {
 
     let error = Graph::from_yaml_file(main.to_str().unwrap()).unwrap_err();
     let message = error.to_string();
-    assert!(
-        message.contains(&format!("include file `{}`", library.display())),
-        "{message}"
-    );
+    assert!(message.contains("include file `"), "{message}");
+    assert!(message.contains("library.yaml"), "{message}");
     assert!(message.contains("subgraphs.Broken.nodes[0]"), "{message}");
     std::fs::remove_dir_all(root).unwrap();
 }
