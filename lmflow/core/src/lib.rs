@@ -94,6 +94,7 @@
 pub mod config;
 pub mod context;
 mod diagnostic;
+mod dot;
 pub mod executor;
 mod expand;
 pub mod ffi;
