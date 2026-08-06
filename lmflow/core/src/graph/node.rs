@@ -155,6 +155,11 @@ pub struct Edge {
     /// 该边上最近一次投递的时间戳。**必须独立记录**,不能拿「队列里还剩的包」当参照 ——
     /// 队列一排空参照就消失了,回退的时间戳就能混进来。
     pub(super) last_sent: Mutex<Timestamp>,
+    /// 最近一次发布给输出订阅者的时间戳边界。边界事件只允许单调推进，
+    /// 重复/回退值不再次通知。
+    pub(super) last_published_bound: Mutex<Timestamp>,
+    /// 快路标记：默认没有边界订阅时，逐包派发不触碰新增的锁。
+    pub(super) has_timestamp_bound_subscriber: AtomicBool,
     pub(super) pollers: Mutex<Vec<Arc<PollerInner>>>,
     pub(super) observers: Mutex<Vec<Observer>>,
 }
@@ -171,6 +176,8 @@ impl Edge {
             dropped: AtomicU64::new(0),
             watermark_backpressure: BackpressureStats::default(),
             last_sent: Mutex::new(Timestamp::unset()),
+            last_published_bound: Mutex::new(Timestamp::unstarted()),
+            has_timestamp_bound_subscriber: AtomicBool::new(false),
             pollers: Mutex::new(Vec::new()),
             observers: Mutex::new(Vec::new()),
         }
@@ -191,8 +198,12 @@ pub(super) enum Observer {
     C {
         cb: unsafe extern "C" fn(*mut c_void, crate::ffi::LMFlowPacket),
         user: *mut c_void,
+        observe_timestamp_bounds: bool,
     },
-    Rust(Arc<dyn Fn(&Packet) + Send + Sync>),
+    Rust {
+        callback: Arc<dyn Fn(&Packet) + Send + Sync>,
+        observe_timestamp_bounds: bool,
+    },
 }
 // 安全性:user 是宿主的不透明指针,引擎只原样回传。
 unsafe impl Send for Observer {}

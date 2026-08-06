@@ -677,17 +677,21 @@ class Graph {
           "set_side_packet");
   }
 
-  Poller* add_poller(const std::string& port) {
-    LMFlowPoller* p = lmflow_graph_add_poller(g_, port.c_str());
+  Poller* add_poller(const std::string& port, bool observe_timestamp_bounds) {
+    LMFlowPoller* p =
+        lmflow_graph_add_poller_ex(g_, port.c_str(), observe_timestamp_bounds);
     if (!p) throw py::key_error(std::string("add_poller failed: ") + lmflow_last_error());
     return new Poller(p);
   }
 
-  void observe(const std::string& port, const py::function& fn) {
+  void observe(const std::string& port, const py::function& fn,
+               bool observe_timestamp_bounds) {
     // 回调对象需活到图销毁
     observers_.push_back(fn);
     auto* slot = &observers_.back();
-    check(lmflow_graph_observe(g_, port.c_str(), &observer_trampoline, slot), "observe");
+    check(lmflow_graph_observe_ex(g_, port.c_str(), observe_timestamp_bounds,
+                                 &observer_trampoline, slot),
+          "observe");
   }
 
   void start() { check(lmflow_graph_start(g_), "start"); }
@@ -1045,8 +1049,10 @@ PYBIND11_MODULE(_lmflow, m) {
       .def("init_from_yaml", &Graph::init_from_yaml)
       .def("init_from_yaml_file", &Graph::init_from_yaml_file)
       .def("set_side_packet", &Graph::set_side_packet)
-      .def("add_poller", &Graph::add_poller)
-      .def("observe", &Graph::observe, py::arg("port"), py::arg("fn"))
+      .def("add_poller", &Graph::add_poller, py::arg("port"),
+           py::arg("observe_timestamp_bounds") = false)
+      .def("observe", &Graph::observe, py::arg("port"), py::arg("fn"),
+           py::arg("observe_timestamp_bounds") = false)
       .def("start", &Graph::start)
       .def("reset", &Graph::reset)
       .def("input", &Graph::input)

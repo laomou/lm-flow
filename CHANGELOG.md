@@ -12,6 +12,10 @@ to each GitHub Release.
 
 ### Added
 
+- Output Pollers and observers can now opt into timestamp-bound events through the existing
+  `lmflow_graph_add_poller_ex` / `lmflow_graph_observe_ex` APIs. Bounds arrive as monotonic empty
+  packets and terminate with `LMFLOW_TS_DONE`; Rust and Python expose matching opt-in helpers.
+
 - Optional OpenCV interop now provides `lmflow::AdoptMat` for zero-copy ownership of normal
   `cv::Mat` allocations and non-contiguous ROIs, while preserving copy-on-write isolation.
 

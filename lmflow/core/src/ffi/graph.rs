@@ -279,10 +279,6 @@ pub unsafe extern "C" fn lmflow_graph_add_poller_ex(
     observe_timestamp_bounds: bool,
 ) -> *mut LMFlowPoller {
     guard_val(std::ptr::null_mut(), || {
-        if observe_timestamp_bounds {
-            last_error::set("observe_timestamp_bounds belongs to a later phase, not implemented in this version");
-            return std::ptr::null_mut();
-        }
         let Some(slot) = slot_mut(g) else {
             last_error::set("graph handle is null");
             return std::ptr::null_mut();
@@ -295,7 +291,12 @@ pub unsafe extern "C" fn lmflow_graph_add_poller_ex(
             last_error::set("port name is null");
             return std::ptr::null_mut();
         };
-        match gr.add_poller(name) {
+        let poller = if observe_timestamp_bounds {
+            gr.add_poller_with_timestamp_bounds(name)
+        } else {
+            gr.add_poller(name)
+        };
+        match poller {
             Ok(p) => {
                 // 调用方拥有:独立 Box,持一份 Arc<GraphInner>。须 lmflow_poller_free 释放。
                 Box::into_raw(Box::new(p)) as *mut LMFlowPoller
@@ -448,18 +449,18 @@ pub unsafe extern "C" fn lmflow_graph_observe_ex(
     user: *mut c_void,
 ) -> i32 {
     guard(|| {
-        if observe_timestamp_bounds {
-            return fail(Error::Unsupported(
-                "observe_timestamp_bounds belongs to a later phase".into(),
-            ));
-        }
         let Some(f) = cb else {
             return fail(Error::InvalidArg("callback is null".into()));
         };
         let Some(name) = cstr(port) else {
             return fail(Error::InvalidArg("port name is null".into()));
         };
-        with_graph(g, |gr| to_status(gr.inner().add_observer(name, f, user)))
+        with_graph(g, |gr| {
+            to_status(
+                gr.inner()
+                    .add_observer(name, f, user, observe_timestamp_bounds),
+            )
+        })
     })
 }
 

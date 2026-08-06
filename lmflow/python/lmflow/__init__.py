@@ -322,11 +322,22 @@ class Graph:
         """Inject a constant input (model handle, calibration params…). Must be before :meth:`start`."""
         self._g.set_side_packet(name, value)
 
-    def add_poller(self, port: str) -> Poller:
-        """Pull-mode subscription to a graph output port. Must be before :meth:`start`."""
-        return self._g.add_poller(port)
+    def add_poller(self, port: str, *, observe_timestamp_bounds: bool = False) -> Poller:
+        """Pull-mode subscription to a graph output port. Must be before :meth:`start`.
 
-    def observe(self, port: str, fn: Callable[[Packet], Any]) -> None:
+        With ``observe_timestamp_bounds=True``, the poller also receives empty packets whose
+        timestamp is a monotonically advancing bound: no later data packet can have a timestamp
+        below that value. ``TS_DONE`` is the final bound.
+        """
+        return self._g.add_poller(port, observe_timestamp_bounds)
+
+    def observe(
+        self,
+        port: str,
+        fn: Callable[[Packet], Any],
+        *,
+        observe_timestamp_bounds: bool = False,
+    ) -> None:
         """Push-mode subscription. Must be before :meth:`start`, and **cannot be removed** once
         registered — it lives as long as the graph.
 
@@ -338,8 +349,9 @@ class Graph:
         Several pollers and observers may share one port — each gets its own reference to the same
         packet, with no payload copy. Prefer :meth:`add_poller` unless the callback is trivial:
         a poller is buffered and participates in backpressure, an observer does neither.
+        Set ``observe_timestamp_bounds=True`` to also receive empty-packet bound events.
         """
-        self._g.observe(port, fn)
+        self._g.observe(port, fn, observe_timestamp_bounds)
 
     def start(self) -> None:
         """Start the graph and begin scheduling. After this you cannot add_poller / set_side_packet / observe."""

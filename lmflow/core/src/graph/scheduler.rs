@@ -142,11 +142,11 @@ impl GraphInner {
             for o in &observers {
                 for pkt in packets {
                     match o {
-                        Observer::C { cb, user } => {
+                        Observer::C { cb, user, .. } => {
                             let ffi = crate::ffi::borrow_packet(pkt);
                             unsafe { cb(*user, ffi) };
                         }
-                        Observer::Rust(f) => f(pkt),
+                        Observer::Rust { callback, .. } => callback(pkt),
                     }
                 }
             }
@@ -210,6 +210,9 @@ impl GraphInner {
                 self.note_dropped(edge_id, dropped);
             }
             self.warn_if_over_soft_limit(edge_id, depth);
+        }
+        if let Some(last) = packets.last() {
+            self.publish_bound(edge_id, last.timestamp().next_allowed_in_stream());
         }
     }
 
@@ -955,6 +958,70 @@ impl GraphInner {
             self.nodes[node].advance_bound(port, bound);
             self.schedule_node(node);
         }
+        self.publish_bound(edge, bound);
+    }
+
+    /// 把单调推进的边界发布给显式订阅者。事件编码为 `payload=None` 的空包，
+    /// timestamp 即新边界；普通订阅者完全不受影响。
+    pub(super) fn publish_bound(&self, edge_id: EdgeId, bound: Timestamp) {
+        let edge = &self.edges[edge_id];
+        if !edge.has_timestamp_bound_subscriber.load(Ordering::Relaxed) {
+            return;
+        }
+        let should_publish = {
+            let mut last = edge
+                .last_published_bound
+                .lock()
+                .expect("published-bound lock poisoned");
+            if bound <= *last {
+                false
+            } else {
+                *last = bound;
+                true
+            }
+        };
+        if !should_publish {
+            return;
+        }
+
+        let event = Packet::empty().at(bound);
+        let pollers = edge
+            .pollers
+            .lock()
+            .expect("poller list lock poisoned")
+            .clone();
+        let mut any = false;
+        for poller in &pollers {
+            if poller.observe_timestamp_bounds {
+                any |= poller.push(self, event.clone());
+            }
+        }
+        if any {
+            self.notify_activity();
+        }
+
+        let observers = edge
+            .observers
+            .lock()
+            .expect("observer list lock poisoned")
+            .clone();
+        for observer in &observers {
+            match observer {
+                Observer::C {
+                    cb,
+                    user,
+                    observe_timestamp_bounds: true,
+                } => {
+                    let ffi = crate::ffi::borrow_packet(&event);
+                    unsafe { cb(*user, ffi) };
+                }
+                Observer::Rust {
+                    callback,
+                    observe_timestamp_bounds: true,
+                } => callback(&event),
+                Observer::C { .. } | Observer::Rust { .. } => {}
+            }
+        }
     }
 
     /// 调用算子回调(在指定 context 槽上)。**调用期间不持有任何引擎锁**(R1),
@@ -1036,31 +1103,54 @@ impl GraphInner {
         port: &str,
         cb: unsafe extern "C" fn(*mut c_void, crate::ffi::LMFlowPacket),
         user: *mut c_void,
+        observe_timestamp_bounds: bool,
     ) -> Result<()> {
         let edge = *self
             .output_by_name
             .get(port)
             .ok_or_else(|| Error::NotFound(format!("graph output port `{port}` does not exist")))?;
+        if observe_timestamp_bounds {
+            self.edges[edge]
+                .has_timestamp_bound_subscriber
+                .store(true, Ordering::Relaxed);
+        }
         self.edges[edge]
             .observers
             .lock()
             .expect("observer list lock poisoned")
-            .push(Observer::C { cb, user });
+            .push(Observer::C {
+                cb,
+                user,
+                observe_timestamp_bounds,
+            });
         Ok(())
     }
 
     /// Rust 宿主的推模式订阅。回调在**派发该包的线程**上执行(可能是池线程),
     /// 因此必须 `Send + Sync`;回调内不得再调 graph 的生命周期接口。
-    pub fn add_observer_fn(&self, port: &str, f: Arc<dyn Fn(&Packet) + Send + Sync>) -> Result<()> {
+    pub fn add_observer_fn(
+        &self,
+        port: &str,
+        callback: Arc<dyn Fn(&Packet) + Send + Sync>,
+        observe_timestamp_bounds: bool,
+    ) -> Result<()> {
         let edge = *self
             .output_by_name
             .get(port)
             .ok_or_else(|| Error::NotFound(format!("graph output port `{port}` does not exist")))?;
+        if observe_timestamp_bounds {
+            self.edges[edge]
+                .has_timestamp_bound_subscriber
+                .store(true, Ordering::Relaxed);
+        }
         self.edges[edge]
             .observers
             .lock()
             .expect("observer list lock poisoned")
-            .push(Observer::Rust(f));
+            .push(Observer::Rust {
+                callback,
+                observe_timestamp_bounds,
+            });
         Ok(())
     }
 

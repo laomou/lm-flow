@@ -98,6 +98,7 @@ impl GraphInner {
         if e.closed.swap(true, Ordering::SeqCst) {
             return; // 已关
         }
+        self.publish_bound(edge, Timestamp::done());
         for &(node, port) in &e.consumers {
             self.nodes[node].input_closed[port].store(true, Ordering::SeqCst);
             // 关闭即「永远不会再有数据」,边界直接到 Done,让下游不必再等这一路
@@ -266,6 +267,9 @@ impl GraphInner {
             e.dropped.store(0, Ordering::Relaxed);
             e.watermark_backpressure.reset();
             *e.last_sent.lock().expect("last_sent lock poisoned") = Timestamp::unset();
+            *e.last_published_bound
+                .lock()
+                .expect("published-bound lock poisoned") = Timestamp::unstarted();
             // poller / observer 是宿主持有、engine 存 Arc —— **保留**列表,只复位内容,
             // 让宿主复用同一个 Poller 句柄再取下一轮输出。
             for pl in e.pollers.lock().expect("poller list lock poisoned").iter() {

@@ -226,6 +226,43 @@ class TestPythonKernel(unittest.TestCase):
             g.wait_done(timeout=5.0)
             self.assertEqual([p.as_int() for p in out], [0, 2, 4, 6])
 
+    def test_timestamp_bound_poller_and_observer(self):
+        with graph(one_node("TDouble")) as g:
+            out = g.add_poller("out", observe_timestamp_bounds=True)
+            observed = []
+            g.observe(
+                "out",
+                lambda packet: observed.append(
+                    (packet.is_empty, packet.timestamp, packet.as_int())
+                ),
+                observe_timestamp_bounds=True,
+            )
+            g.start()
+            g.input("in").send(3, ts=4)
+            g.close_all_inputs()
+            g.wait_done(timeout=5.0)
+
+            polled = [(p.is_empty, p.timestamp, p.as_int()) for p in out]
+            expected = [
+                (False, 4, 6),
+                (True, 5, None),
+                (True, lmflow.TS_DONE, None),
+            ]
+            self.assertEqual(polled, expected)
+            self.assertEqual(observed, expected)
+
+    def test_timestamp_bounds_are_opt_in(self):
+        with graph(one_node("TDouble")) as g:
+            out = g.add_poller("out")
+            g.start()
+            g.input("in").send(3, ts=4)
+            g.close_all_inputs()
+            g.wait_done(timeout=5.0)
+            self.assertEqual(
+                [(p.is_empty, p.timestamp, p.as_int()) for p in out],
+                [(False, 4, 6)],
+            )
+
     def test_builtin_cpp_kernel_and_python_kernel_in_one_graph(self):
         with graph(
             """

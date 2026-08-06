@@ -25,6 +25,7 @@ pub(super) struct PollerInner {
     pub(super) dropped: AtomicU64,
     pub(super) block_backpressure: BackpressureStats,
     pub(super) active: AtomicBool,
+    pub(super) observe_timestamp_bounds: bool,
 }
 
 impl PollerInner {
@@ -259,7 +260,12 @@ pub struct Poller {
 
 impl Graph {
     pub fn add_poller(&self, port: &str) -> Result<Poller> {
-        self.add_poller_inner(port, None)
+        self.add_poller_inner(port, None, false)
+    }
+
+    /// Add an unbounded poller that also receives timestamp-bound events as empty packets.
+    pub fn add_poller_with_timestamp_bounds(&self, port: &str) -> Result<Poller> {
+        self.add_poller_inner(port, None, true)
     }
 
     pub fn add_poller_with_options(&self, port: &str, options: PollerOptions) -> Result<Poller> {
@@ -273,10 +279,15 @@ impl Graph {
                 "poller overflow=latest requires capacity 1".into(),
             ));
         }
-        self.add_poller_inner(port, Some(options))
+        self.add_poller_inner(port, Some(options), false)
     }
 
-    fn add_poller_inner(&self, port: &str, options: Option<PollerOptions>) -> Result<Poller> {
+    fn add_poller_inner(
+        &self,
+        port: &str,
+        options: Option<PollerOptions>,
+        observe_timestamp_bounds: bool,
+    ) -> Result<Poller> {
         let state = self.state();
         if state != State::Initialized {
             return Err(Error::State(format!(
@@ -298,7 +309,13 @@ impl Graph {
             dropped: AtomicU64::new(0),
             block_backpressure: BackpressureStats::default(),
             active: AtomicBool::new(true),
+            observe_timestamp_bounds,
         });
+        if observe_timestamp_bounds {
+            self.inner.edges[edge]
+                .has_timestamp_bound_subscriber
+                .store(true, Ordering::Relaxed);
+        }
         self.inner.edges[edge]
             .pollers
             .lock()
