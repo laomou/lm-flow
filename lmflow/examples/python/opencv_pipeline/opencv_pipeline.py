@@ -21,7 +21,6 @@ try:
 except ImportError:  # pragma: no cover
     raise SystemExit("this example needs opencv-python: pip install opencv-python") from None
 
-lmflow.register_builtin_kernels()
 
 
 @lmflow.kernel("PyResizeKernel")

@@ -14,7 +14,6 @@
 
 import lmflow
 
-lmflow.register_builtin_kernels()   # 内置 C++ 算子(幂等,必须在建图前)
 
 # ---------------------------------------------------------------- 算子:Python 实现
 @lmflow.kernel("PyOffsetKernel")

@@ -22,7 +22,6 @@ output_ports: [out]
 
 
 def main() -> None:
-    lmflow.register_builtin_kernels()
     with lmflow.Graph.from_yaml(CONFIG) as g:
         out = g.add_poller("out")
         g.start()

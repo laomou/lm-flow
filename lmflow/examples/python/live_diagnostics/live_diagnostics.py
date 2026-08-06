@@ -19,7 +19,6 @@ import time
 
 import lmflow
 
-lmflow.register_builtin_kernels()
 
 
 @lmflow.kernel("DiagnosticSlowPass")
