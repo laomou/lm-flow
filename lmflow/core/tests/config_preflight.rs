@@ -183,3 +183,34 @@ output_ports: [out]
         );
     }
 }
+
+#[test]
+fn graph_plan_diagnostics_match_runtime_warning_categories() {
+    let plan = GraphPlan::build(
+        GraphConfig::from_yaml(
+            r#"
+executors:
+  - { name: idle, type: ThreadPoolExecutor, num_threads: 3 }
+nodes:
+  - { name: source, kernel: NotLinked, output_ports: [unused] }
+input_ports: [orphan]
+output_ports: []
+"#,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let diagnostics = plan.diagnostics();
+    let codes: Vec<_> = diagnostics
+        .iter()
+        .map(|diagnostic| diagnostic.code.as_str())
+        .collect();
+    assert!(codes.contains(&"unconsumed_graph_input"));
+    assert!(codes.contains(&"unconsumed_node_output"));
+    assert!(codes.contains(&"unused_executor"));
+    let dot = plan.to_dot();
+    for diagnostic in diagnostics {
+        assert!(dot.contains(&diagnostic.code), "{dot}");
+        assert!(dot.contains(&diagnostic.message), "{dot}");
+    }
+}

@@ -33,6 +33,7 @@ use super::{
 impl GraphInner {
     pub(super) fn build(cfg: GraphConfig) -> Result<Self> {
         let plan = GraphPlan::build(cfg)?;
+        let diagnostics = plan.diagnostics();
         let cfg = plan.config;
         let configured_stats = cfg.stats.unwrap_or_else(|| {
             cfg.stats_timing.map_or(StatsLevel::Basic, |enabled| {
@@ -67,23 +68,8 @@ impl GraphInner {
             .map(|node| (node.input_ports.clone(), node.output_ports.clone()))
             .collect();
 
-        // ---- 无人消费的端口:静默丢包是最难查的故障,至少要出声 ----
-        for e in &edges {
-            if !e.consumers.is_empty() || e.is_graph_output {
-                continue;
-            }
-            if e.is_graph_input {
-                runtime::log_warn(&format!(
-                    "graph input port `{}` is consumed by no node -- packets sent in will be dropped",
-                    e.name
-                ));
-            } else if let Some(p) = e.producer {
-                runtime::log_warn(&format!(
-                    "node `{}` output port `{}` has no downstream consumer and is not a graph output port -- output will be dropped",
-                    node_label(&cfg.nodes[p], p),
-                    e.name
-                ));
-            }
+        for diagnostic in diagnostics {
+            runtime::log_warn(&diagnostic.message);
         }
 
         // 每节点每输入口是否为 back-edge(按口名匹配 config.back_edges)。反馈寄存器口不参与
@@ -103,20 +89,6 @@ impl GraphInner {
                 build_executor(&e.name, e, stats_level)
                     .map_err(|error| error.context(format!("executors[{executor_index}]")))?,
             );
-        }
-        // 定义了却没人用的池只会白占线程,出声提醒。默认执行器豁免:它是引擎建的,
-        // 宿主根本没声明过它,没人用不是宿主的错。
-        for p in &executors {
-            if p.name() == DEFAULT_EXECUTOR_NAME || p.is_delegating() {
-                continue;
-            }
-            if !plan.nodes.iter().any(|node| node.executor == p.name()) {
-                runtime::log_warn(&format!(
-                    "executor `{}` is defined but not used by any node ({} threads will idle)",
-                    p.name(),
-                    p.num_threads()
-                ));
-            }
         }
         // ---- 收集契约 + 静态类型检查 ----
         //

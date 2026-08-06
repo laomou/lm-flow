@@ -548,6 +548,12 @@ pub struct GraphPlanEdge {
     pub(crate) consumer_ports: Vec<(usize, usize)>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GraphPlanDiagnostic {
+    pub code: String,
+    pub message: String,
+}
+
 impl GraphPlan {
     pub fn build(config: GraphConfig) -> Result<Self> {
         config.validate_preflight()?;
@@ -731,6 +737,48 @@ impl GraphPlan {
     /// Export the validated static plan as Graphviz DOT without loading kernels or executors.
     pub fn to_dot(&self) -> String {
         crate::dot::render_plan(self)
+    }
+
+    pub fn diagnostics(&self) -> Vec<GraphPlanDiagnostic> {
+        let mut diagnostics = Vec::new();
+        for edge in &self.edges {
+            if !edge.consumers.is_empty() || edge.graph_output {
+                continue;
+            }
+            if edge.graph_input {
+                diagnostics.push(GraphPlanDiagnostic {
+                    code: "unconsumed_graph_input".into(),
+                    message: format!(
+                        "graph input port `{}` is consumed by no node; packets sent in will be dropped",
+                        edge.name
+                    ),
+                });
+            } else if let Some(producer) = edge.producer {
+                diagnostics.push(GraphPlanDiagnostic {
+                    code: "unconsumed_node_output".into(),
+                    message: format!(
+                        "node `{}` output port `{}` has no downstream consumer and is not a graph output; output will be dropped",
+                        self.nodes[producer].name, edge.name
+                    ),
+                });
+            }
+        }
+        for executor in &self.config.executors {
+            if executor.r#type == "DelegatingExecutor"
+                || self.nodes.iter().any(|node| node.executor == executor.name)
+            {
+                continue;
+            }
+            diagnostics.push(GraphPlanDiagnostic {
+                code: "unused_executor".into(),
+                message: format!(
+                    "executor `{}` is defined but not used by any node ({} threads will idle)",
+                    executor.name,
+                    executor.num_threads.max(1)
+                ),
+            });
+        }
+        diagnostics
     }
 }
 

@@ -39,7 +39,13 @@ pub(crate) fn render_plan(plan: &crate::config::GraphPlan) -> String {
     dot.push_str(&format!(
         "  graph_output [shape=cds, style=filled, fillcolor=\"{PORT_FILL}\", color=\"{PORT_COLOR}\", label=\"graph output\"];\n"
     ));
-    let mut executors = vec![("default".to_string(), "ThreadPoolExecutor".to_string(), 0)];
+    let mut executors = vec![(
+        "default".to_string(),
+        "ThreadPoolExecutor".to_string(),
+        0,
+        Vec::new(),
+        0,
+    )];
     executors.extend(plan.config.executors.iter().map(|executor| {
         (
             executor.name.clone(),
@@ -49,19 +55,38 @@ pub(crate) fn render_plan(plan: &crate::config::GraphPlan) -> String {
                 executor.r#type.clone()
             },
             executor.num_threads,
+            executor.affinity.clone(),
+            executor.priority,
         )
     }));
-    for (index, (name, kind, threads)) in executors.iter().enumerate() {
+    for (index, (name, kind, threads, affinity, priority)) in executors.iter().enumerate() {
+        let mut label = executor_label(name, kind, *threads);
+        if !affinity.is_empty() {
+            label.push_str(&format!(
+                " · cores[{}]",
+                affinity
+                    .iter()
+                    .map(usize::to_string)
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ));
+        }
+        if *priority != 0 {
+            label.push_str(&format!(" · priority {priority}"));
+        }
         dot.push_str(&format!(
             "  subgraph cluster_executor_{index} {{\n    label=\"{}\";\n    color=\"{CLUSTER_COLOR}\";\n",
-            escape(&executor_label(name, kind, *threads)),
+            escape(&label),
         ));
         for node in plan.nodes.iter().filter(|node| node.executor == *name) {
             let label = format!(
-                "{}\\n{}\\nexecutor: {}\\ninputs: {}\\noutputs: {}",
+                "{}\\n{}\\nexecutor: {}\\npolicy: {}\\nmax_in_flight: {}\\nrate: {} Hz\\ninputs: {}\\noutputs: {}",
                 node.name,
                 node.kernel,
                 node.executor,
+                plan.config.nodes[node.index].input_policy.r#type,
+                plan.config.nodes[node.index].max_in_flight.max(1),
+                plan.config.nodes[node.index].rate,
                 node.inputs.join(", "),
                 node.outputs.join(", ")
             );
@@ -69,6 +94,18 @@ pub(crate) fn render_plan(plan: &crate::config::GraphPlan) -> String {
                 "    node_{} [label=\"{}\"];\n",
                 node.index,
                 escape(&label)
+            ));
+        }
+        dot.push_str("  }\n");
+    }
+    let diagnostics = plan.diagnostics();
+    if !diagnostics.is_empty() {
+        dot.push_str("  subgraph cluster_diagnostics { label=\"diagnostics\"; style=dashed; color=\"#d98c00\";\n");
+        for (index, diagnostic) in diagnostics.iter().enumerate() {
+            dot.push_str(&format!(
+                "    diagnostic_{index} [shape=note, style=filled, fillcolor=\"#fff0c2\", color=\"#d98c00\", label=\"{}\\n{}\"];\n",
+                escape(&diagnostic.code),
+                escape(&diagnostic.message)
             ));
         }
         dot.push_str("  }\n");
