@@ -79,10 +79,29 @@ pub(crate) fn render_plan(plan: &crate::config::GraphPlan) -> String {
             escape(&label),
         ));
         for node in plan.nodes.iter().filter(|node| node.executor == *name) {
+            let kind = node.route.as_ref().map_or_else(
+                || node.kernel.clone(),
+                |route| format!("Route · {:?}", route.mode).to_lowercase(),
+            );
+            let route_lines = node.route.as_ref().map_or_else(String::new, |route| {
+                route
+                    .routes
+                    .iter()
+                    .enumerate()
+                    .map(|(index, rule)| {
+                        if rule.default {
+                            format!("\\n{}: default → {}", index + 1, rule.to)
+                        } else {
+                            format!("\\n{}: condition → {}", index + 1, rule.to)
+                        }
+                    })
+                    .collect::<String>()
+            });
             let label = format!(
-                "{}\\n{}\\nexecutor: {}\\npolicy: {}\\nmax_in_flight: {}\\nrate: {} Hz\\ninputs: {}\\noutputs: {}",
+                "{}\\n{}{}\\nexecutor: {}\\npolicy: {}\\nmax_in_flight: {}\\nrate: {} Hz\\ninputs: {}\\noutputs: {}",
                 node.name,
-                node.kernel,
+                kind,
+                route_lines,
                 node.executor,
                 plan.config.nodes[node.index].input_policy.r#type,
                 plan.config.nodes[node.index].max_in_flight.max(1),

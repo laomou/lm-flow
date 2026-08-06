@@ -197,7 +197,7 @@ pub unsafe extern "C" fn lmflow_ctx_input_payload(
     guard_val(std::ptr::null(), || {
         ctx_ref(c)
             .and_then(|x| x.input(idx))
-            .and_then(|p| p.arc_ref().map(|a| a.data_ptr() as *const c_void))
+            .and_then(|p| p.arc_ref().map(|a| a.payload.data_ptr() as *const c_void))
             .unwrap_or(std::ptr::null())
     })
 }

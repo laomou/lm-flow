@@ -101,14 +101,16 @@ impl GraphInner {
             let name = node_label(n, idx);
             let (ins, outs) = node_port_tables[idx].clone();
             let mut contract = Contract::new(ins, outs);
-            // 安全性:contract 是本栈帧上存活的对象,回调期间无人访问它。
-            let contract_result = unsafe {
-                KernelInstance::fill_contract(
-                    &n.kernel,
-                    &mut contract as *mut Contract as *mut c_void,
-                )
-            };
-            contract_result.map_err(|error| error.context(format!("nodes[{idx}].kernel")))?;
+            if n.r#type != "route" {
+                // 安全性:contract 是本栈帧上存活的对象,回调期间无人访问它。
+                let contract_result = unsafe {
+                    KernelInstance::fill_contract(
+                        &n.kernel,
+                        &mut contract as *mut Contract as *mut c_void,
+                    )
+                };
+                contract_result.map_err(|error| error.context(format!("nodes[{idx}].kernel")))?;
+            }
             if let Some(error) = contract.take_error() {
                 return Err(Error::InvalidArg(format!(
                     "nodes[{idx}].kernel (node `{name}`): GetContract failed: {error}"
@@ -118,10 +120,16 @@ impl GraphInner {
             contracts.push(contract);
             // 保持历史顺序:每个节点都是 get_contract 后立刻 create,而不是先询问完
             // 所有契约再统一创建。静态检查失败时这些实例随局部 Vec 正常析构。
-            kernels.push(
+            kernels.push(if n.r#type == "route" {
+                KernelInstance::create_route(
+                    n.route
+                        .clone()
+                        .expect("validated route node has route configuration"),
+                )
+            } else {
                 KernelInstance::create(&n.kernel)
-                    .map_err(|error| error.context(format!("nodes[{idx}].kernel")))?,
-            );
+                    .map_err(|error| error.context(format!("nodes[{idx}].kernel")))?
+            });
         }
         check_edge_type_compatibility(&cfg, &edges, &contracts)?;
 
@@ -145,10 +153,15 @@ impl GraphInner {
             // 0 视作 1。max_in_flight 个并行调用各需一个 context 槽。
             let mif = n.max_in_flight.max(1);
             let options = Arc::new(Options::new(n.options.clone()));
+            let kernel_name = if n.r#type == "route" {
+                "__lmflow.route".to_string()
+            } else {
+                n.kernel.clone()
+            };
             let make_ctx = || {
                 Context::new(
                     name.clone(),
-                    n.kernel.clone(),
+                    kernel_name.clone(),
                     ins.clone(),
                     outs.clone(),
                     options.clone(),
@@ -164,7 +177,7 @@ impl GraphInner {
 
             nodes.push(Node {
                 name,
-                kernel_name: n.kernel.clone(),
+                kernel_name,
                 inputs: input_edges,
                 outputs: output_edges,
                 in_ports: ins.clone(),

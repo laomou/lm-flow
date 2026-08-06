@@ -4,7 +4,8 @@ use std::collections::BTreeMap;
 use std::ffi::c_void;
 use std::sync::{LazyLock, Mutex};
 
-use crate::config::parse_port_spec;
+use crate::config::{parse_port_spec, RouteConfig, RouteMode};
+use crate::context::Context;
 use crate::status::{Error, Result};
 
 /// 算子的函数指针表(布局与 `include/flow.h` 的 `LMFlowKernelVTable` 一致)。
@@ -128,6 +129,7 @@ pub struct KernelInstance {
     vtable: KernelVTable,
     kernel_name: String,
     language: KernelLanguage,
+    internal: Option<RouteConfig>,
 }
 
 // 安全性:self_ptr 指向算子实例,由「节点独占令牌」保证任一时刻只被单线程访问
@@ -148,7 +150,25 @@ impl KernelInstance {
             vtable: reg.vtable,
             kernel_name: kernel_name.to_string(),
             language: reg.language,
+            internal: None,
         })
+    }
+
+    pub fn create_route(config: RouteConfig) -> Self {
+        Self {
+            self_ptr: std::ptr::null_mut(),
+            vtable: KernelVTable {
+                create: None,
+                get_contract: None,
+                open: None,
+                process: None,
+                close: None,
+                destroy: None,
+            },
+            kernel_name: "__lmflow.route".into(),
+            language: KernelLanguage::Rust,
+            internal: Some(config),
+        }
     }
 
     pub fn kernel_name(&self) -> &str {
@@ -188,6 +208,16 @@ impl KernelInstance {
     /// # Safety
     /// 同 [`Self::open`]。
     pub unsafe fn process(&self, ctx: *mut c_void) -> i32 {
+        if let Some(route) = &self.internal {
+            let context = unsafe { &mut *(ctx as *mut Context) };
+            return match route_process(route, context) {
+                Ok(()) => 0,
+                Err(error) => {
+                    context.set_error(&error.to_string());
+                    -1
+                }
+            };
+        }
         match self.vtable.process {
             Some(f) => unsafe { f(self.self_ptr, ctx) },
             None => 0,
@@ -200,6 +230,72 @@ impl KernelInstance {
             Some(f) => unsafe { f(self.self_ptr, ctx) },
             None => 0,
         }
+    }
+}
+
+fn route_process(route: &RouteConfig, context: &mut Context) -> Result<()> {
+    let packet = context.input(0).cloned().unwrap_or_default();
+    let mut matched = false;
+    let mut default_output = None;
+    for rule in &route.routes {
+        if rule.default {
+            default_output = Some(rule.to.as_str());
+            continue;
+        }
+        let hit = rule
+            .when
+            .as_ref()
+            .ok_or_else(|| Error::InvalidArg("route rule missing condition".into()))?
+            .evaluate(packet.metadata(), packet.timestamp())?;
+        if hit {
+            let out = context
+                .out_ports
+                .index_by_name(&rule.to)
+                .ok_or_else(|| Error::InvalidArg(format!("unknown route output `{}`", rule.to)))?;
+            context.emit(out, packet.clone())?;
+            context.shared.counter_add(
+                &format!("route.{}.matched.{}", context.node_name, rule.to),
+                1,
+            );
+            context.shared.counter_add(
+                &format!("route.{}.emitted.{}", context.node_name, rule.to),
+                1,
+            );
+            matched = true;
+            if route.mode == RouteMode::First {
+                break;
+            }
+        }
+    }
+    if !matched {
+        if let Some(port) = default_output {
+            let out = context
+                .out_ports
+                .index_by_name(port)
+                .ok_or_else(|| Error::InvalidArg(format!("unknown default output `{port}`")))?;
+            return context.emit(out, packet);
+        }
+        match route.unmatched.as_str() {
+            "drop" => {
+                context
+                    .shared
+                    .counter_add(&format!("route.{}.dropped", context.node_name), 1);
+                Ok(())
+            }
+            "error" => Err(Error::Kernel("route packet did not match any rule".into())),
+            port => {
+                let out = context.out_ports.index_by_name(port).ok_or_else(|| {
+                    Error::InvalidArg(format!("unknown unmatched output `{port}`"))
+                })?;
+                context
+                    .shared
+                    .counter_add(&format!("route.{}.emitted.{}", context.node_name, port), 1);
+                context.emit(out, packet)?;
+                Ok(())
+            }
+        }
+    } else {
+        Ok(())
     }
 }
 

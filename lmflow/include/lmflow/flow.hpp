@@ -180,6 +180,30 @@ class Packet {
   bool AsF64(double* o) const { return lmflow_packet_as_f64(&raw_, o); }
   bool AsBool(bool* o) const { return lmflow_packet_as_bool(&raw_, o); }
   bool AsStr(const char** o) const { return lmflow_packet_as_str(&raw_, o); }
+  LMFlowStatus SetMetadata(const char* key, int64_t value) {
+    return lmflow_packet_set_metadata_i64(&raw_, key, value);
+  }
+  LMFlowStatus SetMetadata(const char* key, double value) {
+    return lmflow_packet_set_metadata_f64(&raw_, key, value);
+  }
+  LMFlowStatus SetMetadata(const char* key, bool value) {
+    return lmflow_packet_set_metadata_bool(&raw_, key, value);
+  }
+  LMFlowStatus SetMetadata(const char* key, const char* value) {
+    return lmflow_packet_set_metadata_str(&raw_, key, value);
+  }
+  bool Metadata(const char* key, int64_t* out) const {
+    return lmflow_packet_metadata_i64(&raw_, key, out);
+  }
+  bool Metadata(const char* key, double* out) const {
+    return lmflow_packet_metadata_f64(&raw_, key, out);
+  }
+  bool Metadata(const char* key, bool* out) const {
+    return lmflow_packet_metadata_bool(&raw_, key, out);
+  }
+  bool Metadata(const char* key, const char** out) const {
+    return lmflow_packet_metadata_str(&raw_, key, out);
+  }
   /// N 维缓冲的**只读**视图(零拷贝)。cv::Mat 互转见可选 adapter `lmflow/opencv.hpp`。
   bool AsBuffer(LMFlowBuffer* o) const { return lmflow_packet_as_buffer(&raw_, o); }
 

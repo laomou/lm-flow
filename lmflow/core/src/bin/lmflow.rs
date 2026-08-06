@@ -66,7 +66,16 @@ fn summary_json(path: &str, plan: &GraphPlan) -> serde_json::Value {
         "path": path,
         "nodes": config.nodes.iter().map(|node| json!({
             "name": node.name,
-            "kernel": node.kernel,
+            "kernel": if node.r#type == "route" { "__lmflow.route" } else { &node.kernel },
+            "type": node.r#type,
+            "route": node.route.as_ref().map(|route| json!({
+                "mode": format!("{:?}", route.mode).to_lowercase(),
+                "unmatched": route.unmatched,
+                "rules": route.routes.iter().map(|rule| json!({
+                    "to": rule.to,
+                    "default": rule.default,
+                })).collect::<Vec<_>>(),
+            })),
             "executor": if node.executor.is_empty() { "default" } else { &node.executor },
             "inputs": node.input_ports,
             "outputs": node.output_ports,
