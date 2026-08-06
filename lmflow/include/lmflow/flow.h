@@ -630,7 +630,7 @@ void lmflow_graph_close_all_inputs(LMFlowGraph*);
 LMFlowPoller* lmflow_graph_add_poller(LMFlowGraph*, const char* port);
 /* 变体:observe_timestamp_bounds=true 时,除数据包外还会收到「时间戳边界推进」
  * 产生的**空包**(payload==NULL,仅带时间戳)—— 下游据此知道「该时刻之前不会再有数据」。
- * 默认 false。完整的边界传播属 A 阶段,本版本仅保留接口。 */
+ * 边界单调递增；关闭时最终收到 timestamp=LMFLOW_TS_DONE。默认 false。 */
 LMFlowPoller* lmflow_graph_add_poller_ex(LMFlowGraph*, const char* port, bool observe_timestamp_bounds);
 /* 有界 Poller。capacity 必须 >= 1。
  * DROP_OLDEST / DROP_NEWEST / LATEST 有损且**永不阻塞生产线程** —— 单线程宿主请用这三种。

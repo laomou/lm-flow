@@ -301,12 +301,28 @@ impl Graph {
     where
         F: Fn(&Packet) + Send + Sync + 'static,
     {
+        self.observe_inner(port, f, false)
+    }
+
+    /// 推模式订阅输出口，同时接收以空包编码的时间戳边界事件。
+    pub fn observe_with_timestamp_bounds<F>(&self, port: &str, f: F) -> Result<()>
+    where
+        F: Fn(&Packet) + Send + Sync + 'static,
+    {
+        self.observe_inner(port, f, true)
+    }
+
+    fn observe_inner<F>(&self, port: &str, f: F, observe_timestamp_bounds: bool) -> Result<()>
+    where
+        F: Fn(&Packet) + Send + Sync + 'static,
+    {
         if self.state() != State::Initialized {
             return Err(Error::State(
                 "observe must be called before start, otherwise already-produced packets are missed".into(),
             ));
         }
-        self.inner.add_observer_fn(port, Arc::new(f))
+        self.inner
+            .add_observer_fn(port, Arc::new(f), observe_timestamp_bounds)
     }
 
     /// 算子自报计数器的当前值(按图隔离)。

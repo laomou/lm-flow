@@ -289,6 +289,26 @@ to an observer callback is **borrowed** — you must not. The observer runs on w
 dispatched the packet, possibly a pool thread, so it must be thread-safe; and it must not call back
 into `lmflow_graph_*`.
 
+Pass `observe_timestamp_bounds=true` to either `_ex` function to also receive timestamp-bound
+events. A bound event is an empty packet (`payload == NULL`) whose `timestamp` means no later data
+packet on that output can have a timestamp below that value. Bounds are monotonic, follow the data
+they cover, and finish with `LMFLOW_TS_DONE` when the output closes. The default APIs continue to
+deliver data packets only. Bound events are available on the unbounded `_ex` poller; bounded
+pollers remain data-only so overflow policies such as `LATEST` cannot replace data with metadata.
+
+```c
+LMFlowPoller* events = lmflow_graph_add_poller_ex(graph, "out", true);
+LMFlowPacket event;
+while (lmflow_poller_next(events, &event)) {
+  if (event.payload == NULL) {
+    printf("timestamp bound advanced to %lld\n", (long long)event.timestamp);
+  } else {
+    /* consume data */
+  }
+  lmflow_packet_drop(&event);
+}
+```
+
 Poller queues contribute to the graph's packet watermark and packet/byte diagnostic counters. The legacy
 `lmflow_graph_add_poller` remains unbounded for compatibility. A bounded Poller supports:
 

@@ -1427,6 +1427,61 @@ fn observer_receives_packets() {
 }
 
 #[test]
+fn timestamp_bound_subscriptions_receive_empty_packets_and_done() {
+    common::register_test_kernels();
+
+    static SEEN: std::sync::Mutex<Vec<(bool, i64)>> = std::sync::Mutex::new(Vec::new());
+    unsafe extern "C" fn on_event(_user: *mut c_void, packet: LMFlowPacket) {
+        SEEN.lock()
+            .expect("lock poisoned")
+            .push((packet.payload.is_null(), packet.timestamp));
+    }
+
+    unsafe {
+        SEEN.lock().expect("lock poisoned").clear();
+        let graph = lmflow_graph_new();
+        let yaml = cs(CONFIG);
+        assert_eq!(lmflow_graph_init_from_yaml(graph, yaml.as_ptr()), 0);
+        let output = cs("out");
+        let poller = lmflow_graph_add_poller_ex(graph, output.as_ptr(), true);
+        assert!(!poller.is_null(), "{}", last_error());
+        assert_eq!(
+            lmflow_graph_observe_ex(
+                graph,
+                output.as_ptr(),
+                true,
+                Some(on_event),
+                std::ptr::null_mut(),
+            ),
+            0,
+            "{}",
+            last_error()
+        );
+
+        assert_eq!(lmflow_graph_start(graph), 0);
+        let input = lmflow_graph_input(graph, c"in".as_ptr());
+        assert!(!input.is_null());
+        assert_eq!(lmflow_input_send(input, make_int_packet(9, 4)), 0);
+        lmflow_graph_close_all_inputs(graph);
+        assert_eq!(lmflow_graph_wait_done(graph), 0);
+
+        let mut events = Vec::new();
+        let mut packet = LMFlowPacket::default();
+        while lmflow_poller_next(poller, &mut packet) {
+            events.push((packet.payload.is_null(), packet.timestamp));
+            lmflow_packet_drop(&mut packet);
+        }
+        let expected = vec![(false, 4), (true, 5), (true, lmflow::Timestamp::done().0)];
+        assert_eq!(events, expected);
+        assert_eq!(*SEEN.lock().expect("lock poisoned"), expected);
+
+        lmflow_input_free(input);
+        lmflow_poller_free(poller);
+        lmflow_graph_free(graph);
+    }
+}
+
+#[test]
 fn log_callback_receives_engine_messages() {
     use std::sync::atomic::{AtomicUsize, Ordering};
     static COUNT: AtomicUsize = AtomicUsize::new(0);
