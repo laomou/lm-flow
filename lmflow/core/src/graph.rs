@@ -38,7 +38,9 @@ use backpressure::*;
 use node::*;
 pub use node::{DotView, State};
 use poller::PollerInner;
-pub use poller::{Poller, PollerBackpressureStatsSnapshot, PollerOptions, PollerOverflow};
+pub use poller::{
+    OutputEvent, Poller, PollerBackpressureStatsSnapshot, PollerOptions, PollerOverflow,
+};
 
 pub type NodeId = usize;
 pub type EdgeId = usize;

@@ -3,7 +3,7 @@ mod common;
 use std::sync::{Arc, Mutex, Once};
 use std::time::Duration;
 
-use lmflow::{register_kernel, Graph, Kernel, KernelCtx, Packet, Timestamp};
+use lmflow::{register_kernel, Graph, Kernel, KernelCtx, OutputEvent, Packet, Timestamp};
 
 #[derive(Default)]
 struct DropWithExplicitBound;
@@ -36,6 +36,32 @@ fn drain(poller: &lmflow::Poller) -> Vec<(bool, i64)> {
         events.push((packet.is_empty(), packet.timestamp().0));
     }
     events
+}
+
+#[test]
+fn typed_events_distinguish_packets_bounds_and_done() {
+    register_kernels();
+    let graph = Graph::from_yaml(&one_node("PassThrough")).unwrap();
+    let poller = graph.add_poller_with_timestamp_bounds("out").unwrap();
+    graph.start().unwrap();
+    graph
+        .input("in")
+        .unwrap()
+        .send(Packet::from_i64(7).at(Timestamp(4)))
+        .unwrap();
+    graph.close_all_inputs();
+    graph.wait_done_timeout(Duration::from_secs(5)).unwrap();
+
+    match poller.next_event() {
+        Some(OutputEvent::Packet(packet)) => assert_eq!(packet.as_i64(), Some(7)),
+        event => panic!("expected packet event, got {event:?}"),
+    }
+    assert!(matches!(
+        poller.next_event(),
+        Some(OutputEvent::TimestampBound(Timestamp(5)))
+    ));
+    assert!(matches!(poller.next_event(), Some(OutputEvent::Done)));
+    assert!(poller.next_event().is_none());
 }
 
 #[test]

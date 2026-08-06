@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex};
 use crate::packet::Packet;
 use crate::runtime;
 use crate::status::{Error, Result};
+use crate::timestamp::Timestamp;
 
 use super::{BackpressureStats, EdgeId, Graph, GraphInner, State};
 
@@ -258,6 +259,14 @@ pub struct Poller {
     inner: Arc<PollerInner>,
 }
 
+/// A typed event from an output poller that observes timestamp bounds.
+#[derive(Clone, Debug)]
+pub enum OutputEvent {
+    Packet(Packet),
+    TimestampBound(Timestamp),
+    Done,
+}
+
 impl Graph {
     pub fn add_poller(&self, port: &str) -> Result<Poller> {
         self.add_poller_inner(port, None, false)
@@ -329,6 +338,36 @@ impl Graph {
 }
 
 impl Poller {
+    fn classify_event(packet: Packet) -> OutputEvent {
+        if !packet.is_empty() {
+            return OutputEvent::Packet(packet);
+        }
+        if packet.timestamp() == Timestamp::done() {
+            OutputEvent::Done
+        } else {
+            OutputEvent::TimestampBound(packet.timestamp())
+        }
+    }
+
+    /// Get the next output as a typed packet, timestamp-bound, or done event.
+    ///
+    /// Use a poller created by [`Graph::add_poller_with_timestamp_bounds`] to receive all three
+    /// variants. A normal poller only yields [`OutputEvent::Packet`] and ends with `None`.
+    pub fn next_event(&self) -> Option<OutputEvent> {
+        self.next().map(Self::classify_event)
+    }
+
+    /// Timed form of [`next_event`](Self::next_event).
+    pub fn next_event_timeout(&self, timeout: std::time::Duration) -> Result<Option<OutputEvent>> {
+        self.next_timeout(timeout)
+            .map(|packet| packet.map(Self::classify_event))
+    }
+
+    /// Non-blocking form of [`next_event`](Self::next_event).
+    pub fn try_next_event(&self) -> Option<OutputEvent> {
+        self.try_next().map(Self::classify_event)
+    }
+
     /// 取下一个包。等待期间会抽取并执行主线程任务。
     pub fn next(&self) -> Option<Packet> {
         self.next_deadline(None).ok().flatten()
