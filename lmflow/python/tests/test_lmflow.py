@@ -599,8 +599,7 @@ class TestNumpy(unittest.TestCase):
             g.wait_done(timeout=5.0)
 
     def test_non_contiguous_ndarray_roundtrip(self):
-        # 转置/步长切片/负步长的 numpy 视图都是非连续的 —— 拷进引擎必须按 strides 拷对,
-        # 否则静默数据损坏(曾经就是:只认倒数第二维的 stride,整行 memcpy)。
+        # 转置/步长切片/负步长视图保留原 data/strides,不打包复制。
         a = np.arange(12, dtype=np.int32).reshape(3, 4)
         cases = {
             "transpose": a.T,
@@ -614,7 +613,13 @@ class TestNumpy(unittest.TestCase):
                 g.start()
                 g.input("in").send(view, ts=0)
                 got = out.next(timeout=5.0).as_numpy()
-                self.assertTrue(np.array_equal(got, view), f"{name} non-contiguous array must be copied into the engine as-is")
+                self.assertTrue(np.array_equal(got, view), f"{name} values must be preserved")
+                self.assertEqual(
+                    got.__array_interface__["data"][0],
+                    view.__array_interface__["data"][0],
+                    f"{name} must retain the original data pointer",
+                )
+                self.assertEqual(got.strides, view.strides, f"{name} strides must be preserved")
                 g.close_all_inputs()
                 g.wait_done(timeout=5.0)
 
@@ -660,22 +665,108 @@ output_ports: [out]
             g.close_all_inputs()
             g.wait_done(timeout=5.0)
 
-    def test_send_ndarray_copies(self):
-        # send(ndarray) 会拷贝一份进引擎 —— 这是安全的默认;想省拷贝请用 new_buffer
+    def test_send_ndarray_adopts_zero_copy_and_restores_writeability(self):
         with graph(one_node("PassThroughKernel")) as g:
             out = g.add_poller("out")
             g.start()
             src = np.arange(6, dtype=np.int32).reshape(2, 3)
+            address = src.__array_interface__["data"][0]
             g.input("in").send(src, ts=0)
+            self.assertFalse(src.flags.writeable, "adopted ndarray must be frozen while retained")
+            with self.assertRaises(ValueError):
+                src[0, 0] = 99
             arr = out.next(timeout=5.0).as_numpy()
             self.assertEqual(arr.tolist(), src.tolist())
-            self.assertNotEqual(
+            self.assertEqual(
                 arr.__array_interface__["data"][0],
-                src.__array_interface__["data"][0],
-                "should be a copy; the engine must not hold the ndarray (otherwise the worker thread would need the GIL to free it)",
+                address,
+                "send(ndarray) must adopt the original allocation without copying",
             )
             g.close_all_inputs()
             g.wait_done(timeout=5.0)
+            del arr
+        self.assertTrue(src.flags.writeable, "final Packet release must restore writeability")
+
+    def test_from_numpy_preserves_original_readonly_state(self):
+        src = np.arange(4, dtype=np.uint8)
+        src.setflags(write=False)
+        packet = lmflow.Packet.from_numpy(src)
+        self.assertFalse(src.flags.writeable)
+        self.assertEqual(
+            packet.as_numpy().__array_interface__["data"][0],
+            src.__array_interface__["data"][0],
+        )
+        del packet
+        self.assertFalse(src.flags.writeable, "originally read-only arrays must stay read-only")
+
+    def test_numpy_adoption_cow_does_not_mutate_source(self):
+        with graph(one_node("TInvert")) as g:
+            out = g.add_poller("out")
+            g.start()
+            src = np.array([0, 1, 2, 3], dtype=np.uint8)
+            source_address = src.__array_interface__["data"][0]
+            g.input("in").send(src, ts=0)
+            arr = out.next(timeout=5.0).as_numpy()
+            self.assertEqual(arr.tolist(), [255, 254, 253, 252])
+            self.assertEqual(src.tolist(), [0, 1, 2, 3])
+            self.assertNotEqual(
+                arr.__array_interface__["data"][0],
+                source_address,
+                "writable access to Python-owned input must copy before mutation",
+            )
+            self.assertTrue(
+                src.flags.writeable,
+                "CoW releases the external owner once the engine copy replaces it",
+            )
+            g.close_all_inputs()
+            g.wait_done(timeout=5.0)
+
+    def test_numpy_owner_can_be_released_by_worker_thread(self):
+        with graph(
+            """
+nodes:
+  - { name: sink, kernel: SinkKernel, input_ports: [in] }
+input_ports: [in]
+"""
+        ) as g:
+            g.start()
+            src = np.arange(8, dtype=np.int16)
+            g.input("in").send(src, ts=0)
+            self.assertFalse(src.flags.writeable)
+            g.close_all_inputs()
+            g.wait_done(timeout=5.0)
+            self.assertTrue(
+                src.flags.writeable,
+                "worker-thread final release must reacquire the GIL and restore writeability",
+            )
+
+    def test_failed_send_releases_numpy_owner(self):
+        with graph(one_node("PassThroughKernel")) as g:
+            g.start()
+            inp = g.input("in")
+            g.close_all_inputs()
+            src = np.arange(4, dtype=np.uint8)
+            with self.assertRaises(RuntimeError):
+                inp.send(src, ts=0)
+            self.assertTrue(
+                src.flags.writeable,
+                "a rejected send still consumes the Packet and must release its ndarray owner",
+            )
+
+    def test_cancel_releases_queued_numpy_owner(self):
+        with graph(one_node("PassThroughKernel")) as g:
+            g.start()
+            g.pause()
+            src = np.arange(4, dtype=np.uint8)
+            g.input("in").send(src, ts=0)
+            self.assertFalse(src.flags.writeable)
+            g.cancel()
+            with self.assertRaises(RuntimeError):
+                g.wait_done(timeout=5.0)
+        self.assertTrue(
+            src.flags.writeable,
+            "graph destruction after cancellation must release and unfreeze queued ndarrays",
+        )
 
     def test_rejects_unsupported_dtype(self):
         with graph(one_node("PassThroughKernel")) as g:

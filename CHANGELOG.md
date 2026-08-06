@@ -12,6 +12,10 @@ to each GitHub Release.
 
 ### Added
 
+- Python `Packet.from_numpy()` and `send(ndarray)` now adopt NumPy storage without copying. The
+  array remains alive and read-only while retained by the graph; final release safely reacquires
+  the GIL, restores its original writeability, and copy-on-write protects Python-owned input.
+
 - `lmflow_packet_adopt_buffer` and `lmflow::Packet::AdoptBuffer` provide zero-copy ownership
   transfer for validated external CPU buffers. The last packet reference invokes a caller-provided
   release callback exactly once; read-only or shared adopted buffers copy only when made mutable.

@@ -125,6 +125,24 @@ py::array wrap_buffer(const LMFlowBuffer& b, const py::object& owner, bool writa
   return arr;
 }
 
+struct NumpyBufferOwner {
+  py::array array;
+  bool restore_writable;
+};
+
+void release_numpy_buffer(void* user_data) {
+  auto* owner = static_cast<NumpyBufferOwner*>(user_data);
+  py::gil_scoped_acquire gil;
+  if (owner->restore_writable) {
+    try {
+      owner->array.attr("setflags")(py::arg("write") = true);
+    } catch (py::error_already_set& error) {
+      error.discard_as_unraisable("lmflow: failed to restore adopted numpy array writability");
+    }
+  }
+  delete owner;
+}
+
 }  // namespace
 
 // 类名刻意不用 `Py*` 前缀:那是 CPython 的命名空间(例如 CPython 自己就有
@@ -234,10 +252,8 @@ class Packet {
     return new Packet(lmflow_packet_from_bytes(info.ptr, static_cast<size_t>(info.size), ts), true);
   }
 
-  /// 从 numpy 数组**拷贝**一份进引擎。
-  ///
-  /// 为什么必须拷贝:若直接持有 ndarray,引擎在工作线程上释放它时要抢 GIL,
-  /// 是死锁隐患。想避免这次拷贝就用 `new_buffer` 让引擎先分配、再就地写入。
+  /// 零拷贝接管 numpy 数组。Packet 存活期间将传入数组标记为只读；
+  /// 最后一个 Packet 引用释放时在 GIL 下恢复原 writeable 标志并归还 Python 引用。
   static Packet* from_numpy(const py::array& a, int64_t ts) {
     py::array arr = py::array::ensure(a);
     if (!arr) throw py::value_error("not a valid numpy array");
@@ -248,11 +264,27 @@ class Packet {
     b.data = const_cast<void*>(arr.data());
     b.ndim = static_cast<int32_t>(arr.ndim());
     b.dtype = dtype_from_numpy(arr.dtype());
+    b.flags = LMFLOW_BUF_FLAG_READONLY;
     for (py::ssize_t i = 0; i < arr.ndim(); ++i) {
       b.shape[i] = arr.shape(i);
       b.strides[i] = arr.strides(i);
     }
-    return new Packet(lmflow_packet_from_buffer(&b, ts), true);
+
+    auto owner = std::make_unique<NumpyBufferOwner>(
+        NumpyBufferOwner{arr, static_cast<bool>(arr.writeable())});
+    if (owner->restore_writable) {
+      arr.attr("setflags")(py::arg("write") = false);
+    }
+    LMFlowPacket raw =
+        lmflow_packet_adopt_buffer(&b, ts, &release_numpy_buffer, owner.get());
+    if (!raw.payload) {
+      if (owner->restore_writable) {
+        arr.attr("setflags")(py::arg("write") = true);
+      }
+      throw std::runtime_error(std::string("from_numpy failed: ") + lmflow_last_error());
+    }
+    owner.release();
+    return new Packet(raw, true);
   }
 
  private:
@@ -915,7 +947,8 @@ PYBIND11_MODULE(_lmflow, m) {
                   py::arg("ts") = LMFLOW_TS_UNSET, "Make a packet from bytes.")
       .def_static("from_numpy", &Packet::from_numpy, py::arg("array"),
                   py::arg("ts") = LMFLOW_TS_UNSET,
-                  "Copy a numpy array into the engine; to skip this copy use new_buffer");
+                  "Adopt a numpy array without copying; it stays read-only until the final packet "
+                  "reference is released");
 
   py::class_<Contract>(
       m, "Contract",
