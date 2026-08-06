@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Instant;
 
-use crate::config::{GraphConfig, StatsLevel};
+use crate::config::{GraphConfig, GraphPlan, StatsLevel};
 use crate::context::{Context, Options};
 use crate::executor::{DelegatingExecutor, Executor, ThreadPool, DEFAULT_EXECUTOR_NAME};
 use crate::kernel::{Contract, KernelInstance, PortTable};
@@ -32,6 +32,8 @@ use super::{
 
 impl GraphInner {
     pub(super) fn build(cfg: GraphConfig) -> Result<Self> {
+        let plan = GraphPlan::build(cfg)?;
+        let cfg = plan.config;
         let configured_stats = cfg.stats.unwrap_or_else(|| {
             cfg.stats_timing.map_or(StatsLevel::Basic, |enabled| {
                 if enabled {
@@ -42,112 +44,28 @@ impl GraphInner {
             })
         });
         let stats_level = cfg.effective_stats_level();
-        let mut edges: Vec<Edge> = Vec::new();
-        let mut edge_by_name: BTreeMap<String, EdgeId> = BTreeMap::new();
-
-        let mut get_or_create = |name: &str, edges: &mut Vec<Edge>| -> EdgeId {
-            if let Some(&id) = edge_by_name.get(name) {
-                return id;
-            }
-            let id = edges.len();
-            edges.push(Edge::new(name.to_string()));
-            edge_by_name.insert(name.to_string(), id);
-            id
-        };
-
-        // ---- 图输入口 ----
-        let mut graph_inputs = Vec::new();
-        let mut input_by_name = BTreeMap::new();
-        for (input_index, decl) in cfg.input_ports.iter().enumerate() {
-            let spec = crate::config::parse_port_spec(decl)
-                .map_err(|error| error.context(format!("input_ports[{input_index}]")))?;
-            if input_by_name.contains_key(&spec.name) {
-                return Err(Error::InvalidArg(format!(
-                    "graph input port `{}` declared more than once",
-                    spec.name
-                )));
-            }
-            let id = get_or_create(&spec.name, &mut edges);
-            edges[id].is_graph_input = true;
-            graph_inputs.push(id);
-            input_by_name.insert(spec.name, id);
-        }
-
-        // ---- 节点的输出口:确定生产者(校验 2、3)----
-        let mut node_port_tables: Vec<(Arc<PortTable>, Arc<PortTable>)> = Vec::new();
-        for (idx, n) in cfg.nodes.iter().enumerate() {
-            let who = node_label(n, idx);
-            let ins = Arc::new(
-                PortTable::build(&n.input_ports, &format!("node `{who}` input ports"))
-                    .map_err(|error| error.context(format!("nodes[{idx}].input_ports")))?,
-            );
-            let outs = Arc::new(
-                PortTable::build(&n.output_ports, &format!("node `{who}` output ports"))
-                    .map_err(|error| error.context(format!("nodes[{idx}].output_ports")))?,
-            );
-            for name in outs.names() {
-                let id = get_or_create(name, &mut edges);
-                if edges[id].is_graph_input {
-                    return Err(Error::InvalidArg(format!(
-                        "nodes[{idx}].output_ports (node `{who}`): port name `{name}` is also a graph input port -- name conflict"
-                    )));
-                }
-                if let Some(prev) = edges[id].producer {
-                    return Err(Error::InvalidArg(format!(
-                        "nodes[{idx}].output_ports (node `{who}`): port `{name}` has multiple producers; first produced by nodes[{prev}] (node `{}`)",
-                        node_label(&cfg.nodes[prev], prev),
-                    )));
-                }
-                edges[id].producer = Some(idx);
-            }
-            node_port_tables.push((ins, outs));
-        }
-
-        // ---- 节点的输入口:连接消费者(校验 1)----
-        for (idx, n) in cfg.nodes.iter().enumerate() {
-            let who = node_label(n, idx);
-            let ins = node_port_tables[idx].0.clone();
-            // 0 输入 = 源节点(生成型算子):内核自产,无需连消费边。执行器必需性在
-            // config.check_supported 校验;源的输出边已在生产者环节连好。
-            for (port, name) in ins.names().iter().enumerate() {
-                let id = *edge_by_name.get(name).ok_or_else(|| {
-                    let suggestion = crate::diagnostic::did_you_mean(
-                        name,
-                        edge_by_name.keys().map(String::as_str),
-                    );
-                    Error::InvalidArg(format!(
-                        "nodes[{idx}].input_ports[{port}] (node `{who}`): input port `{name}` has no producer{suggestion}; it is neither a graph input nor produced by any node"
-                    ))
-                })?;
-                if edges[id].producer.is_none() && !edges[id].is_graph_input {
-                    return Err(Error::InvalidArg(format!(
-                        "nodes[{idx}].input_ports[{port}] (node `{who}`): port `{name}` has no producer"
-                    )));
-                }
-                edges[id].consumers.push((idx, port));
-            }
-        }
-
-        // ---- 图输出口 ----
-        let mut graph_outputs = Vec::new();
-        let mut output_by_name = BTreeMap::new();
-        for (output_index, decl) in cfg.output_ports.iter().enumerate() {
-            let spec = crate::config::parse_port_spec(decl)
-                .map_err(|error| error.context(format!("output_ports[{output_index}]")))?;
-            let id = *edge_by_name.get(&spec.name).ok_or_else(|| {
-                let suggestion = crate::diagnostic::did_you_mean(
-                    &spec.name,
-                    edge_by_name.keys().map(String::as_str),
-                );
-                Error::InvalidArg(format!(
-                    "output_ports[{output_index}]: graph output port `{}` has no producer{suggestion}",
-                    spec.name,
-                ))
-            })?;
-            edges[id].is_graph_output = true;
-            graph_outputs.push(id);
-            output_by_name.insert(spec.name, id);
-        }
+        let edges: Vec<Edge> = plan
+            .edges
+            .iter()
+            .map(|planned| {
+                let mut edge = Edge::new(planned.name.clone());
+                edge.is_graph_input = planned.graph_input;
+                edge.is_graph_output = planned.graph_output;
+                edge.producer = planned.producer;
+                edge.consumers = planned.consumer_ports.clone();
+                edge
+            })
+            .collect();
+        let edge_by_name: BTreeMap<String, EdgeId> = plan.edge_by_name.clone();
+        let graph_inputs = plan.graph_inputs.clone();
+        let graph_outputs = plan.graph_outputs.clone();
+        let input_by_name = plan.input_by_name.clone();
+        let output_by_name = plan.output_by_name.clone();
+        let node_port_tables: Vec<(Arc<PortTable>, Arc<PortTable>)> = plan
+            .nodes
+            .iter()
+            .map(|node| (node.input_ports.clone(), node.output_ports.clone()))
+            .collect();
 
         // ---- 无人消费的端口:静默丢包是最难查的故障,至少要出声 ----
         for e in &edges {
@@ -170,24 +88,9 @@ impl GraphInner {
 
         // 每节点每输入口是否为 back-edge(按口名匹配 config.back_edges)。反馈寄存器口不参与
         // 拓扑成环判定 / 就绪 / 终止 / 对齐。
-        let back_edge_mask: Vec<Vec<bool>> = cfg
-            .nodes
-            .iter()
-            .enumerate()
-            .map(|(idx, nc)| {
-                node_port_tables[idx]
-                    .0
-                    .names()
-                    .iter()
-                    .map(|name| nc.back_edges.contains(name))
-                    .collect()
-            })
-            .collect();
+        let back_edge_mask = plan.back_edge_mask.clone();
 
-        // ---- 校验 4:成环(back-edge 打断的环放行)----
-        check_acyclic(&cfg, &edges, &back_edge_mask)?;
-
-        // ---- 校验 5 + 建执行器 ----
+        // ---- 按计划创建执行器 ----
         //
         // `executors` 里写的**一律是宿主自己的执行器**,必须有名字 —— 节点靠名字引用它。
         // 默认执行器则完全由引擎持有:按 CPU 核数开的线程池,恒在下标 0,YAML 无从干涉。
@@ -196,42 +99,10 @@ impl GraphInner {
         // 其它执行器完全同构 —— 有名字、可索引、可提交任务,派任务时无需为它开特例。
         let mut executors: Vec<Executor> = vec![Executor::Pool(default_thread_pool(stats_level))];
         for (executor_index, e) in cfg.executors.iter().enumerate() {
-            if e.name.is_empty() {
-                return Err(Error::InvalidArg(format!(
-                    "executors[{executor_index}].name: executor entry must have a name; nodes select an executor by it"
-                )));
-            }
-            if e.name == DEFAULT_EXECUTOR_NAME {
-                return Err(Error::InvalidArg(format!(
-                    "executors[{executor_index}].name: executor name `{DEFAULT_EXECUTOR_NAME}` is reserved for the engine's implicit \
-                     default executor (where nodes without an `executor` run) and cannot be declared. \
-                     Pick another name; to control threads / affinity / priority, declare your own \
-                     pool and point the nodes at it with `executor:`"
-                )));
-            }
-            if executors.iter().any(|p| p.name() == e.name) {
-                return Err(Error::InvalidArg(format!(
-                    "executors[{executor_index}].name: executor `{}` defined more than once",
-                    e.name
-                )));
-            }
             executors.push(
                 build_executor(&e.name, e, stats_level)
                     .map_err(|error| error.context(format!("executors[{executor_index}]")))?,
             );
-        }
-        let known: Vec<&str> = executors.iter().map(|p| p.name()).collect();
-        for (idx, n) in cfg.nodes.iter().enumerate() {
-            if !known.contains(&exec_name(&n.executor)) {
-                let suggestion =
-                    crate::diagnostic::did_you_mean(&n.executor, known.iter().copied());
-                return Err(Error::InvalidArg(format!(
-                    "nodes[{idx}].executor (node `{}`): undefined executor `{}`{suggestion} (defined: [{}])",
-                    node_label(n, idx),
-                    n.executor,
-                    known.join(", ")
-                )));
-            }
         }
         // 定义了却没人用的池只会白占线程,出声提醒。默认执行器豁免:它是引擎建的,
         // 宿主根本没声明过它,没人用不是宿主的错。
@@ -239,7 +110,7 @@ impl GraphInner {
             if p.name() == DEFAULT_EXECUTOR_NAME || p.is_delegating() {
                 continue;
             }
-            if !cfg.nodes.iter().any(|n| exec_name(&n.executor) == p.name()) {
+            if !plan.nodes.iter().any(|node| node.executor == p.name()) {
                 runtime::log_warn(&format!(
                     "executor `{}` is defined but not used by any node ({} threads will idle)",
                     p.name(),
@@ -247,9 +118,6 @@ impl GraphInner {
                 ));
             }
         }
-        // ---- 校验 5b:节点与执行器的匹配(需要执行器已建好才判得了)----
-        check_node_executor_fit(&cfg, &executors)?;
-
         // ---- 收集契约 + 静态类型检查 ----
         //
         // 所有节点的端口表此时都已确定,先一次性询问契约,才能沿每条边同时看到
@@ -298,8 +166,9 @@ impl GraphInner {
             let name = node_label(n, idx);
             let (ins, outs) = node_port_tables[idx].clone();
 
-            let input_edges: Vec<EdgeId> = ins.names().iter().map(|x| edge_by_name[x]).collect();
-            let output_edges: Vec<EdgeId> = outs.names().iter().map(|x| edge_by_name[x]).collect();
+            let planned = &plan.nodes[idx];
+            let input_edges = planned.input_edges.clone();
+            let output_edges = planned.output_edges.clone();
 
             // 0 视作 1。max_in_flight 个并行调用各需一个 context 槽。
             let mif = n.max_in_flight.max(1);
@@ -319,10 +188,7 @@ impl GraphInner {
                 (0..mif).map(|_| UnsafeCell::new(make_ctx())).collect();
 
             // 上面已校验过名字存在(节点侧留空归一化到默认执行器),故必有下标。
-            let executor = executors
-                .iter()
-                .position(|p| p.name() == exec_name(&n.executor))
-                .expect("executor name was validated above");
+            let executor = planned.executor_index;
 
             nodes.push(Node {
                 name,
@@ -426,18 +292,6 @@ impl GraphInner {
     }
 }
 
-/// 节点 `executor` 字段的归一化:空 = 引擎隐式的默认执行器。
-///
-/// 只作用于**节点侧**的引用 —— `executors` 条目必须有名字,且不得叫 `default`
-/// (那个名字是引擎保留的,见 `DEFAULT_EXECUTOR_NAME`)。
-fn exec_name(n: &str) -> &str {
-    if n.is_empty() {
-        DEFAULT_EXECUTOR_NAME
-    } else {
-        n
-    }
-}
-
 /// 引擎隐式的默认执行器:按 CPU 核数开线程的线程池。
 ///
 /// 不绑核、不设实时优先级,也不可配 —— 那些是场景相关的调优,宿主想控制就自己声明一个
@@ -484,46 +338,6 @@ fn build_executor(
         e.priority,
         stats_level,
     )))
-}
-
-/// 节点与它所属执行器是否匹配。**必须在执行器建好之后**判 —— 这两条规则问的都是
-/// 「解析出来的执行器长什么样」,光看 YAML 里的名字答不上来。
-fn check_node_executor_fit(cfg: &GraphConfig, executors: &[Executor]) -> Result<()> {
-    for (idx, n) in cfg.nodes.iter().enumerate() {
-        let who = node_label(n, idx);
-        let ei = executors
-            .iter()
-            .position(|p| p.name() == exec_name(&n.executor))
-            .expect("executor name was validated above");
-        let ex = &executors[ei];
-
-        // max_in_flight > 1 只有落在多线程池上才真有并行度。委托执行器(0 线程)
-        // 与单线程池都恒为 1,宁可报错也不让宿主误以为开了并行。
-        if n.max_in_flight > 1 && ex.num_threads() < 2 {
-            return Err(Error::InvalidArg(format!(
-                "nodes[{idx}].max_in_flight (node `{who}`): max_in_flight={} needs an executor with more than one thread, \
-                 but `{}` provides {} -- there would be no parallelism",
-                n.max_in_flight,
-                ex.name(),
-                ex.num_threads()
-            )));
-        }
-
-        if n.input_ports.is_empty() {
-            // 源节点跑在委托执行器上会独占宿主线程、拖垮全图 —— 宿主还得回来
-            // 抽取别的委托任务,而它正卡在源的 process 里。
-            if ex.is_delegating() {
-                return Err(Error::InvalidArg(format!(
-                    "nodes[{idx}].executor (node `{who}`): a source node (no input ports) cannot run on the delegating \
-                     executor `{}` -- its process typically blocks waiting for the next item, \
-                     which would monopolise the host thread and stall the whole graph. \
-                     Give it a ThreadPoolExecutor",
-                    ex.name()
-                )));
-            }
-        }
-    }
-    Ok(())
 }
 
 fn validate_contract(path: &str, name: &str, contract: &Contract) -> Result<()> {
@@ -624,63 +438,4 @@ fn node_label(n: &crate::config::NodeConfig, idx: usize) -> String {
     } else {
         n.name.clone()
     }
-}
-
-/// 拓扑成环检测。back-edge(反馈寄存器口)标记的消费边**不算进拓扑** —— 它正是用来打断环的;
-/// 未被 back-edge 打断的环仍报错(会死锁/无法终止)。`back_edge_mask[node][port]` = 该口是否 back-edge。
-fn check_acyclic(cfg: &GraphConfig, edges: &[Edge], back_edge_mask: &[Vec<bool>]) -> Result<()> {
-    let n = cfg.nodes.len();
-    // 邻接:生产者 → 消费者
-    let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n];
-    for e in edges {
-        if let Some(p) = e.producer {
-            for &(c, port) in &e.consumers {
-                if back_edge_mask[c][port] {
-                    continue; // back-edge:反馈方向不计入拓扑,故不成环
-                }
-                adj[p].push(c);
-            }
-        }
-    }
-
-    /// 0 = 未访问, 1 = 在当前 DFS 栈上, 2 = 已完成
-    const UNVISITED: u8 = 0;
-    const ON_STACK: u8 = 1;
-    const DONE: u8 = 2;
-
-    let mut mark = vec![UNVISITED; n];
-    // 显式栈而非递归:深图不应爆栈
-    let mut stack: Vec<(usize, usize)> = Vec::new();
-
-    for start in 0..n {
-        if mark[start] != UNVISITED {
-            continue;
-        }
-        mark[start] = ON_STACK;
-        stack.push((start, 0));
-        while let Some(&mut (node, ref mut cursor)) = stack.last_mut() {
-            if *cursor < adj[node].len() {
-                let next = adj[node][*cursor];
-                *cursor += 1;
-                match mark[next] {
-                    ON_STACK => {
-                        return Err(Error::InvalidArg(format!(
-                            "topology cycle: node `{}` -> ... -> `{}` -- break it by marking a feedback input with `back_edges` (an unbroken cycle would never terminate)",
-                            node_label(&cfg.nodes[next], next),
-                            node_label(&cfg.nodes[node], node)
-                        )));
-                    }
-                    UNVISITED => {
-                        mark[next] = ON_STACK;
-                        stack.push((next, 0));
-                    }
-                    _ => {}
-                }
-            } else {
-                mark[node] = DONE;
-                stack.pop();
-            }
-        }
-    }
-    Ok(())
 }

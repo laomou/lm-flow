@@ -5,7 +5,9 @@
 
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
+use crate::kernel::PortTable;
 use crate::status::{Error, Result};
 
 fn default_max_queue_size() -> usize {
@@ -263,93 +265,16 @@ impl GraphConfig {
     /// Use it for deployment-time checks where the host may not have linked its kernels yet.
     pub fn preflight_from_yaml(text: &str) -> Result<Self> {
         let config = Self::from_yaml(text)?;
-        config.validate_preflight()?;
-        Ok(config)
+        Ok(GraphPlan::build(config)?.config)
     }
 
     /// File equivalent of [`Self::preflight_from_yaml`].
     pub fn preflight_from_yaml_file(path: &str) -> Result<Self> {
         let config = Self::from_yaml_file(path)?;
-        config.validate_preflight()?;
-        Ok(config)
+        Ok(GraphPlan::build(config)?.config)
     }
 
     fn validate_preflight(&self) -> Result<()> {
-        let mut known_edges = BTreeSet::new();
-        let mut producers = BTreeMap::new();
-        for (index, declaration) in self.input_ports.iter().enumerate() {
-            let spec = parse_port_spec(declaration)
-                .map_err(|error| error.context(format!("input_ports[{index}]")))?;
-            if !known_edges.insert(spec.name.clone()) {
-                return Err(Error::InvalidArg(format!(
-                    "input_ports[{index}]: graph input port `{}` is declared more than once",
-                    spec.name
-                )));
-            }
-        }
-        let mut node_inputs = Vec::with_capacity(self.nodes.len());
-        for (index, node) in self.nodes.iter().enumerate() {
-            let inputs = crate::kernel::PortTable::build(
-                &node.input_ports,
-                &format!("nodes[{index}].input_ports"),
-            )
-            .map_err(|error| error.context(format!("nodes[{index}].input_ports")))?;
-            let outputs = crate::kernel::PortTable::build(
-                &node.output_ports,
-                &format!("nodes[{index}].output_ports"),
-            )
-            .map_err(|error| error.context(format!("nodes[{index}].output_ports")))?;
-            for name in outputs.names() {
-                if self.input_ports.iter().any(|decl| {
-                    parse_port_spec(decl)
-                        .map(|spec| spec.name == *name)
-                        .unwrap_or(false)
-                }) {
-                    return Err(Error::InvalidArg(format!(
-                        "nodes[{index}].output_ports: port `{name}` is also a graph input"
-                    )));
-                }
-                if let Some(previous) = producers.insert(name.clone(), index) {
-                    return Err(Error::InvalidArg(format!(
-                        "nodes[{index}].output_ports: port `{name}` has multiple producers \
-                         (nodes[{previous}] and nodes[{index}])"
-                    )));
-                }
-                known_edges.insert(name.clone());
-            }
-            node_inputs.push(inputs);
-        }
-        let graph_inputs: BTreeSet<String> = self
-            .input_ports
-            .iter()
-            .map(|decl| parse_port_spec(decl).map(|spec| spec.name))
-            .collect::<Result<_>>()?;
-        let mut adjacency = vec![Vec::new(); self.nodes.len()];
-        for (index, inputs) in node_inputs.iter().enumerate() {
-            for (port, name) in inputs.names().iter().enumerate() {
-                if !graph_inputs.contains(name) && !producers.contains_key(name) {
-                    return Err(Error::InvalidArg(format!(
-                        "nodes[{index}].input_ports[{port}]: port `{name}` has no producer"
-                    )));
-                }
-                if let Some(&producer) = producers.get(name) {
-                    if !self.nodes[index].back_edges.iter().any(|edge| edge == name) {
-                        adjacency[producer].push(index);
-                    }
-                }
-            }
-        }
-        for (index, declaration) in self.output_ports.iter().enumerate() {
-            let spec = parse_port_spec(declaration)
-                .map_err(|error| error.context(format!("output_ports[{index}]")))?;
-            if !known_edges.contains(&spec.name) {
-                return Err(Error::InvalidArg(format!(
-                    "output_ports[{index}]: graph output `{}` has no producer",
-                    spec.name
-                )));
-            }
-        }
-        check_preflight_acyclic(&adjacency, self)?;
         validate_preflight_executors(self)?;
         Ok(())
     }
@@ -581,6 +506,250 @@ impl GraphConfig {
     }
 }
 
+/// 展开并完成配置语义校验后的不可变建图计划。
+///
+/// 计划阶段不查询 kernel registry、不创建 executor、不启动线程；运行时建图和
+/// `lmflow check-config` 都消费同一个计划，避免“预检通过但实际建图失败”的两套规则。
+#[derive(Debug, Clone)]
+pub struct GraphPlan {
+    pub config: GraphConfig,
+    pub nodes: Vec<GraphPlanNode>,
+    pub edges: Vec<GraphPlanEdge>,
+    pub(crate) graph_inputs: Vec<usize>,
+    pub(crate) graph_outputs: Vec<usize>,
+    pub(crate) input_by_name: BTreeMap<String, usize>,
+    pub(crate) output_by_name: BTreeMap<String, usize>,
+    pub(crate) edge_by_name: BTreeMap<String, usize>,
+    pub(crate) back_edge_mask: Vec<Vec<bool>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct GraphPlanNode {
+    pub index: usize,
+    pub name: String,
+    pub kernel: String,
+    pub executor: String,
+    pub inputs: Vec<String>,
+    pub outputs: Vec<String>,
+    pub(crate) input_ports: Arc<PortTable>,
+    pub(crate) output_ports: Arc<PortTable>,
+    pub(crate) input_edges: Vec<usize>,
+    pub(crate) output_edges: Vec<usize>,
+    pub(crate) executor_index: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct GraphPlanEdge {
+    pub name: String,
+    pub producer: Option<usize>,
+    pub consumers: Vec<usize>,
+    pub graph_input: bool,
+    pub graph_output: bool,
+    pub(crate) consumer_ports: Vec<(usize, usize)>,
+}
+
+impl GraphPlan {
+    pub fn build(config: GraphConfig) -> Result<Self> {
+        config.validate_preflight()?;
+        let mut known_edges = BTreeSet::new();
+        let mut producers = BTreeMap::new();
+        let mut graph_input_names = BTreeSet::new();
+        for (index, declaration) in config.input_ports.iter().enumerate() {
+            let spec = parse_port_spec(declaration)
+                .map_err(|error| error.context(format!("input_ports[{index}]")))?;
+            if !known_edges.insert(spec.name.clone()) {
+                return Err(Error::InvalidArg(format!(
+                    "input_ports[{index}]: graph input port `{}` is declared more than once",
+                    spec.name
+                )));
+            }
+            graph_input_names.insert(spec.name);
+        }
+        let mut port_tables = Vec::with_capacity(config.nodes.len());
+        for (index, node) in config.nodes.iter().enumerate() {
+            let inputs = Arc::new(
+                PortTable::build(&node.input_ports, &format!("nodes[{index}].input_ports"))
+                    .map_err(|error| error.context(format!("nodes[{index}].input_ports")))?,
+            );
+            let outputs = Arc::new(
+                PortTable::build(&node.output_ports, &format!("nodes[{index}].output_ports"))
+                    .map_err(|error| error.context(format!("nodes[{index}].output_ports")))?,
+            );
+            for name in outputs.names() {
+                if graph_input_names.contains(name) {
+                    return Err(Error::InvalidArg(format!(
+                        "nodes[{index}].output_ports: port `{name}` is also a graph input"
+                    )));
+                }
+                if let Some(previous) = producers.insert(name.clone(), index) {
+                    return Err(Error::InvalidArg(format!(
+                        "nodes[{index}].output_ports: port `{name}` has multiple producers \
+                         (nodes[{previous}] and nodes[{index}])"
+                    )));
+                }
+                known_edges.insert(name.clone());
+            }
+            port_tables.push((inputs, outputs));
+        }
+        let mut adjacency = vec![Vec::new(); config.nodes.len()];
+        for (index, (inputs, _)) in port_tables.iter().enumerate() {
+            for (port, name) in inputs.names().iter().enumerate() {
+                if !graph_input_names.contains(name) && !producers.contains_key(name) {
+                    let suggestion = crate::diagnostic::did_you_mean(
+                        name,
+                        known_edges.iter().map(String::as_str),
+                    );
+                    return Err(Error::InvalidArg(format!(
+                        "nodes[{index}].input_ports[{port}]: port `{name}` has no producer{suggestion}"
+                    )));
+                }
+                if let Some(&producer) = producers.get(name) {
+                    if !config.nodes[index]
+                        .back_edges
+                        .iter()
+                        .any(|edge| edge == name)
+                    {
+                        adjacency[producer].push(index);
+                    }
+                }
+            }
+        }
+        for (index, declaration) in config.output_ports.iter().enumerate() {
+            let spec = parse_port_spec(declaration)
+                .map_err(|error| error.context(format!("output_ports[{index}]")))?;
+            if !known_edges.contains(&spec.name) {
+                let suggestion = crate::diagnostic::did_you_mean(
+                    &spec.name,
+                    known_edges.iter().map(String::as_str),
+                );
+                return Err(Error::InvalidArg(format!(
+                    "output_ports[{index}]: graph output `{}` has no producer{suggestion}",
+                    spec.name,
+                )));
+            }
+        }
+        check_preflight_acyclic(&adjacency, &config)?;
+        let mut edges = Vec::<GraphPlanEdge>::new();
+        let mut edge_by_name = BTreeMap::<String, usize>::new();
+
+        let mut graph_inputs = Vec::new();
+        let mut input_by_name = BTreeMap::new();
+        for declaration in &config.input_ports {
+            let name = parse_port_spec(declaration)?.name;
+            let edge = plan_edge(&name, &mut edges, &mut edge_by_name);
+            edges[edge].graph_input = true;
+            graph_inputs.push(edge);
+            input_by_name.insert(name, edge);
+        }
+
+        let executor_index_by_name: BTreeMap<&str, usize> = std::iter::once(("default", 0))
+            .chain(
+                config
+                    .executors
+                    .iter()
+                    .enumerate()
+                    .map(|(index, executor)| (executor.name.as_str(), index + 1)),
+            )
+            .collect();
+
+        let mut nodes = Vec::with_capacity(config.nodes.len());
+        for (index, node) in config.nodes.iter().enumerate() {
+            let (input_ports, output_ports) = port_tables[index].clone();
+            let inputs = input_ports.names().to_vec();
+            let outputs = output_ports.names().to_vec();
+            let mut output_edges = Vec::with_capacity(outputs.len());
+            for name in &outputs {
+                let edge = plan_edge(name, &mut edges, &mut edge_by_name);
+                edges[edge].producer = Some(index);
+                output_edges.push(edge);
+            }
+            let mut input_edges = Vec::with_capacity(inputs.len());
+            for (port, name) in inputs.iter().enumerate() {
+                let edge = edge_by_name[name];
+                edges[edge].consumers.push(index);
+                edges[edge].consumer_ports.push((index, port));
+                input_edges.push(edge);
+            }
+            let executor = if node.executor.is_empty() {
+                "default"
+            } else {
+                node.executor.as_str()
+            };
+            nodes.push(GraphPlanNode {
+                index,
+                name: if node.name.is_empty() {
+                    format!("{}#{index}", node.kernel)
+                } else {
+                    node.name.clone()
+                },
+                kernel: node.kernel.clone(),
+                executor: executor.into(),
+                inputs,
+                outputs,
+                input_ports,
+                output_ports,
+                input_edges,
+                output_edges,
+                executor_index: executor_index_by_name[executor],
+            });
+        }
+
+        let mut graph_outputs = Vec::new();
+        let mut output_by_name = BTreeMap::new();
+        for declaration in &config.output_ports {
+            let name = parse_port_spec(declaration)?.name;
+            let edge = edge_by_name[&name];
+            edges[edge].graph_output = true;
+            graph_outputs.push(edge);
+            output_by_name.insert(name, edge);
+        }
+        let back_edge_mask = config
+            .nodes
+            .iter()
+            .zip(&nodes)
+            .map(|(node, planned)| {
+                planned
+                    .inputs
+                    .iter()
+                    .map(|name| node.back_edges.contains(name))
+                    .collect()
+            })
+            .collect();
+        Ok(Self {
+            config,
+            nodes,
+            edges,
+            graph_inputs,
+            graph_outputs,
+            input_by_name,
+            output_by_name,
+            edge_by_name,
+            back_edge_mask,
+        })
+    }
+}
+
+fn plan_edge(
+    name: &str,
+    edges: &mut Vec<GraphPlanEdge>,
+    edge_by_name: &mut BTreeMap<String, usize>,
+) -> usize {
+    if let Some(&index) = edge_by_name.get(name) {
+        return index;
+    }
+    let index = edges.len();
+    edges.push(GraphPlanEdge {
+        name: name.to_string(),
+        producer: None,
+        consumers: Vec::new(),
+        graph_input: false,
+        graph_output: false,
+        consumer_ports: Vec::new(),
+    });
+    edge_by_name.insert(name.to_string(), index);
+    index
+}
+
 impl StatsLevel {
     pub(crate) fn as_str(self) -> &'static str {
         match self {
@@ -596,7 +765,7 @@ fn validate_preflight_executors(config: &GraphConfig) -> Result<()> {
     for (index, executor) in config.executors.iter().enumerate() {
         if executor.name.is_empty() {
             return Err(Error::InvalidArg(format!(
-                "executors[{index}].name: executor name must not be empty"
+                "executors[{index}].name: executor entry must have a name; nodes select an executor by it"
             )));
         }
         if executor.name == "default" {
@@ -606,7 +775,7 @@ fn validate_preflight_executors(config: &GraphConfig) -> Result<()> {
         }
         if !names.insert(&executor.name) {
             return Err(Error::InvalidArg(format!(
-                "executors[{index}].name: executor `{}` is declared more than once",
+                "executors[{index}].name: executor `{}` defined more than once",
                 executor.name
             )));
         }
@@ -625,15 +794,21 @@ fn validate_preflight_executors(config: &GraphConfig) -> Result<()> {
                 || executor.priority != 0)
         {
             return Err(Error::InvalidArg(format!(
-                "executors[{index}]: DelegatingExecutor cannot configure worker threads, affinity, or priority"
+                "executors[{index}]: DelegatingExecutor owns no threads, so `num_threads`, \
+                 `affinity`, and `priority` are meaningless; drop those fields or use \
+                 type: \"ThreadPoolExecutor\""
             )));
         }
     }
     for (index, node) in config.nodes.iter().enumerate() {
         if !node.executor.is_empty() && !names.contains(&node.executor) {
+            let suggestion = crate::diagnostic::did_you_mean(
+                &node.executor,
+                names.iter().map(|name| name.as_str()),
+            );
             return Err(Error::InvalidArg(format!(
-                "nodes[{index}].executor: undefined executor `{}`",
-                node.executor
+                "nodes[{index}].executor: undefined executor `{}`{suggestion}",
+                node.executor,
             )));
         }
         if node.max_in_flight > 1 {
@@ -651,8 +826,9 @@ fn validate_preflight_executors(config: &GraphConfig) -> Result<()> {
             };
             if threads < 2 {
                 return Err(Error::InvalidArg(format!(
-                    "nodes[{index}].max_in_flight: value {} requires an executor with at least two threads",
-                    node.max_in_flight
+                    "nodes[{index}].max_in_flight={} needs an executor with more than one thread, \
+                     but the selected executor provides {} -- there would be no parallelism",
+                    node.max_in_flight, threads
                 )));
             }
         }

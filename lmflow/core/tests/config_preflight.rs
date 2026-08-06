@@ -1,4 +1,4 @@
-use lmflow::config::GraphConfig;
+use lmflow::config::{GraphConfig, GraphPlan};
 
 #[test]
 fn preflight_does_not_require_kernel_registration() {
@@ -90,4 +90,25 @@ input_ports: [left, right]
     )
     .unwrap_err();
     assert!(policy_error.to_string().contains("right"), "{policy_error}");
+}
+
+#[test]
+fn graph_plan_matches_runtime_topology_shape() {
+    let config = GraphConfig::from_yaml(
+        r#"
+nodes:
+  - { name: first, kernel: NotLinkedYet, input_ports: [in], output_ports: [mid] }
+  - { name: second, kernel: NotLinkedYet, input_ports: [mid], output_ports: [out] }
+input_ports: [in]
+output_ports: [out]
+"#,
+    )
+    .unwrap();
+    let plan = GraphPlan::build(config).unwrap();
+    assert_eq!(plan.nodes.len(), 2);
+    assert_eq!(plan.edges.len(), 3);
+    let mid = plan.edges.iter().find(|edge| edge.name == "mid").unwrap();
+    assert_eq!(mid.producer, Some(0));
+    assert_eq!(mid.consumers, vec![1]);
+    assert_eq!(plan.nodes[1].inputs, vec!["mid"]);
 }
