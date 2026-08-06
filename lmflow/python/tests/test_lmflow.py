@@ -101,6 +101,26 @@ class TNeedsSidePacket(lmflow.Kernel):
         cc.forward(0, 0)
 
 
+@lmflow.kernel("TBadContract")
+class TBadContract(lmflow.Kernel):
+    @staticmethod
+    def get_contract(c):
+        raise ValueError("python contract marker")
+
+    def process(self, cc):
+        cc.forward(0, 0)
+
+
+@lmflow.kernel("TBadContractIndex")
+class TBadContractIndex(lmflow.Kernel):
+    @staticmethod
+    def get_contract(c):
+        c.input_set_any(1)
+
+    def process(self, cc):
+        cc.forward(0, 0)
+
+
 @lmflow.kernel("TCollect")
 class TCollect(lmflow.Kernel):
     """有状态 + 用计数器汇报,兼测 close_reason。"""
@@ -863,6 +883,16 @@ class TestErrors(unittest.TestCase):
             with self.assertRaises(Exception) as ctx:
                 g.start()
             self.assertIn("model", str(ctx.exception))
+
+    def test_get_contract_exception_fails_graph_build(self):
+        with self.assertRaises(ValueError) as ctx:
+            graph(one_node("TBadContract"))
+        self.assertIn("python contract marker", str(ctx.exception))
+
+    def test_get_contract_index_error_fails_graph_build(self):
+        with self.assertRaises(ValueError) as ctx:
+            graph(one_node("TBadContractIndex"))
+        self.assertIn("index 1 is out of range", str(ctx.exception))
 
     def test_side_packet_satisfies_requirement(self):
         with graph(one_node("TNeedsSidePacket")) as g:

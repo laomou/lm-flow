@@ -57,11 +57,105 @@ impl Kernel for LiesAboutOutput {
     }
 }
 
+#[derive(Default)]
+struct ContractIndexOutOfRange;
+impl Kernel for ContractIndexOutOfRange {
+    fn get_contract(c: &mut KernelContract) {
+        c.input_type(1, type_id::I64);
+    }
+
+    fn process(&mut self, _cc: &mut KernelCtx) -> lmflow::Result<()> {
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+struct ContractPanics;
+impl Kernel for ContractPanics {
+    fn get_contract(_c: &mut KernelContract) {
+        panic!("contract panic marker");
+    }
+
+    fn process(&mut self, _cc: &mut KernelCtx) -> lmflow::Result<()> {
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+struct ContractUnknownType;
+impl Kernel for ContractUnknownType {
+    fn get_contract(c: &mut KernelContract) {
+        c.input_type(0, 0xdead_beef);
+    }
+
+    fn process(&mut self, _cc: &mut KernelCtx) -> lmflow::Result<()> {
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+struct ContractDuplicateSidePacket;
+impl Kernel for ContractDuplicateSidePacket {
+    fn get_contract(c: &mut KernelContract) {
+        c.require_side_packet("model");
+        c.require_side_packet("model");
+    }
+
+    fn process(&mut self, _cc: &mut KernelCtx) -> lmflow::Result<()> {
+        Ok(())
+    }
+}
+
 fn register_test_kernels() {
     let _ = register_kernel::<I64Identity>("TypeTestI64Identity");
     let _ = register_kernel::<F64Sink>("TypeTestF64Sink");
     let _ = register_kernel::<AnyIdentity>("TypeTestAnyIdentity");
     let _ = register_kernel::<LiesAboutOutput>("TypeTestLiesAboutOutput");
+    let _ = register_kernel::<ContractIndexOutOfRange>("TypeTestContractIndexOutOfRange");
+    let _ = register_kernel::<ContractPanics>("TypeTestContractPanics");
+    let _ = register_kernel::<ContractUnknownType>("TypeTestContractUnknownType");
+    let _ = register_kernel::<ContractDuplicateSidePacket>("TypeTestContractDuplicateSidePacket");
+}
+
+fn one_input_yaml(kernel: &str) -> String {
+    format!(
+        "nodes:\n  - {{ name: bad, kernel: {kernel}, input_ports: [in], output_ports: [] }}\ninput_ports: [in]\n"
+    )
+}
+
+#[test]
+fn get_contract_out_of_range_is_rejected() {
+    register_test_kernels();
+    let error = Graph::from_yaml(&one_input_yaml("TypeTestContractIndexOutOfRange")).unwrap_err();
+    let message = error.to_string();
+    assert!(message.contains("GetContract failed"), "{message}");
+    assert!(message.contains("index 1 is out of range"), "{message}");
+}
+
+#[test]
+fn get_contract_panic_is_rejected() {
+    register_test_kernels();
+    let error = Graph::from_yaml(&one_input_yaml("TypeTestContractPanics")).unwrap_err();
+    let message = error.to_string();
+    assert!(message.contains("GetContract failed"), "{message}");
+    assert!(message.contains("contract panic marker"), "{message}");
+}
+
+#[test]
+fn get_contract_unregistered_custom_type_is_rejected() {
+    register_test_kernels();
+    let error = Graph::from_yaml(&one_input_yaml("TypeTestContractUnknownType")).unwrap_err();
+    let message = error.to_string();
+    assert!(message.contains("unregistered custom type id"), "{message}");
+}
+
+#[test]
+fn get_contract_duplicate_side_packet_is_rejected() {
+    register_test_kernels();
+    let error =
+        Graph::from_yaml(&one_input_yaml("TypeTestContractDuplicateSidePacket")).unwrap_err();
+    let message = error.to_string();
+    assert!(message.contains("more than once"), "{message}");
 }
 
 #[test]

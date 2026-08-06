@@ -315,7 +315,9 @@ void lmflow_register_builtin_kernels(void);
 LMFlowStatus lmflow_register_kernel(const char* name, const LMFlowKernelVTable* vt, void* factory);
 
 /* ---------- Contract:在 get_contract 里声明端口类型约束 ----------
- * 端口的数量与名字来自 YAML,故此处可查询后再逐个声明。 */
+ * 端口的数量与名字来自 YAML,故此处可查询后再逐个声明。
+ * 下标越界、非法/未注册 type_id、空或重复 side packet 名，以及回调异常都会使建图失败，
+ * 不会静默忽略。 */
 size_t lmflow_contract_num_inputs(const LMFlowContract*);
 size_t lmflow_contract_num_outputs(const LMFlowContract*);
 /* 按 tag 取序号(YAML 端口名支持 "TAG:index:name" 三段式);无则返回 LMFLOW_INVALID_ID */
@@ -329,6 +331,8 @@ void lmflow_contract_input_set_any(LMFlowContract*, size_t idx);
 void lmflow_contract_input_set_type(LMFlowContract*, size_t idx, uint64_t type_id);
 void lmflow_contract_output_set_any(LMFlowContract*, size_t idx);
 void lmflow_contract_output_set_type(LMFlowContract*, size_t idx, uint64_t type_id);
+/* GetContract 蹦床捕获异常后调用；首个错误获胜，建图立即失败。 */
+void lmflow_contract_set_error(LMFlowContract*, const char* message);
 
 /* 声明本算子**必需**的 side packet。宿主若未注入,init 阶段即报错并指出缺哪个名字 ——
  * 而不是留到 open 里由算子自己查、或运行时才发现拿到空包。 */

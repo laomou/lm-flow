@@ -253,7 +253,12 @@ impl GraphInner {
                     &mut contract as *mut Contract as *mut c_void,
                 )?
             };
-            reject_reserved_contract_types(&name, &contract)?;
+            if let Some(error) = contract.take_error() {
+                return Err(Error::InvalidArg(format!(
+                    "node `{name}` GetContract failed: {error}"
+                )));
+            }
+            validate_contract(&name, &contract)?;
             contracts.push(contract);
             // 保持历史顺序:每个节点都是 get_contract 后立刻 create,而不是先询问完
             // 所有契约再统一创建。静态检查失败时这些实例随局部 Vec 正常析构。
@@ -502,23 +507,47 @@ fn check_node_executor_fit(cfg: &GraphConfig, executors: &[Executor]) -> Result<
     Ok(())
 }
 
-fn reject_reserved_contract_types(name: &str, contract: &Contract) -> Result<()> {
-    // `HOST_OBJECT`(7)是预留未启用类型(ADR #26),契约声明必须建图期失败。
+fn validate_contract(name: &str, contract: &Contract) -> Result<()> {
     for (which, types) in [
         ("input", &contract.input_types),
         ("output", &contract.output_types),
     ] {
-        if let Some(i) = types
-            .iter()
-            .position(|&t| t == crate::packet::type_id::HOST_OBJECT)
-        {
+        for (i, &type_id) in types.iter().enumerate() {
+            if type_id == crate::packet::type_id::HOST_OBJECT {
+                return Err(Error::InvalidArg(format!(
+                    "node `{name}`: {which} port {i} declares LMFLOW_TYPE_HOST_OBJECT, \
+                     which is reserved and not enabled (see ADR #26). Host-language native \
+                     objects (e.g. PyObject) would create a second type system invisible to \
+                     the YAML graph, and their refcount can drop on an engine worker thread \
+                     where releasing them needs the GIL. Use LMFLOW_TYPE_BUFFER for numeric \
+                     collections, or LMFLOW_TYPE_STR carrying JSON for arbitrary metadata"
+                )));
+            }
+            if (8..16).contains(&type_id) {
+                return Err(Error::InvalidArg(format!(
+                    "node `{name}`: {which} port {i} declares reserved type id {type_id}; \
+                     built-in ids currently end at LMFLOW_TYPE_HOST_OBJECT (7), and custom \
+                     type ids must be >= 16"
+                )));
+            }
+            if type_id >= 16 && crate::packet::type_descriptor(type_id).is_none() {
+                return Err(Error::InvalidArg(format!(
+                    "node `{name}`: {which} port {i} declares unregistered custom type id \
+                     {type_id}; register its stable name or descriptor before building the graph"
+                )));
+            }
+        }
+    }
+    let mut required = std::collections::BTreeSet::new();
+    for side_packet in &contract.required_side_packets {
+        if side_packet.is_empty() {
             return Err(Error::InvalidArg(format!(
-                "node `{name}`: {which} port {i} declares LMFLOW_TYPE_HOST_OBJECT, \
-                 which is reserved and not enabled (see ADR #26). Host-language native \
-                 objects (e.g. PyObject) would create a second type system invisible to \
-                 the YAML graph, and their refcount can drop on an engine worker thread \
-                 where releasing them needs the GIL. Use LMFLOW_TYPE_BUFFER for numeric \
-                 collections, or LMFLOW_TYPE_STR carrying JSON for arbitrary metadata"
+                "node `{name}`: GetContract declares an empty required side packet name"
+            )));
+        }
+        if !required.insert(side_packet) {
+            return Err(Error::InvalidArg(format!(
+                "node `{name}`: GetContract declares required side packet `{side_packet}` more than once"
             )));
         }
     }

@@ -191,7 +191,8 @@ impl KernelCtx<'_> {
 /// internal `Contract`, valid only for the duration of that call.
 ///
 /// Type ids live in [`crate::packet::type_id`](crate::packet) (`I64` / `F64` / `BUFFER` / …);
-/// `0` means "any type".
+/// `0` means "any type". Invalid indexes, invalid type ids, duplicate/empty side-packet names,
+/// and panics make graph construction fail instead of being ignored.
 pub struct KernelContract<'a> {
     inner: &'a mut Contract,
 }
@@ -208,12 +209,22 @@ impl KernelContract<'_> {
     pub fn input_type(&mut self, i: usize, type_id: u64) {
         if let Some(t) = self.inner.input_types.get_mut(i) {
             *t = type_id;
+        } else {
+            self.inner.record_error(format!(
+                "input port index {i} is out of range (num_inputs={})",
+                self.inner.input_types.len()
+            ));
         }
     }
     /// Declare the payload type of output port `i`. See [`input_type`](Self::input_type).
     pub fn output_type(&mut self, i: usize, type_id: u64) {
         if let Some(t) = self.inner.output_types.get_mut(i) {
             *t = type_id;
+        } else {
+            self.inner.record_error(format!(
+                "output port index {i} is out of range (num_outputs={})",
+                self.inner.output_types.len()
+            ));
         }
     }
     /// Accept any payload type on input port `i` (the default).
@@ -226,7 +237,12 @@ impl KernelContract<'_> {
     }
     /// Declare a required side packet; if the host forgets to inject it, graph init fails.
     pub fn require_side_packet(&mut self, name: &str) {
-        self.inner.required_side_packets.push(name.to_string());
+        if name.is_empty() {
+            self.inner
+                .record_error("required side packet name must not be empty");
+        } else {
+            self.inner.required_side_packets.push(name.to_string());
+        }
     }
 }
 
@@ -251,12 +267,20 @@ unsafe extern "C" fn tramp_get_contract<T: Kernel>(_self: *mut c_void, c: *mut c
     if c.is_null() {
         return;
     }
-    let _ = catch_unwind(AssertUnwindSafe(|| {
+    let result = catch_unwind(AssertUnwindSafe(|| {
         let mut kc = KernelContract {
             inner: &mut *(c as *mut Contract),
         };
         T::get_contract(&mut kc);
     }));
+    if let Err(payload) = result {
+        let message = payload
+            .downcast_ref::<&str>()
+            .map(|message| (*message).to_string())
+            .or_else(|| payload.downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "Rust panic with non-string payload".to_string());
+        (*(c as *mut Contract)).record_error(format!("Rust panic: {message}"));
+    }
 }
 
 /// open / process / close 三个 phase 的公共骨架。

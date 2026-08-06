@@ -47,6 +47,14 @@ unsafe extern "C" fn drop_boxed_i32(p: *mut c_void) {
     drop(Box::from_raw(p as *mut i32));
 }
 
+unsafe extern "C" fn c_contract_error(_factory: *mut c_void, contract: *mut LMFlowContract) {
+    lmflow_contract_set_error(contract, c"C GetContract marker".as_ptr());
+}
+
+unsafe extern "C" fn c_contract_process(_self: *mut c_void, _context: *mut LMFlowContext) -> i32 {
+    0
+}
+
 fn make_int_packet(v: i32, ts: i64) -> LMFlowPacket {
     LMFlowPacket {
         payload: Box::into_raw(Box::new(v)) as *mut c_void,
@@ -72,6 +80,33 @@ nodes:
 input_ports: ["in"]
 output_ports: ["out"]
 "#;
+
+#[test]
+fn c_get_contract_failure_rejects_graph_build() {
+    unsafe {
+        let vtable = LMFlowKernelVTable {
+            create: None,
+            get_contract: Some(c_contract_error),
+            open: None,
+            process: Some(c_contract_process),
+            close: None,
+            destroy: None,
+        };
+        assert_eq!(
+            lmflow_register_kernel(c"CFailingContract".as_ptr(), &vtable, std::ptr::null_mut(),),
+            0
+        );
+    }
+    let error = lmflow::Graph::from_yaml(
+        r#"
+nodes:
+  - { name: bad, kernel: CFailingContract, input_ports: [in], output_ports: [] }
+input_ports: [in]
+"#,
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("C GetContract marker"));
+}
 
 #[test]
 fn abi_version_and_handshake() {

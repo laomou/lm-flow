@@ -196,6 +196,11 @@ pub unsafe extern "C" fn lmflow_contract_input_set_any(c: *mut LMFlowContract, i
         if let Some(x) = contract_mut(c) {
             if let Some(s) = x.input_types.get_mut(idx) {
                 *s = 0;
+            } else {
+                x.record_error(format!(
+                    "input port index {idx} is out of range (num_inputs={})",
+                    x.input_types.len()
+                ));
             }
         }
     });
@@ -206,6 +211,11 @@ pub unsafe extern "C" fn lmflow_contract_output_set_any(c: *mut LMFlowContract, 
         if let Some(x) = contract_mut(c) {
             if let Some(s) = x.output_types.get_mut(idx) {
                 *s = 0;
+            } else {
+                x.record_error(format!(
+                    "output port index {idx} is out of range (num_outputs={})",
+                    x.output_types.len()
+                ));
             }
         }
     });
@@ -220,6 +230,11 @@ pub unsafe extern "C" fn lmflow_contract_input_set_type(
         if let Some(x) = contract_mut(c) {
             if let Some(s) = x.input_types.get_mut(idx) {
                 *s = type_id;
+            } else {
+                x.record_error(format!(
+                    "input port index {idx} is out of range (num_inputs={})",
+                    x.input_types.len()
+                ));
             }
         }
     });
@@ -234,6 +249,11 @@ pub unsafe extern "C" fn lmflow_contract_output_set_type(
         if let Some(x) = contract_mut(c) {
             if let Some(s) = x.output_types.get_mut(idx) {
                 *s = type_id;
+            } else {
+                x.record_error(format!(
+                    "output port index {idx} is out of range (num_outputs={})",
+                    x.output_types.len()
+                ));
             }
         }
     });
@@ -244,8 +264,24 @@ pub unsafe extern "C" fn lmflow_contract_require_side_packet(
     name: *const c_char,
 ) {
     guard_val((), || {
-        if let (Some(x), Some(n)) = (contract_mut(c), cstr(name)) {
-            x.required_side_packets.push(n.to_string());
+        if let Some(x) = contract_mut(c) {
+            if let Some(name) = cstr(name).filter(|name| !name.is_empty()) {
+                x.required_side_packets.push(name.to_string());
+            } else {
+                x.record_error("required side packet name must not be empty or invalid UTF-8");
+            }
+        }
+    });
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lmflow_contract_set_error(c: *mut LMFlowContract, message: *const c_char) {
+    guard_val((), || {
+        if let Some(x) = contract_mut(c) {
+            let message = cstr(message)
+                .filter(|message| !message.is_empty())
+                .unwrap_or("GetContract failed without a valid UTF-8 error message");
+            x.record_error(message);
         }
     });
 }

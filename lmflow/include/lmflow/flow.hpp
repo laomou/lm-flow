@@ -429,7 +429,10 @@ struct KernelAdapter {
       try {
         Contract ct(c);
         T::GetContract(ct);
+      } catch (const std::exception& e) {
+        lmflow_contract_set_error(c, e.what());
       } catch (...) {
+        lmflow_contract_set_error(c, "C++ GetContract threw a non-standard exception");
       }
     }
     (void)c;
