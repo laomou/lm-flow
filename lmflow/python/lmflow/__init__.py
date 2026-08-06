@@ -79,7 +79,8 @@ import os
 import sys
 import asyncio
 import warnings
-from typing import Any, Callable, Iterator, Sequence
+from dataclasses import dataclass
+from typing import Any, AsyncIterator, Callable, Iterator, Sequence
 
 try:
     from . import _lmflow as _native
@@ -97,6 +98,11 @@ __all__ = [
     "Contract",
     "Input",
     "Poller",
+    "OutputEvent",
+    "PacketEvent",
+    "TimestampBoundEvent",
+    "DoneEvent",
+    "AsyncOutputEvents",
     "LogLevel",
     "CloseReason",
     "GraphState",
@@ -180,6 +186,177 @@ class DotView:
     TOPOLOGY = "topology"
     COMPACT = "compact"
     DIAGNOSTICS = "diagnostics"
+
+
+class OutputEvent:
+    """Base class for typed events yielded by :meth:`Graph.events`."""
+
+
+@dataclass(frozen=True)
+class PacketEvent(OutputEvent):
+    """A graph output packet."""
+
+    packet: Packet
+
+    @property
+    def timestamp(self) -> int:
+        return self.packet.timestamp
+
+
+@dataclass(frozen=True)
+class TimestampBoundEvent(OutputEvent):
+    """No later packet on this output can have a timestamp below ``timestamp``."""
+
+    timestamp: int
+
+
+@dataclass(frozen=True)
+class DoneEvent(OutputEvent):
+    """The output stream has reached its final timestamp bound."""
+
+    timestamp: int = TS_DONE
+
+
+class _AsyncGraphDriver:
+    """Own the graph-global native wakeup slot and broadcast progress to async waiters."""
+
+    def __init__(self, graph: Graph) -> None:
+        self._graph = graph
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._wakeup: asyncio.Event | None = None
+        self._changed = asyncio.Event()
+        self._generation = 0
+        self._task: asyncio.Task[None] | None = None
+
+    def _publish(self) -> None:
+        changed = self._changed
+        self._generation += 1
+        self._changed = asyncio.Event()
+        changed.set()
+
+    def ensure_running(self) -> None:
+        loop = asyncio.get_running_loop()
+        if self._task is not None and not self._task.done():
+            if self._loop is not loop:
+                raise RuntimeError("a graph cannot be driven by two asyncio event loops")
+            return
+
+        state = self._graph.state
+        if state not in (
+            GraphState.INITIALIZED,
+            GraphState.RUNNING,
+            GraphState.DRAINING,
+            GraphState.TERMINATED,
+        ):
+            raise RuntimeError(
+                "async graph APIs require an initialized, running, draining, or terminated graph"
+            )
+
+        self._loop = loop
+        self._wakeup = asyncio.Event()
+        self._changed = asyncio.Event()
+
+        def notify_loop() -> None:
+            try:
+                loop.call_soon_threadsafe(self._wakeup.set)
+            except RuntimeError:
+                pass
+
+        self._graph._g.set_wakeup_callback(notify_loop)
+        if state == GraphState.INITIALIZED:
+            self._graph.start()
+        self._task = asyncio.create_task(self._drive())
+
+    async def _drive(self) -> None:
+        wakeup = self._wakeup
+        assert wakeup is not None
+        try:
+            while True:
+                wakeup.clear()
+                while self._graph.pump_step():
+                    pass
+                self._publish()
+                if self._graph.state == GraphState.TERMINATED:
+                    return
+                if wakeup.is_set():
+                    continue
+                await wakeup.wait()
+        finally:
+            self._publish()
+            try:
+                self._graph._g.set_wakeup_callback(None)
+            except RuntimeError:
+                pass
+
+    def close(self) -> None:
+        task = self._task
+        if task is not None and not task.done():
+            loop = self._loop
+            if loop is not None and loop.is_running():
+                try:
+                    loop.call_soon_threadsafe(task.cancel)
+                except RuntimeError:
+                    pass
+            else:
+                task.cancel()
+        try:
+            self._graph._g.set_wakeup_callback(None)
+        except RuntimeError:
+            pass
+
+    async def wait_for_change(self, generation: int) -> int:
+        self.ensure_running()
+        while self._generation == generation:
+            changed = self._changed
+            if self._generation != generation:
+                break
+            await changed.wait()
+        return self._generation
+
+    async def wait_terminated(self) -> None:
+        self.ensure_running()
+        task = self._task
+        assert task is not None
+        await asyncio.shield(task)
+
+    @property
+    def generation(self) -> int:
+        return self._generation
+
+
+class AsyncOutputEvents(AsyncIterator[OutputEvent]):
+    """An asynchronous, typed stream for one graph output port."""
+
+    def __init__(self, graph: Graph, poller: Poller) -> None:
+        self._graph = graph
+        self._poller = poller
+        self._done = False
+
+    def __aiter__(self) -> AsyncOutputEvents:
+        return self
+
+    async def __anext__(self) -> OutputEvent:
+        if self._done:
+            raise StopAsyncIteration
+        driver = self._graph._get_async_driver()
+        driver.ensure_running()
+        generation = driver.generation
+        while True:
+            packet = self._poller.try_next()
+            if packet is not None:
+                if not packet.is_empty:
+                    return PacketEvent(packet)
+                if packet.timestamp == TS_DONE:
+                    self._done = True
+                    await driver.wait_terminated()
+                    self._graph.wait_done()
+                    return DoneEvent()
+                return TimestampBoundEvent(packet.timestamp)
+            if self._graph.state == GraphState.TERMINATED:
+                self._done = True
+                self._graph.wait_done()
+                raise StopAsyncIteration
+            generation = await driver.wait_for_change(generation)
 
 
 # ---------------------------------------------------------------- 算子
@@ -279,6 +456,7 @@ class Graph:
     def __init__(self) -> None:
         self._g = _native.Graph()
         self._closed = False
+        self._async_driver: _AsyncGraphDriver | None = None
 
     # ---- 构造 ----
 
@@ -308,6 +486,8 @@ class Graph:
         """Stop the graph and release resources. Idempotent."""
         if not self._closed:
             self._closed = True
+            if self._async_driver is not None:
+                self._async_driver.close()
             self._g.close()
 
     def __del__(self) -> None:  # pragma: no cover - 兜底,时机不保证
@@ -330,6 +510,18 @@ class Graph:
         below that value. ``TS_DONE`` is the final bound.
         """
         return self._g.add_poller(port, observe_timestamp_bounds)
+
+    def events(self, port: str) -> AsyncOutputEvents:
+        """Subscribe to typed asynchronous output events. Must be called before :meth:`start`.
+
+        Iteration starts the graph when needed and yields :class:`PacketEvent`,
+        :class:`TimestampBoundEvent`, then :class:`DoneEvent`. It shares the graph's single native
+        wakeup callback with :meth:`run_async`, so several ports can be consumed concurrently
+        without polling or displacing one another.
+        """
+        return AsyncOutputEvents(
+            self, self.add_poller(port, observe_timestamp_bounds=True)
+        )
 
     def observe(
         self,
@@ -449,43 +641,15 @@ class Graph:
         """
         if cancel_grace < 0:
             raise ValueError("cancel_grace must be non-negative")
-        loop = asyncio.get_running_loop()
-        wakeup = asyncio.Event()
-
-        def notify_loop() -> None:
-            loop.call_soon_threadsafe(wakeup.set)
-
-        async def drive_until_terminated() -> None:
-            while True:
-                wakeup.clear()
-                while self.pump_step():
-                    pass
-                if self.state == GraphState.TERMINATED:
-                    return
-                if wakeup.is_set():
-                    continue
-                await wakeup.wait()
-
-        self._g.set_wakeup_callback(notify_loop)
+        driver = self._get_async_driver()
         try:
-            if self.state == GraphState.INITIALIZED:
-                self.start()
-            elif self.state not in (
-                GraphState.RUNNING,
-                GraphState.DRAINING,
-                GraphState.TERMINATED,
-            ):
-                raise RuntimeError(
-                    "run_async requires an initialized, running, draining, or terminated graph"
-                )
-
-            await drive_until_terminated()
+            await driver.wait_terminated()
             self.wait_done()
         except asyncio.CancelledError as cancelled:
             self.cancel()
             current = asyncio.current_task()
             uncancel = getattr(current, "uncancel", None)
-            cleanup_coro = drive_until_terminated()
+            cleanup_coro = driver.wait_terminated()
             try:
                 cleanup = asyncio.create_task(cleanup_coro)
             except RuntimeError:
@@ -514,8 +678,11 @@ class Graph:
                 except asyncio.CancelledError:
                     pass
             raise cancelled
-        finally:
-            self._g.set_wakeup_callback(None)
+
+    def _get_async_driver(self) -> _AsyncGraphDriver:
+        if self._async_driver is None:
+            self._async_driver = _AsyncGraphDriver(self)
+        return self._async_driver
 
     # ---- 内省 ----
 

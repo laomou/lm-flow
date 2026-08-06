@@ -233,6 +233,22 @@ target_link_libraries(my_app PRIVATE lmflow::lmflow)     # core + optional bundl
 
 > Rust developers use `cargo` in `lmflow/core`; Python users just `pip install lm-lmflow` (prebuilt wheels). The wheel is built by **scikit-build-core driving this same root CMake** (`-DLMFLOW_BUILD_PYTHON=ON`), so there is one build definition, not three.
 
+Asyncio applications can consume typed output events without polling:
+
+```python
+events = graph.events("out")
+async for event in events:
+    if isinstance(event, lmflow.PacketEvent):
+        handle(event.packet)
+    elif isinstance(event, lmflow.TimestampBoundEvent):
+        advance_watermark(event.timestamp)
+    else:  # DoneEvent
+        break
+```
+
+`events()` starts the graph on first iteration and shares the same event-loop wakeup driver as
+`graph.run_async()`, so multiple output ports can be consumed concurrently.
+
 The C ABI is the only stable interface (`lmflow/flow.h`); `flow.hpp` is the optional C++ kernel
 sugar, and `flow_platform_log.hpp` bridges engine logs to the platform logger (logcat / os_log /
 HiLog). OpenCV interop is a separate opt-in component under `adapters/opencv`, exposed as

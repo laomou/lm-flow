@@ -263,6 +263,112 @@ class TestPythonKernel(unittest.TestCase):
                 [(False, 4, 6)],
             )
 
+    def test_async_events_yield_typed_packet_bound_and_done(self):
+        async def scenario():
+            with graph(one_node("TDouble")) as g:
+                events = g.events("out")
+                consume = asyncio.create_task(_collect_events(events))
+                await asyncio.sleep(0)
+                g.input("in").send(3, ts=4)
+                g.close_all_inputs()
+                received = await consume
+
+                self.assertEqual(len(received), 3)
+                self.assertIsInstance(received[0], lmflow.PacketEvent)
+                self.assertEqual(received[0].packet.as_int(), 6)
+                self.assertEqual(received[0].timestamp, 4)
+                self.assertEqual(
+                    received[1], lmflow.TimestampBoundEvent(timestamp=5)
+                )
+                self.assertEqual(received[2], lmflow.DoneEvent())
+
+        async def _collect_events(events):
+            return [event async for event in events]
+
+        asyncio.run(scenario())
+
+    def test_async_events_multiple_ports_share_driver(self):
+        async def scenario():
+            with graph(
+                """
+nodes:
+  - { name: left, kernel: TDouble, input_ports: [left_in], output_ports: [left_out] }
+  - { name: right, kernel: TDouble, input_ports: [right_in], output_ports: [right_out],
+      options: { factor: 3 } }
+input_ports: [left_in, right_in]
+output_ports: [left_out, right_out]
+"""
+            ) as g:
+                left = g.events("left_out")
+                right = g.events("right_out")
+
+                async def packets(stream):
+                    values = []
+                    async for event in stream:
+                        if isinstance(event, lmflow.PacketEvent):
+                            values.append(event.packet.as_int())
+                    return values
+
+                left_task = asyncio.create_task(packets(left))
+                right_task = asyncio.create_task(packets(right))
+                await asyncio.sleep(0)
+                g.input("left_in").send(2, ts=0)
+                g.input("right_in").send(4, ts=0)
+                g.close_all_inputs()
+                self.assertEqual(await left_task, [4])
+                self.assertEqual(await right_task, [12])
+
+        asyncio.run(scenario())
+
+    def test_async_events_and_run_async_share_driver(self):
+        async def scenario():
+            with graph(
+                """
+executors:
+  - { name: host, type: DelegatingExecutor }
+nodes:
+  - { name: dbl, kernel: TDouble, executor: host, input_ports: [in], output_ports: [out] }
+input_ports: [in]
+output_ports: [out]
+"""
+            ) as g:
+                events = g.events("out")
+                run = asyncio.create_task(g.run_async())
+                consume = asyncio.create_task(
+                    _collect_packet_values(events)
+                )
+                await asyncio.sleep(0)
+                g.input("in").send(21, ts=0)
+                g.close_all_inputs()
+                await asyncio.wait_for(run, timeout=2.0)
+                self.assertEqual(await consume, [42])
+
+        async def _collect_packet_values(events):
+            return [
+                event.packet.as_int()
+                async for event in events
+                if isinstance(event, lmflow.PacketEvent)
+            ]
+
+        asyncio.run(scenario())
+
+    def test_async_events_propagate_graph_failure(self):
+        async def scenario():
+            with graph(one_node("TBoom")) as g:
+                events = g.events("out")
+                consume = asyncio.create_task(_consume(events))
+                await asyncio.sleep(0)
+                g.input("in").send(1, ts=0)
+                g.close_all_inputs()
+                with self.assertRaisesRegex(lmflow.KernelError, "deliberately raised"):
+                    await consume
+
+        async def _consume(events):
+            async for _ in events:
+                pass
+
+        asyncio.run(scenario())
+
     def test_builtin_cpp_kernel_and_python_kernel_in_one_graph(self):
         with graph(
             """
