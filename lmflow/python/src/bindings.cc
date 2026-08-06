@@ -707,7 +707,10 @@ class Graph {
     check(lmflow_graph_close_input(g_, port.c_str()), "close_input");
   }
   void close_all_inputs() { lmflow_graph_close_all_inputs(g_); }
-  void cancel() { lmflow_graph_cancel(g_); }
+  void cancel() {
+    py::gil_scoped_release unlock;
+    lmflow_graph_cancel(g_);
+  }
   void pause() { lmflow_graph_pause(g_); }
   void resume() { lmflow_graph_resume(g_); }
 
