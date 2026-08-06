@@ -53,3 +53,63 @@ nodes:
         .contains("nodes[0].input_ports[0]"));
     std::fs::remove_file(path).unwrap();
 }
+
+#[test]
+fn dot_output_visualizes_static_plan_without_loading_kernels() {
+    let path = write_config(
+        r#"
+executors:
+  - { name: cpu, type: ThreadPoolExecutor, num_threads: 2 }
+nodes:
+  - name: source
+    kernel: NotLinkedSource
+    executor: cpu
+    output_ports: [frames]
+  - name: filter
+    kernel: NotLinkedFilter
+    executor: cpu
+    input_ports: [frames, feedback]
+    output_ports: [out, feedback]
+    back_edges: [feedback]
+    input_queues:
+      packets: 8
+      ports:
+        frames: { packets: 2 }
+input_ports: []
+output_ports: [out]
+"#,
+    );
+    let output = Command::new(env!("CARGO_BIN_EXE_lmflow"))
+        .args(["check-config", path.to_str().unwrap(), "--dot"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let dot = String::from_utf8(output.stdout).unwrap();
+    assert!(dot.contains("digraph lmflow_plan"), "{dot}");
+    assert!(
+        dot.contains("label=\"cpu · ThreadPoolExecutor · 2t\""),
+        "{dot}"
+    );
+    assert!(dot.contains("NotLinkedFilter"), "{dot}");
+    assert!(dot.contains("xlabel=\"queue 2 packets\""), "{dot}");
+    assert!(dot.contains("style=dashed"), "{dot}");
+    assert!(
+        dot.contains("tooltip=\"back-edge latest-value register\""),
+        "{dot}"
+    );
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn dot_and_json_are_mutually_exclusive() {
+    let path = write_config("nodes: []\n");
+    let output = Command::new(env!("CARGO_BIN_EXE_lmflow"))
+        .args(["check-config", path.to_str().unwrap(), "--dot", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8(output.stderr)
+        .unwrap()
+        .contains("[--json|--dot]"));
+    std::fs::remove_file(path).unwrap();
+}
