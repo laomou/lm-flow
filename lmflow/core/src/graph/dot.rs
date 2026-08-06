@@ -9,6 +9,7 @@ use super::{
     latency_bucket_upper_us, DotView, GraphInner, InputPolicy, NodeStats, LATENCY_BUCKETS,
 };
 use crate::config::StatsLevel;
+use crate::dot::escape as escape_dot;
 use std::sync::atomic::Ordering;
 
 const NODE_LABEL_CHARS: usize = 24;
@@ -200,10 +201,6 @@ impl DotHotspots {
             self.running, self.errors, self.blocked, self.waiting, self.dropped
         )
     }
-}
-
-fn escape_dot(value: &str) -> String {
-    value.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 fn truncate_label(value: &str, max_chars: usize) -> String {
@@ -741,15 +738,7 @@ impl GraphInner {
             }
         }
 
-        let mut out = String::new();
-        out.push_str("digraph lmflow {\n");
-        out.push_str("  rankdir=LR;\n");
-        out.push_str("  newrank=true;\n");
-        out.push_str("  graph [nodesep=0.35, ranksep=0.65];\n");
-        out.push_str(
-            "  node [shape=box, style=\"rounded,filled\", fillcolor=white, ordering=out];\n",
-        );
-        out.push_str("  edge [fontsize=10];\n");
+        let mut out = crate::dot::begin("lmflow", None);
         if with_stats {
             let hotspots = self.dot_hotspots(
                 snapshot_us.expect("statistics snapshot timestamp exists"),
@@ -1138,8 +1127,8 @@ impl GraphInner {
         // 图输入 / 输出口:独立形状。
         for &e in &self.graph_inputs {
             let mut label = escape_dot(&truncate_label(&self.edges[e].name, PORT_LABEL_CHARS));
-            let mut fill = "#e8e8e8";
-            let mut color = "#777777";
+            let mut fill = crate::dot::PORT_FILL;
+            let mut color = crate::dot::PORT_COLOR;
             let mut penwidth = 1;
             let delta = interval.as_ref().map(|interval| interval.edge(e));
             let stats = diagnostics.then(|| {
@@ -1194,7 +1183,9 @@ impl GraphInner {
         }
         for &e in &self.graph_outputs {
             out.push_str(&format!(
-                "  pout{e} [shape=cds, style=filled, fillcolor=\"#e8e8e8\", label=\"{}\", tooltip=\"graph output {}\"];\n",
+                "  pout{e} [shape=cds, style=filled, fillcolor=\"{}\", color=\"{}\", label=\"{}\", tooltip=\"graph output {}\"];\n",
+                crate::dot::PORT_FILL,
+                crate::dot::PORT_COLOR,
                 escape_dot(&truncate_label(&self.edges[e].name, PORT_LABEL_CHARS)),
                 escape_dot(&self.edges[e].name),
             ));

@@ -1,3 +1,5 @@
+mod common;
+
 use lmflow::config::{GraphConfig, GraphPlan};
 
 #[test]
@@ -111,4 +113,73 @@ output_ports: [out]
     assert_eq!(mid.producer, Some(0));
     assert_eq!(mid.consumers, vec![1]);
     assert_eq!(plan.nodes[1].inputs, vec!["mid"]);
+}
+
+#[test]
+fn graph_plan_dot_uses_runtime_topology_theme() {
+    let config = GraphConfig::from_yaml(
+        r#"
+nodes:
+  - { name: pass, kernel: NotLinkedYet, input_ports: [in], output_ports: [out] }
+input_ports: [in]
+output_ports: [out]
+"#,
+    )
+    .unwrap();
+    let dot = GraphPlan::build(config).unwrap().to_dot();
+    for expected in [
+        "rankdir=LR",
+        "newrank=true",
+        "nodesep=0.35",
+        "shape=box",
+        "style=\"rounded,filled\"",
+        "shape=cds",
+        "fillcolor=\"#e8e8e8\"",
+        "color=\"#777777\"",
+    ] {
+        assert!(dot.contains(expected), "missing `{expected}`:\n{dot}");
+    }
+}
+
+#[test]
+fn graph_plan_and_runtime_dot_share_topology_vocabulary() {
+    common::register_test_kernels();
+    let yaml = r#"
+nodes:
+  - { name: first, kernel: PassThrough, input_ports: [in], output_ports: [mid] }
+  - { name: second, kernel: PassThrough, input_ports: [mid], output_ports: [out] }
+input_ports: [in]
+output_ports: [out]
+"#;
+    let plan_dot = GraphPlan::build(GraphConfig::from_yaml(yaml).unwrap())
+        .unwrap()
+        .to_dot();
+    let runtime_dot = lmflow::Graph::from_yaml(yaml).unwrap().to_dot();
+    for expected in ["first", "second", "PassThrough", "in", "mid", "out"] {
+        assert!(
+            plan_dot.contains(expected),
+            "static DOT missing `{expected}`"
+        );
+        assert!(
+            runtime_dot.contains(expected),
+            "runtime DOT missing `{expected}`"
+        );
+    }
+    for expected in [
+        "rankdir=LR",
+        "newrank=true",
+        "shape=box",
+        "style=\"rounded,filled\"",
+        "shape=cds",
+        "fillcolor=\"#e8e8e8\"",
+    ] {
+        assert!(
+            plan_dot.contains(expected),
+            "static DOT missing `{expected}`"
+        );
+        assert!(
+            runtime_dot.contains(expected),
+            "runtime DOT missing `{expected}`"
+        );
+    }
 }

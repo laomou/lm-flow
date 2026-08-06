@@ -727,6 +727,11 @@ impl GraphPlan {
             back_edge_mask,
         })
     }
+
+    /// Export the validated static plan as Graphviz DOT without loading kernels or executors.
+    pub fn to_dot(&self) -> String {
+        crate::dot::render_plan(self)
+    }
 }
 
 fn plan_edge(

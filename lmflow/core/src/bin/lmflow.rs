@@ -50,121 +50,13 @@ fn main() -> ExitCode {
     };
 
     if dot_output {
-        print!("{}", plan_dot(&plan));
+        print!("{}", plan.to_dot());
     } else if json_output {
         println!("{}", summary_json(path, &plan));
     } else {
         print_summary(path, &plan);
     }
     ExitCode::SUCCESS
-}
-
-fn plan_dot(plan: &GraphPlan) -> String {
-    let mut dot = String::from(
-        "digraph lmflow_plan {\n  rankdir=LR;\n  graph [fontname=\"sans\", labelloc=\"t\", label=\"lmflow configuration plan\"];\n  node [fontname=\"sans\"];\n  edge [fontname=\"sans\"];\n",
-    );
-    dot.push_str("  graph_input [shape=cds, label=\"graph input\"];\n");
-    dot.push_str("  graph_output [shape=cds, label=\"graph output\"];\n");
-
-    let mut executors = vec![(
-        "default".to_string(),
-        "ThreadPoolExecutor".to_string(),
-        0usize,
-    )];
-    executors.extend(plan.config.executors.iter().map(|executor| {
-        (
-            executor.name.clone(),
-            if executor.r#type.is_empty() {
-                "ThreadPoolExecutor".to_string()
-            } else {
-                executor.r#type.clone()
-            },
-            executor.num_threads,
-        )
-    }));
-    for (index, (name, kind, threads)) in executors.iter().enumerate() {
-        dot.push_str(&format!(
-            "  subgraph cluster_executor_{index} {{\n    label=\"{} · {}{}\";\n    color=\"#bdbdbd\";\n",
-            escape_dot(name),
-            escape_dot(kind),
-            if *threads == 0 {
-                String::new()
-            } else {
-                format!(" · {threads}t")
-            }
-        ));
-        for node in plan.nodes.iter().filter(|node| node.executor == *name) {
-            let label = format!(
-                "{}\\n{}\\nexecutor: {}\\ninputs: {}\\noutputs: {}",
-                node.name,
-                node.kernel,
-                node.executor,
-                node.inputs.join(", "),
-                node.outputs.join(", ")
-            );
-            dot.push_str(&format!(
-                "    node_{} [shape=box, label=\"{}\"];\n",
-                node.index,
-                escape_dot(&label)
-            ));
-        }
-        dot.push_str("  }\n");
-    }
-    for (edge_index, edge) in plan.edges.iter().enumerate() {
-        let edge_id = format!("edge_{edge_index}");
-        if edge.graph_input {
-            dot.push_str(&format!(
-                "  graph_input -> {} [label=\"{}\"];\n",
-                edge_id,
-                escape_dot(&edge.name)
-            ));
-        }
-        dot.push_str(&format!(
-            "  {} [shape=point, width=0.08, label=\"\"];\n",
-            edge_id
-        ));
-        if let Some(producer) = edge.producer {
-            dot.push_str(&format!("  node_{producer} -> {edge_id};\n"));
-        }
-        for consumer in &edge.consumers {
-            let node = &plan.config.nodes[*consumer];
-            let back_edge = node.back_edges.contains(&edge.name);
-            let capacity = node
-                .input_queues
-                .ports
-                .get(&edge.name)
-                .and_then(|limits| limits.packets)
-                .unwrap_or(node.input_queues.packets);
-            let mut attributes = vec![format!("label=\"{}\"", escape_dot(&edge.name))];
-            if capacity != 0 {
-                attributes.push(format!("xlabel=\"queue {capacity} packets\""));
-            }
-            if back_edge {
-                attributes.push("style=dashed".to_string());
-                attributes.push("color=\"#7b61a8\"".to_string());
-                attributes.push("fontcolor=\"#7b61a8\"".to_string());
-                attributes.push("constraint=false".to_string());
-                attributes.push("tooltip=\"back-edge latest-value register\"".to_string());
-            }
-            dot.push_str(&format!(
-                "  {edge_id} -> node_{consumer} [{}];\n",
-                attributes.join(", ")
-            ));
-        }
-        if edge.graph_output {
-            dot.push_str(&format!(
-                "  {} -> graph_output [label=\"{}\"];\n",
-                edge_id,
-                escape_dot(&edge.name)
-            ));
-        }
-    }
-    dot.push_str("}\n");
-    dot
-}
-
-fn escape_dot(value: &str) -> String {
-    value.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 fn summary_json(path: &str, plan: &GraphPlan) -> serde_json::Value {
