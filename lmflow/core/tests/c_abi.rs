@@ -740,16 +740,13 @@ fn new_buffer_rejects_ndim_above_the_fixed_descriptor_limit() {
 }
 
 #[test]
-fn new_buffer_rejects_unallocatable_sizes_without_aborting() {
+fn new_buffer_rejects_byte_count_overflow_without_allocating() {
     unsafe {
         let shape = [i64::MAX];
-        let packet = lmflow_packet_new_buffer(1, shape.as_ptr(), 0, 0, std::ptr::null_mut());
+        let packet = lmflow_packet_new_buffer(1, shape.as_ptr(), 8, 0, std::ptr::null_mut());
         assert!(packet.payload.is_null());
         let message = last_error();
-        assert!(
-            message.contains("cannot allocate") || message.contains("overflow"),
-            "{message}"
-        );
+        assert!(message.contains("overflow"), "{message}");
     }
 }
 
