@@ -597,7 +597,10 @@ class Input {
     check(st, "try_send");
     return true;
   }
-  void close() { lmflow_input_close(h_); }
+  void close() {
+    py::gil_scoped_release unlock;
+    lmflow_input_close(h_);
+  }
  private:
   LMFlowInput* h_;
 };
@@ -694,8 +697,22 @@ class Graph {
           "observe");
   }
 
-  void start() { check(lmflow_graph_start(g_), "start"); }
-  void reset() { check(lmflow_graph_reset(g_), "reset"); }
+  void start() {
+    LMFlowStatus status;
+    {
+      py::gil_scoped_release unlock;
+      status = lmflow_graph_start(g_);
+    }
+    check(status, "start");
+  }
+  void reset() {
+    LMFlowStatus status;
+    {
+      py::gil_scoped_release unlock;
+      status = lmflow_graph_reset(g_);
+    }
+    check(status, "reset");
+  }
 
   Input* input(const std::string& port) {
     LMFlowInput* h = lmflow_graph_input(g_, port.c_str());
@@ -704,15 +721,29 @@ class Graph {
   }
 
   void close_input(const std::string& port) {
-    check(lmflow_graph_close_input(g_, port.c_str()), "close_input");
+    LMFlowStatus status;
+    {
+      py::gil_scoped_release unlock;
+      status = lmflow_graph_close_input(g_, port.c_str());
+    }
+    check(status, "close_input");
   }
-  void close_all_inputs() { lmflow_graph_close_all_inputs(g_); }
+  void close_all_inputs() {
+    py::gil_scoped_release unlock;
+    lmflow_graph_close_all_inputs(g_);
+  }
   void cancel() {
     py::gil_scoped_release unlock;
     lmflow_graph_cancel(g_);
   }
-  void pause() { lmflow_graph_pause(g_); }
-  void resume() { lmflow_graph_resume(g_); }
+  void pause() {
+    py::gil_scoped_release unlock;
+    lmflow_graph_pause(g_);
+  }
+  void resume() {
+    py::gil_scoped_release unlock;
+    lmflow_graph_resume(g_);
+  }
 
   /// 等待图跑完。阻塞 → 释放 GIL。
   void wait_done(std::optional<double> timeout) {

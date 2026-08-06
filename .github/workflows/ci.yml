@@ -300,6 +300,7 @@ jobs:
       - name: pip install(scikit-build-core → CMake → 引擎 + pybind11 扩展)
         run: python -m pip install -v .
       - name: Python 测试套件
+        timeout-minutes: 5
         run: python -m unittest discover -s lmflow/python/tests -v
       - run: python -m compileall -q lmflow/python
 
@@ -426,6 +427,7 @@ jobs:
           & "$env:RUNNER_TEMP\sdk-consumer-build\Release\sdk_smoke.exe"
 
       - name: Windows wheel 构建 + Python 测试
+        timeout-minutes: 10
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'

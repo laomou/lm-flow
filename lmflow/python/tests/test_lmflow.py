@@ -12,6 +12,8 @@
 from __future__ import annotations
 
 import asyncio
+import subprocess
+import sys
 import threading
 import time
 import unittest
@@ -562,6 +564,49 @@ output_ports: [out]
                         await run
 
         asyncio.run(scenario())
+
+    def test_async_cancellation_does_not_deadlock_on_wakeup_gil_handoff(self):
+        script = r"""
+import asyncio
+import lmflow
+
+@lmflow.kernel("GilAuditRelay")
+class GilAuditRelay(lmflow.Kernel):
+    def process(self, cc):
+        cc.forward(0, 0)
+
+async def main():
+    with lmflow.Graph.from_yaml('''
+executors:
+  - { name: cpu, type: ThreadPoolExecutor, num_threads: 1 }
+nodes:
+  - { name: relay, kernel: GilAuditRelay, executor: cpu, input_ports: [in], output_ports: [out] }
+input_ports: [in]
+output_ports: [out]
+''') as graph:
+        graph.add_poller("out")
+        run = asyncio.create_task(graph.run_async(cancel_grace=0.0))
+        await asyncio.sleep(0)
+        graph.input("in").send(1, ts=0)
+        run.cancel()
+        try:
+            await run
+        except asyncio.CancelledError:
+            pass
+
+asyncio.run(main())
+"""
+        completed = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True,
+            text=True,
+            timeout=5.0,
+        )
+        self.assertEqual(
+            completed.returncode,
+            0,
+            msg=f"stdout:\n{completed.stdout}\nstderr:\n{completed.stderr}",
+        )
 
     def test_run_async_cancellation_reaches_terminated_for_delegated_graph(self):
         async def scenario():
