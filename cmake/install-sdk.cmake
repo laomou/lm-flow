@@ -14,7 +14,7 @@ install(FILES "${LMFLOW_CORE_LIB}"
     RENAME "${LMFLOW_CORE_INSTALL_FILENAME}")
 
 if(LMFLOW_BUILD_KERNELS)
-  install(TARGETS lmflow_kernels
+  install(TARGETS lmflow_kernels_archive
       ARCHIVE DESTINATION lib)
 endif()
 

@@ -3,8 +3,6 @@
 #include "lmflow/flow.hpp"
 
 #include "buffer_util.hpp"
-#include "builtins.hpp"
-
 namespace {
 class AffineKernel : public lmflow::Kernel {
  public:
@@ -50,6 +48,4 @@ class AffineKernel : public lmflow::Kernel {
 };
 }  // namespace
 
-void RegisterAffineKernel() {
-  lmflow_register_kernel("AffineKernel", lmflow::KernelAdapter<AffineKernel>::vtable(), nullptr);
-}
+LMFLOW_REGISTER_KERNEL(AffineKernel)

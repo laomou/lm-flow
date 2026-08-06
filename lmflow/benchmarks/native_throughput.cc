@@ -110,8 +110,6 @@ int main(int argc, char** argv) {
   try {
     const std::size_t iterations =
         argc > 1 ? static_cast<std::size_t>(std::stoull(argv[1])) : 10000;
-    lmflow_register_builtin_kernels();
-
     RunBenchmark(
         "c_api/pass_through/i64", iterations, sizeof(int64_t),
         [](int64_t timestamp) { return lmflow_packet_from_i64(0, timestamp); },

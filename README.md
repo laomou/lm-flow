@@ -115,8 +115,6 @@ pip install lm-lmflow               # prebuilt wheels (Linux manylinux / macOS)
 ```python
 import lmflow
 
-lmflow.register_builtin_kernels()
-
 @lmflow.kernel("Double")
 class Double(lmflow.Kernel):
     def process(self, cc):
@@ -180,10 +178,18 @@ lmflow-v0.3.0-linux-x86_64/
 └── lib/       liblmflow_core.a · liblmflow_kernels.a · liblmflow.so
 ```
 
+```cmake
+# Recommended: the target preserves all static kernel registrars cross-platform.
+find_package(lmflow REQUIRED)
+target_link_libraries(my_host PRIVATE lmflow::lmflow)
+```
+
+Without CMake, retain the complete kernels archive explicitly:
+
 ```bash
-# Link the static components (recommended, especially for mobile embedding):
 g++ -std=c++17 -Iinclude my_host.cc \
-  lib/liblmflow_kernels.a lib/liblmflow_core.a -lpthread -ldl -lm -o my_host
+  -Wl,--whole-archive lib/liblmflow_kernels.a -Wl,--no-whole-archive \
+  lib/liblmflow_core.a -lpthread -ldl -lm -o my_host
 ```
 
 Or build the native SDK locally:
@@ -213,7 +219,7 @@ The switches are independent:
 - `BUILD_SHARED_LIBS=ON`: install `liblmflow_core.so` and the complete `liblmflow.so`.
 - `BUILD_SHARED_LIBS=OFF`: expose static CMake targets backed by `liblmflow_core.a` and, when enabled, `liblmflow_kernels.a`.
 - `LMFLOW_BUILD_KERNELS=ON` (default): include the 18 bundled C++ kernels in `lmflow::lmflow`.
-- `LMFLOW_BUILD_KERNELS=OFF`: build a pure Rust engine only; `lmflow_register_builtin_kernels` is unavailable.
+- `LMFLOW_BUILD_KERNELS=OFF`: build a pure Rust engine only, without bundled C++ kernels.
 
 Consumers choose the desired boundary:
 

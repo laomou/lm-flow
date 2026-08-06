@@ -6,7 +6,7 @@
 
 use std::ffi::{c_char, c_void};
 
-use crate::kernel::KernelVTable;
+use crate::kernel::{KernelLanguage, KernelVTable};
 use crate::runtime::{self};
 use crate::status::Error;
 
@@ -30,6 +30,39 @@ pub unsafe extern "C" fn lmflow_register_kernel(
     name: *const c_char,
     vt: *const LMFlowKernelVTable,
     factory: *mut c_void,
+) -> i32 {
+    register_kernel_impl(name, vt, factory, KernelLanguage::Unknown)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lmflow_register_kernel_with_language(
+    name: *const c_char,
+    vt: *const LMFlowKernelVTable,
+    factory: *mut c_void,
+    language: u32,
+) -> i32 {
+    let language = match language {
+        0 => KernelLanguage::Unknown,
+        1 => KernelLanguage::Rust,
+        2 => KernelLanguage::Cpp,
+        3 => KernelLanguage::Python,
+        4 => KernelLanguage::C,
+        other => {
+            return guard(|| {
+                fail(Error::InvalidArg(format!(
+                    "unknown kernel implementation language id {other}"
+                )))
+            })
+        }
+    };
+    register_kernel_impl(name, vt, factory, language)
+}
+
+unsafe fn register_kernel_impl(
+    name: *const c_char,
+    vt: *const LMFlowKernelVTable,
+    factory: *mut c_void,
+    language: KernelLanguage,
 ) -> i32 {
     guard(|| {
         let Some(n) = cstr(name) else {
@@ -66,7 +99,9 @@ pub unsafe extern "C" fn lmflow_register_kernel(
             >(v.close),
             destroy: v.destroy,
         };
-        to_status(crate::kernel::register(n, converted, factory))
+        to_status(crate::kernel::register_with_language(
+            n, converted, factory, language,
+        ))
     })
 }
 

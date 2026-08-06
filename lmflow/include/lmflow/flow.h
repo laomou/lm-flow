@@ -290,22 +290,13 @@ typedef struct {
   void (*destroy)(void* self);
 } LMFlowKernelVTable;
 
-/* 注册**捆绑的内置算子**(PassThroughKernel / ScaleKernel / SumKernel / SplitKernel /
- * ZipKernel / FilterKernel / StringifyKernel / SinkKernel / InvertKernel /
- * NormalizeKernel / MuxKernel / RangeSourceKernel / FeedbackAddKernel /
- * BatchSumKernel / CastKernel / AffineKernel / ClampKernel / ReduceKernel ——
- * 权威清单见 cpp/kernels/register.cc)。名字都带 `Kernel` 后缀,YAML 里须照写。
- *
- * 宿主须在 init_from_yaml **之前**调用一次,否则会得到「算子未注册」。幂等。
- *
- * 由可选的官方 C++ kernels 组件提供。CMake 构建以
- * `-DLMFLOW_BUILD_KERNELS=ON`(默认)把它链接进 `lmflow::lmflow`;关闭该开关时
- * 只构建纯 Rust core,**本符号不存在**。那种用法下请用 Rust 的
- * `register_kernel`(或 C ABI 的 lmflow_register_kernel)注册自定义算子。
- *
- * 用显式函数而非静态初始化,是因为静态初始化对象在静态库中可能被链接器裁剪
- * (见 docs/design.md §5.1 与 §14 风险登记)。 */
-void lmflow_register_builtin_kernels(void);
+typedef enum {
+  LMFLOW_KERNEL_LANGUAGE_UNKNOWN = 0,
+  LMFLOW_KERNEL_LANGUAGE_RUST = 1,
+  LMFLOW_KERNEL_LANGUAGE_CPP = 2,
+  LMFLOW_KERNEL_LANGUAGE_PYTHON = 3,
+  LMFLOW_KERNEL_LANGUAGE_C = 4,
+} LMFlowKernelLanguage;
 
 /* 注册算子。同名重复注册返回 LMFLOW_ERR_INVALID_ARG。
  * 生命周期:引擎在本调用内**按值拷贝** *vt 的内容,返回后不再引用该指针 ——
@@ -313,6 +304,9 @@ void lmflow_register_builtin_kernels(void);
  *   **factory 例外**:它被长期保存(每次实例化算子时回传给 create/get_contract),
  *   故须指向静态存储或至少活到图销毁的对象。不用 factory 时传 NULL。 */
 LMFlowStatus lmflow_register_kernel(const char* name, const LMFlowKernelVTable* vt, void* factory);
+LMFlowStatus lmflow_register_kernel_with_language(
+    const char* name, const LMFlowKernelVTable* vt, void* factory,
+    LMFlowKernelLanguage language);
 
 /* ---------- Contract:在 get_contract 里声明端口类型约束 ----------
  * 端口的数量与名字来自 YAML,故此处可查询后再逐个声明。

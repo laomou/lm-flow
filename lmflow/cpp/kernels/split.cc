@@ -1,8 +1,6 @@
 // split.cc —— 扇出:1 进 N 出,把同一输入 Forward 到每个输出口(共享同一 payload)。
 #include "lmflow/flow.hpp"
 
-#include "builtins.hpp"
-
 namespace {
 class SplitKernel : public lmflow::Kernel {
  public:
@@ -17,6 +15,4 @@ class SplitKernel : public lmflow::Kernel {
 };
 }  // namespace
 
-void RegisterSplitKernel() {
-  lmflow_register_kernel("SplitKernel", lmflow::KernelAdapter<SplitKernel>::vtable(), nullptr);
-}
+LMFLOW_REGISTER_KERNEL(SplitKernel)

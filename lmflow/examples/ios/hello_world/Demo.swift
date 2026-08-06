@@ -32,8 +32,6 @@ enum LmFlow {
     static func runScale(_ inputs: [Int64], factor: Int64) -> [Int64] {
         installLogging()
         precondition(lmflow_abi_version() == UInt32(LMFLOW_ABI_VERSION), "ABI mismatch")
-        lmflow_register_builtin_kernels()  // 幂等
-
         guard let g = lmflow_graph_new() else { fatalError("graph_new") }
         defer { lmflow_graph_free(g) }
 

@@ -4,8 +4,6 @@
 
 #include "lmflow/flow.hpp"
 
-#include "builtins.hpp"
-
 namespace {
 class InvertKernel : public lmflow::Kernel {
  public:
@@ -32,6 +30,4 @@ class InvertKernel : public lmflow::Kernel {
 };
 }  // namespace
 
-void RegisterInvertKernel() {
-  lmflow_register_kernel("InvertKernel", lmflow::KernelAdapter<InvertKernel>::vtable(), nullptr);
-}
+LMFLOW_REGISTER_KERNEL(InvertKernel)

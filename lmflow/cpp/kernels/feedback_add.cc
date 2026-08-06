@@ -3,8 +3,6 @@
 // 接成自环(out 回灌到本节点)时即「运行累加」:out(t) = in(t) + out(t-1)。
 #include "lmflow/flow.hpp"
 
-#include "builtins.hpp"
-
 namespace {
 class FeedbackAddKernel : public lmflow::Kernel {
  public:
@@ -24,7 +22,4 @@ class FeedbackAddKernel : public lmflow::Kernel {
 };
 }  // namespace
 
-void RegisterFeedbackAddKernel() {
-  lmflow_register_kernel("FeedbackAddKernel", lmflow::KernelAdapter<FeedbackAddKernel>::vtable(),
-                         nullptr);
-}
+LMFLOW_REGISTER_KERNEL(FeedbackAddKernel)

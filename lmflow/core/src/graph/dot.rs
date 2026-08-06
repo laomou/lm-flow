@@ -826,6 +826,7 @@ impl GraphInner {
             let short = n.name.rsplit('/').next().unwrap_or(n.name.as_str());
             let short_label = truncate_label(short, NODE_LABEL_CHARS);
             let kernel_label = truncate_label(&n.kernel_name, KERNEL_LABEL_CHARS);
+            let kernel_language = n.kernel.language().label();
             let node_state = node_states[i];
             let executor_group = n.executor;
             layout_keys[i] = (executor_group, node_state.sort_order());
@@ -1090,9 +1091,10 @@ impl GraphInner {
                 1
             };
             lines[i] = format!(
-                "  n{i} [label=\"{}\\n({})\\n{}{}\", fillcolor=\"{}\", color=\"{}\", penwidth={}, group=\"exec{}\", tooltip=\"{}\"];\n",
+                "  n{i} [label=\"{}\\n({} · {})\\n{}{}\", fillcolor=\"{}\", color=\"{}\", penwidth={}, group=\"exec{}\", tooltip=\"{}\"];\n",
                 escape_dot(&short_label),
                 escape_dot(&kernel_label),
+                kernel_language,
                 escape_dot(&exec),
                 extra,
                 fill,
@@ -1100,9 +1102,10 @@ impl GraphInner {
                 state_penwidth,
                 executor_group,
                 escape_dot(&format!(
-                    "{} ({}) on {}: state {}, stats {}, processed {}, avg {}, in {}, out {}, errors {}, CoW {} copies / {}, hotspot rank {}, pressure path {}",
+                    "{} ({} · {}) on {}: state {}, stats {}, processed {}, avg {}, in {}, out {}, errors {}, CoW {} copies / {}, hotspot rank {}, pressure path {}",
                     n.name,
                     n.kernel_name,
+                    kernel_language,
                     exec,
                     node_state.label(),
                     self.stats_level.as_str(),

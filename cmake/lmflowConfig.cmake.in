@@ -20,11 +20,25 @@ if(NOT TARGET lmflow::core_static)
 endif()
 
 if(@LMFLOW_BUILD_KERNELS@ AND NOT TARGET lmflow::kernels)
-  add_library(lmflow::kernels STATIC IMPORTED)
-  set_target_properties(lmflow::kernels PROPERTIES
+  add_library(lmflow::kernels_archive STATIC IMPORTED)
+  set_target_properties(lmflow::kernels_archive PROPERTIES
     IMPORTED_LOCATION "${PACKAGE_PREFIX_DIR}/lib/@CMAKE_STATIC_LIBRARY_PREFIX@lmflow_kernels@CMAKE_STATIC_LIBRARY_SUFFIX@"
     INTERFACE_INCLUDE_DIRECTORIES "${PACKAGE_PREFIX_DIR}/include")
-  target_link_libraries(lmflow::kernels INTERFACE lmflow::core_static)
+  target_link_libraries(lmflow::kernels_archive INTERFACE lmflow::core_static)
+
+  add_library(lmflow::kernels INTERFACE IMPORTED)
+  if(MSVC)
+    target_link_libraries(lmflow::kernels INTERFACE lmflow::kernels_archive)
+    target_link_options(lmflow::kernels INTERFACE
+      "/WHOLEARCHIVE:$<TARGET_FILE:lmflow::kernels_archive>")
+  elseif(APPLE)
+    target_link_libraries(lmflow::kernels INTERFACE lmflow::kernels_archive)
+    target_link_options(lmflow::kernels INTERFACE
+      "SHELL:-Wl,-force_load,$<TARGET_FILE:lmflow::kernels_archive>")
+  else()
+    target_link_libraries(lmflow::kernels INTERFACE
+      "-Wl,--whole-archive" lmflow::kernels_archive "-Wl,--no-whole-archive")
+  endif()
 endif()
 
 if(@BUILD_SHARED_LIBS@)

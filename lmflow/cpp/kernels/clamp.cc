@@ -5,8 +5,6 @@
 #include "lmflow/flow.hpp"
 
 #include "buffer_util.hpp"
-#include "builtins.hpp"
-
 namespace {
 class ClampKernel : public lmflow::Kernel {
  public:
@@ -47,6 +45,4 @@ class ClampKernel : public lmflow::Kernel {
 };
 }  // namespace
 
-void RegisterClampKernel() {
-  lmflow_register_kernel("ClampKernel", lmflow::KernelAdapter<ClampKernel>::vtable(), nullptr);
-}
+LMFLOW_REGISTER_KERNEL(ClampKernel)

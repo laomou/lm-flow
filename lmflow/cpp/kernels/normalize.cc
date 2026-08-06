@@ -15,8 +15,6 @@
 
 #include "lmflow/flow.hpp"
 
-#include "builtins.hpp"
-
 namespace {
 class NormalizeKernel : public lmflow::Kernel {
  public:
@@ -75,7 +73,4 @@ class NormalizeKernel : public lmflow::Kernel {
 };
 }  // namespace
 
-void RegisterNormalizeKernel() {
-  lmflow_register_kernel("NormalizeKernel", lmflow::KernelAdapter<NormalizeKernel>::vtable(),
-                         nullptr);
-}
+LMFLOW_REGISTER_KERNEL(NormalizeKernel)

@@ -215,6 +215,10 @@ output_ports: [out]
     graph.wait_done_timeout(Duration::from_secs(2)).unwrap();
 
     let diagnostics = graph.to_dot_with_view(DotView::Diagnostics);
+    assert!(
+        diagnostics.contains("PercentileSlow · Rust"),
+        "{diagnostics}"
+    );
     assert!(diagnostics.contains("\\nlat p50 "), "{diagnostics}");
     assert!(diagnostics.contains(" · p95 "), "{diagnostics}");
     assert!(diagnostics.contains(" · p99 "), "{diagnostics}");

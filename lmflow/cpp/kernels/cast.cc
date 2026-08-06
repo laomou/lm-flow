@@ -3,8 +3,6 @@
 #include "lmflow/flow.hpp"
 
 #include "buffer_util.hpp"
-#include "builtins.hpp"
-
 namespace {
 class CastKernel : public lmflow::Kernel {
  public:
@@ -45,6 +43,4 @@ class CastKernel : public lmflow::Kernel {
 };
 }  // namespace
 
-void RegisterCastKernel() {
-  lmflow_register_kernel("CastKernel", lmflow::KernelAdapter<CastKernel>::vtable(), nullptr);
-}
+LMFLOW_REGISTER_KERNEL(CastKernel)

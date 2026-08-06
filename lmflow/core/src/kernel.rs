@@ -25,6 +25,29 @@ pub struct KernelVTable {
 pub struct KernelReg {
     pub vtable: KernelVTable,
     pub factory: *mut c_void,
+    pub language: KernelLanguage,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u32)]
+pub enum KernelLanguage {
+    Unknown = 0,
+    Rust = 1,
+    Cpp = 2,
+    Python = 3,
+    C = 4,
+}
+
+impl KernelLanguage {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Unknown => "unknown",
+            Self::Rust => "Rust",
+            Self::Cpp => "C++",
+            Self::Python => "Python",
+            Self::C => "C",
+        }
+    }
 }
 
 // 安全性:factory 由注册方提供、要求指向静态存储或长生命周期对象;
@@ -37,6 +60,15 @@ static REGISTRY: LazyLock<Mutex<BTreeMap<String, KernelReg>>> =
     LazyLock::new(|| Mutex::new(BTreeMap::new()));
 
 pub fn register(name: &str, vtable: KernelVTable, factory: *mut c_void) -> Result<()> {
+    register_with_language(name, vtable, factory, KernelLanguage::Unknown)
+}
+
+pub fn register_with_language(
+    name: &str,
+    vtable: KernelVTable,
+    factory: *mut c_void,
+    language: KernelLanguage,
+) -> Result<()> {
     if name.is_empty() {
         return Err(Error::InvalidArg("kernel name must not be empty".into()));
     }
@@ -51,7 +83,14 @@ pub fn register(name: &str, vtable: KernelVTable, factory: *mut c_void) -> Resul
             "kernel `{name}` already registered"
         )));
     }
-    reg.insert(name.to_string(), KernelReg { vtable, factory });
+    reg.insert(
+        name.to_string(),
+        KernelReg {
+            vtable,
+            factory,
+            language,
+        },
+    );
     Ok(())
 }
 
@@ -86,6 +125,7 @@ pub struct KernelInstance {
     self_ptr: *mut c_void,
     vtable: KernelVTable,
     kernel_name: String,
+    language: KernelLanguage,
 }
 
 // 安全性:self_ptr 指向算子实例,由「节点独占令牌」保证任一时刻只被单线程访问
@@ -105,11 +145,16 @@ impl KernelInstance {
             self_ptr,
             vtable: reg.vtable,
             kernel_name: kernel_name.to_string(),
+            language: reg.language,
         })
     }
 
     pub fn kernel_name(&self) -> &str {
         &self.kernel_name
+    }
+
+    pub fn language(&self) -> KernelLanguage {
+        self.language
     }
 
     /// 调 C 侧 `get_contract` 填充契约。

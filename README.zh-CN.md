@@ -116,8 +116,6 @@ pip install lm-lmflow               # 预编译 wheel(Linux manylinux / macOS)
 ```python
 import lmflow
 
-lmflow.register_builtin_kernels()
-
 @lmflow.kernel("Double")
 class Double(lmflow.Kernel):
     def process(self, cc):
@@ -183,10 +181,18 @@ lmflow-v0.3.0-linux-x86_64/
 └── lib/       liblmflow_core.a · liblmflow_kernels.a · liblmflow.so
 ```
 
+```cmake
+# 推荐：该 target 会跨平台保留全部静态算子注册对象。
+find_package(lmflow REQUIRED)
+target_link_libraries(my_host PRIVATE lmflow::lmflow)
+```
+
+不使用 CMake 时，需要显式保留完整的 kernels archive：
+
 ```bash
-# 链静态组件(推荐,尤其移动端嵌入):
 g++ -std=c++17 -Iinclude my_host.cc \
-  lib/liblmflow_kernels.a lib/liblmflow_core.a -lpthread -ldl -lm -o my_host
+  -Wl,--whole-archive lib/liblmflow_kernels.a -Wl,--no-whole-archive \
+  lib/liblmflow_core.a -lpthread -ldl -lm -o my_host
 ```
 
 本地自己构建原生 SDK：
@@ -216,7 +222,7 @@ cmake --install build --prefix /opt/lmflow   # → headers + lib + lib/cmake/lmf
 - `BUILD_SHARED_LIBS=ON`：安装纯 core 的 `liblmflow_core.so` 和完整的 `liblmflow.so`。
 - `BUILD_SHARED_LIBS=OFF`：静态目标由 `liblmflow_core.a` 与可选的 `liblmflow_kernels.a` 组成。
 - `LMFLOW_BUILD_KERNELS=ON`（默认）：`lmflow::lmflow` 包含 18 个官方 C++ kernels。
-- `LMFLOW_BUILD_KERNELS=OFF`：只构建纯 Rust 引擎，不提供 `lmflow_register_builtin_kernels`。
+- `LMFLOW_BUILD_KERNELS=OFF`：只构建纯 Rust 引擎，不包含捆绑的 C++ 算子。
 
 消费者按边界选择：
 

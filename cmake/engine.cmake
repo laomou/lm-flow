@@ -74,7 +74,21 @@ function(_lmflow_whole_archive target)
   endif()
 endfunction()
 
-function(_lmflow_add_windows_exports target include_kernels)
+function(_lmflow_interface_whole_archive target library)
+  if(MSVC)
+    target_link_libraries(${target} INTERFACE ${library})
+    target_link_options(${target} INTERFACE "/WHOLEARCHIVE:$<TARGET_FILE:${library}>")
+  elseif(APPLE)
+    target_link_libraries(${target} INTERFACE ${library})
+    target_link_options(${target} INTERFACE
+      "SHELL:-Wl,-force_load,$<TARGET_FILE:${library}>")
+  else()
+    target_link_libraries(${target} INTERFACE
+      "-Wl,--whole-archive" ${library} "-Wl,--no-whole-archive")
+  endif()
+endfunction()
+
+function(_lmflow_add_windows_exports target)
   if(NOT MSVC)
     return()
   endif()
@@ -85,9 +99,7 @@ function(_lmflow_add_windows_exports target include_kernels)
   foreach(_line IN LISTS _lmflow_header_lines)
     string(REGEX MATCH "lmflow_[a-z_0-9]+" _symbol "${_line}")
     if(_symbol)
-      if(include_kernels OR NOT _symbol STREQUAL "lmflow_register_builtin_kernels")
-        list(APPEND _lmflow_exports "${_symbol}")
-      endif()
+      list(APPEND _lmflow_exports "${_symbol}")
     endif()
   endforeach()
   list(REMOVE_DUPLICATES _lmflow_exports)
@@ -104,15 +116,23 @@ endfunction()
 if(LMFLOW_BUILD_KERNELS)
   file(GLOB _lmflow_kernel_sources CONFIGURE_DEPENDS
        "${LMFLOW_SRC}/cpp/kernels/*.cc")
-  add_library(lmflow_kernels STATIC
+  add_library(lmflow_kernels_archive STATIC
     ${_lmflow_kernel_sources}
     "${LMFLOW_SRC}/cpp/abi_assert.cc")
-  set_target_properties(lmflow_kernels PROPERTIES POSITION_INDEPENDENT_CODE ON)
-  target_include_directories(lmflow_kernels PUBLIC
+  set_target_properties(lmflow_kernels_archive PROPERTIES
+    OUTPUT_NAME lmflow_kernels
+    POSITION_INDEPENDENT_CODE ON)
+  target_include_directories(lmflow_kernels_archive PUBLIC
     "$<BUILD_INTERFACE:${LMFLOW_SRC}/include>"
     "$<INSTALL_INTERFACE:include>")
-  target_link_libraries(lmflow_kernels PUBLIC lmflow_core_static)
-  add_dependencies(lmflow_kernels flow_engine)
+  target_link_libraries(lmflow_kernels_archive PUBLIC lmflow_core_static)
+  add_dependencies(lmflow_kernels_archive flow_engine)
+
+  add_library(lmflow_kernels INTERFACE)
+  _lmflow_interface_whole_archive(lmflow_kernels lmflow_kernels_archive)
+  target_include_directories(lmflow_kernels INTERFACE
+    "$<BUILD_INTERFACE:${LMFLOW_SRC}/include>"
+    "$<INSTALL_INTERFACE:include>")
   add_library(lmflow::kernels ALIAS lmflow_kernels)
 endif()
 
@@ -123,7 +143,7 @@ if(BUILD_SHARED_LIBS)
     WINDOWS_EXPORT_ALL_SYMBOLS ON)
   add_dependencies(lmflow_core_shared flow_engine)
   _lmflow_whole_archive(lmflow_core_shared lmflow_core_static)
-  _lmflow_add_windows_exports(lmflow_core_shared FALSE)
+  _lmflow_add_windows_exports(lmflow_core_shared)
   add_library(lmflow::core ALIAS lmflow_core_shared)
 
   add_library(lmflow_complete SHARED "${LMFLOW_ROOT}/cmake/lmflow_link.cc")
@@ -132,11 +152,11 @@ if(BUILD_SHARED_LIBS)
     WINDOWS_EXPORT_ALL_SYMBOLS ON)
   add_dependencies(lmflow_complete flow_engine)
   if(LMFLOW_BUILD_KERNELS)
-    _lmflow_whole_archive(lmflow_complete lmflow_core_static lmflow_kernels)
+    _lmflow_whole_archive(lmflow_complete lmflow_core_static lmflow_kernels_archive)
   else()
     _lmflow_whole_archive(lmflow_complete lmflow_core_static)
   endif()
-  _lmflow_add_windows_exports(lmflow_complete "${LMFLOW_BUILD_KERNELS}")
+  _lmflow_add_windows_exports(lmflow_complete)
 else()
   add_library(lmflow_core INTERFACE)
   target_link_libraries(lmflow_core INTERFACE lmflow_core_static)

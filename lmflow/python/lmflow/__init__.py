@@ -98,7 +98,6 @@ __all__ = [
     "Timeout",
     "KernelError",
     "registered_kernels",
-    "register_builtin_kernels",
     "has_cv_test_kernels",
     "register_cv_test_kernels",
     "type_name",
@@ -228,20 +227,6 @@ def kernel(name: str) -> Callable[[type], type]:
 def registered_kernels() -> Sequence[str]:
     """Names of registered kernels (including the C++ builtins)."""
     return _native.registered_kernels()
-
-
-def register_builtin_kernels() -> None:
-    """Register the bundled C++ builtin kernels.
-
-    **You normally do not need to call this** — importing ``lmflow`` already did it.
-    It stays public and idempotent so existing code keeps working, and so a host that
-    wants the registration to happen at a specific moment can still ask for it.
-
-    Raises if this extension was built without the kernels
-    (``LMFLOW_BUILD_KERNELS=OFF``), in which case only the pure-Rust kernels
-    (``PassThrough`` / ``Sink``) and your own Python kernels are available.
-    """
-    _native.register_builtin_kernels()
 
 
 def has_cv_test_kernels() -> bool:
@@ -580,17 +565,6 @@ def _poller_iter(self: Poller) -> Iterator[Packet]:
 
 
 Poller.__iter__ = _poller_iter  # type: ignore[attr-defined]
-
-# 内置 C++ 算子在 import 时就注册好,宿主不必记得调 register_builtin_kernels()。
-# 忘了调的症状是建图时报 "kernel not registered" —— 离病根很远,不值得让每个用户踩。
-#
-# 用 try 而不是先查条件:扩展可能是 LMFLOW_BUILD_KERNELS=OFF 构建的(纯 Rust 引擎),
-# 那时绑定层会抛(见 bindings.cc 的 LMFLOW_HAS_BUILTIN_KERNELS)。这种构建下没有内置
-# 算子可注册,不是错误,静默跳过即可 —— 真去用某个内置算子时,建图会明确报它未注册。
-try:
-    _native.register_builtin_kernels()
-except Exception:  # pragma: no cover - 仅纯 Rust 构建走到
-    pass
 
 # 版本信息
 ABI_VERSION = _native.ABI_VERSION

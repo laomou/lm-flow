@@ -54,7 +54,7 @@ build-frontend = "build"
 # 显式钉死 CPython 3.9–3.12(不随 cibuildwheel 默认版本漂移)。
 build = ["cp39-*", "cp310-*", "cp311-*", "cp312-*"]
 skip = ["*-musllinux*", "pp*", "*_i686", "*-win32"]
-test-command = "python -c \"import lmflow; lmflow.register_builtin_kernels(); print('lm-flow OK', len(lmflow.registered_kernels()))\""
+test-command = "python -c \"import lmflow; print('lm-flow OK', len(lmflow.registered_kernels()))\""
 
 [tool.cibuildwheel.linux]
 # 在 manylinux 容器内构建:装 rustup,把 cargo 放进 PATH。auditwheel 会自动把

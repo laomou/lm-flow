@@ -14,8 +14,6 @@
 //     output_ports: ["out"]
 #include "lmflow/flow.hpp"
 
-#include "builtins.hpp"
-
 namespace {
 class MuxKernel : public lmflow::Kernel {
  public:
@@ -36,6 +34,4 @@ class MuxKernel : public lmflow::Kernel {
 };
 }  // namespace
 
-void RegisterMuxKernel() {
-  lmflow_register_kernel("MuxKernel", lmflow::KernelAdapter<MuxKernel>::vtable(), nullptr);
-}
+LMFLOW_REGISTER_KERNEL(MuxKernel)

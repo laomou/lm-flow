@@ -1,8 +1,6 @@
 // passthrough.cc —— 零拷贝直通:把输入原样转发到输出(复用同一 payload,不拷贝)。
 #include "lmflow/flow.hpp"
 
-#include "builtins.hpp"
-
 namespace {
 class PassThroughKernel : public lmflow::Kernel {
  public:
@@ -17,7 +15,4 @@ class PassThroughKernel : public lmflow::Kernel {
 };
 }  // namespace
 
-void RegisterPassThroughKernel() {
-  lmflow_register_kernel("PassThroughKernel", lmflow::KernelAdapter<PassThroughKernel>::vtable(),
-                         nullptr);
-}
+LMFLOW_REGISTER_KERNEL(PassThroughKernel)

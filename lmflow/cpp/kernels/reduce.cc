@@ -5,8 +5,6 @@
 #include "lmflow/flow.hpp"
 
 #include "buffer_util.hpp"
-#include "builtins.hpp"
-
 namespace {
 class ReduceKernel : public lmflow::Kernel {
  public:
@@ -66,6 +64,4 @@ class ReduceKernel : public lmflow::Kernel {
 };
 }  // namespace
 
-void RegisterReduceKernel() {
-  lmflow_register_kernel("ReduceKernel", lmflow::KernelAdapter<ReduceKernel>::vtable(), nullptr);
-}
+LMFLOW_REGISTER_KERNEL(ReduceKernel)
