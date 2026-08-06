@@ -70,6 +70,14 @@ fn summary_json(path: &str, plan: &GraphPlan) -> serde_json::Value {
             "executor": if node.executor.is_empty() { "default" } else { &node.executor },
             "inputs": node.input_ports,
             "outputs": node.output_ports,
+            "input_policy": node.input_policy.r#type,
+            "max_in_flight": node.max_in_flight,
+            "rate_hz": node.rate,
+            "input_queue_packets": node.input_queues.packets,
+        })).collect::<Vec<_>>(),
+        "diagnostics": plan.diagnostics().iter().map(|diagnostic| json!({
+            "code": diagnostic.code,
+            "message": diagnostic.message,
         })).collect::<Vec<_>>(),
         "executors": config.executors.iter().map(|executor| json!({
             "name": executor.name,
@@ -79,6 +87,8 @@ fn summary_json(path: &str, plan: &GraphPlan) -> serde_json::Value {
                 &executor.r#type
             },
             "threads": executor.num_threads,
+            "affinity": executor.affinity,
+            "priority": executor.priority,
         })).collect::<Vec<_>>(),
         "graph_inputs": config.input_ports,
         "graph_outputs": config.output_ports,

@@ -113,3 +113,43 @@ fn dot_and_json_are_mutually_exclusive() {
         .contains("[--json|--dot]"));
     std::fs::remove_file(path).unwrap();
 }
+
+#[test]
+fn json_includes_static_diagnostics_and_node_runtime_hints() {
+    let path = write_config(
+        r#"
+executors:
+  - { name: idle, type: ThreadPoolExecutor, num_threads: 3, affinity: [1, 3], priority: 7 }
+nodes:
+  - name: source
+    kernel: NotLinked
+    input_policy: { type: immediate }
+    max_in_flight: 2
+    rate: 30
+    output_ports: [unused]
+input_ports: [orphan]
+output_ports: []
+"#,
+    );
+    let output = Command::new(env!("CARGO_BIN_EXE_lmflow"))
+        .args(["check-config", path.to_str().unwrap(), "--json"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["nodes"][0]["input_policy"], "immediate");
+    assert_eq!(value["nodes"][0]["max_in_flight"], 2);
+    assert_eq!(value["nodes"][0]["rate_hz"], 30.0);
+    assert_eq!(value["executors"][0]["affinity"], serde_json::json!([1, 3]));
+    assert_eq!(value["executors"][0]["priority"], 7);
+    let codes: Vec<_> = value["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|diagnostic| diagnostic["code"].as_str().unwrap())
+        .collect();
+    assert!(codes.contains(&"unconsumed_graph_input"));
+    assert!(codes.contains(&"unconsumed_node_output"));
+    assert!(codes.contains(&"unused_executor"));
+    std::fs::remove_file(path).unwrap();
+}
