@@ -480,6 +480,11 @@ dtypes: `U8`=0, `I8`=1, `U16`=2, `I16`=3, `I32`=4, `I64`=5, `F16`=6, `F32`=7, `F
 `reserved` fields are a one-time allowance for future growth — most likely describing non-CPU memory
 — so that adding a field does not change `sizeof` and does not break existing binaries.
 
+`lmflow_packet_from_buffer` currently accepts CPU memory only. Before reading `data`, it rejects an
+out-of-range `ndim`, unknown dtype or flag bits, non-zero reserved fields, non-zero unused
+shape/stride entries, null data for a non-empty view, and layouts whose
+address calculations overflow. Negative strides and non-contiguous CPU views remain supported.
+
 ```c
 LMFlowPacket lmflow_packet_new_buffer(int32_t ndim, const int64_t* shape, int32_t dtype,
                                       int64_t ts, LMFlowBuffer* out);

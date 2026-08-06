@@ -246,7 +246,10 @@ size_t lmflow_dtype_size(int32_t dtype); /* 未知 dtype 返回 0 */
 LMFlowPacket lmflow_packet_new_buffer(int32_t ndim, const int64_t* shape, int32_t dtype, int64_t ts,
                                   LMFlowBuffer* out);
 
-/* 从外部缓冲**拷贝**一份(最简单也最安全;src 可在返回后立即失效)。 */
+/* 从外部缓冲**拷贝**一份(最简单也最安全;src 可在返回后立即失效)。
+ * 当前仅接受 LMFLOW_DEVICE_CPU。ndim、dtype、shape、strides、flags、reserved 与可寻址
+ * 偏移会在读取 data 前统一校验；未知 flag、非零 reserved、非法/溢出布局均失败并设置
+ * lmflow_last_error。READONLY 只描述源视图，拷贝后的引擎缓冲仍由引擎正常管理。 */
 LMFlowPacket lmflow_packet_from_buffer(const LMFlowBuffer* src, int64_t ts);
 
 /* 取只读视图;非 BUFFER 包返回 false。视图在包存活期间有效。

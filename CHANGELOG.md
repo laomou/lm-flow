@@ -10,6 +10,14 @@ to each GitHub Release.
 
 ## [Unreleased]
 
+### Fixed
+
+- **External buffer descriptors are validated before memory access.**
+  `lmflow_packet_from_buffer` now rejects non-CPU devices, unknown flags, non-zero reserved or
+  unused fields, invalid dimensions/dtypes/strides, null data for non-empty views, and overflowing
+  allocation sizes or pointer offsets before dereferencing the caller's data. Valid
+  negative-stride, broadcast, and non-contiguous CPU views remain supported.
+
 ### Changed
 
 - **BREAKING — custom types now require one canonical descriptor.** The name-only

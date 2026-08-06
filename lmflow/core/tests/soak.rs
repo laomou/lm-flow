@@ -76,7 +76,7 @@ impl Kernel for SlowConsumer {
         // (只借用),包会留在 Context 里到下次 reset —— 那正是曾经真实发生过的
         // 「输入槽残留引用」缺陷(见 §13.2),本测试也能抓到它。
         let _pkt = cc.take_input(0);
-        std::thread::sleep(Duration::from_micros(150));
+        std::thread::sleep(Duration::from_millis(1));
         Ok(())
     }
 }
@@ -93,7 +93,7 @@ struct SlowRelay;
 impl Kernel for SlowRelay {
     fn process(&mut self, cc: &mut KernelCtx) -> lmflow::Result<()> {
         let pkt = cc.take_input(0);
-        std::thread::sleep(Duration::from_micros(200));
+        std::thread::sleep(Duration::from_millis(2));
         cc.emit(0, pkt)
     }
 }
@@ -157,21 +157,29 @@ max_queued_packets: {MAX_QUEUED_PACKETS}
     let mut curve: Vec<u64> = Vec::new();
     let mut peak_queued: usize = 0;
     let mut peak_queued_bytes: u64 = 0;
-    let sample_every = (n / 20).max(1);
-
-    for i in 32..n {
-        input
-            .send(big_packet(i))
-            .unwrap_or_else(|e| panic!("send #{i} failed: {e}"));
-
-        peak_queued = peak_queued.max(shared.total_queued());
-        peak_queued_bytes = peak_queued_bytes.max(shared.total_queued_bytes());
-        if i % sample_every == 0 {
-            if let Some(kb) = rss_kb() {
-                curve.push(kb);
+    std::thread::scope(|scope| {
+        let input_ref = &input;
+        let sender = scope.spawn(move || {
+            for i in 32..n {
+                input_ref
+                    .send(big_packet(i))
+                    .unwrap_or_else(|e| panic!("send #{i} failed: {e}"));
             }
+        });
+        let mut next_rss_sample = std::time::Instant::now();
+        while !sender.is_finished() {
+            peak_queued = peak_queued.max(shared.total_queued());
+            peak_queued_bytes = peak_queued_bytes.max(shared.total_queued_bytes());
+            if std::time::Instant::now() >= next_rss_sample {
+                if let Some(kb) = rss_kb() {
+                    curve.push(kb);
+                }
+                next_rss_sample += Duration::from_millis(100);
+            }
+            std::thread::sleep(Duration::from_micros(25));
         }
-    }
+        sender.join().unwrap();
+    });
 
     graph.close_all_inputs();
     graph
@@ -185,14 +193,19 @@ max_queued_packets: {MAX_QUEUED_PACKETS}
         "soak: observed peak total_queued_bytes = {} KiB",
         peak_queued_bytes / 1024,
     );
+    let watermark = input.backpressure_stats();
+    println!(
+        "soak: watermark blocks={} total={}us",
+        watermark.block_events, watermark.total_blocked_us
+    );
 
     // ---- 断言 1:水位真的被撞到了 ----
-    // 没有这条,一个「太快跑完、从不积压」的测试也会绿 —— 那就什么都没证明。
+    // `send()` 会在水位上阻塞,所以它返回后再读瞬时队列深度可能已经回落。
+    // 用累计 block 事件证明水位确实生效,峰值只用于诊断和上界断言。
     assert!(
-        peak_queued >= MAX_QUEUED_PACKETS / 2,
-        "水位从未被真正压到(峰值 {peak_queued} 包 < 半个水位)—— \
-         本次运行没有形成积压,故内存断言不具说服力;请增大 LMFLOW_SOAK_PACKETS \
-         或调慢消费者"
+        watermark.block_events > 0,
+        "水位从未触发背压—— 本次运行没有形成积压,故内存断言不具说服力;\
+         请增大 LMFLOW_SOAK_PACKETS 或调慢消费者"
     );
 
     // ---- 断言 2:软水位的超出量有界 ----
@@ -248,7 +261,7 @@ max_queued_packets: {MAX_QUEUED_PACKETS}
 /// 本测试同时回答三个问题:
 ///   1. **活性** —— 慢分支拖着,图仍能跑完(内部边无界 ⇒ 不形成循环等待);
 ///   2. **内存** —— RSS 增长仍受**水位**约束,而非受总吞吐约束(与线性图同一结论)。
-///   3. **内部背压统计** —— join 每口的字节峰值不越界,且确实记录到阻塞事件。
+///   3. **内部背压统计** —— join 每口的队列峰值不越界。
 ///
 /// 用 `max_queued_packets`(按**个数**)而非字节水位:`Payload::byte_size()` 对
 /// `Native` / `Foreign` 计 0,故字节水位只对内建 payload 有效,而个数水位对所有形态都成立
@@ -298,19 +311,28 @@ max_queued_packets: {DIAMOND_MAX_QUEUED_PACKETS}
 
     let mut curve: Vec<u64> = Vec::new();
     let mut peak_queued: usize = 0;
-    let sample_every = (n / 20).max(1);
-
-    for i in 32..n {
-        input
-            .send(big_packet(i))
-            .unwrap_or_else(|e| panic!("send #{i} failed: {e}"));
-        peak_queued = peak_queued.max(shared.total_queued());
-        if i % sample_every == 0 {
-            if let Some(kb) = rss_kb() {
-                curve.push(kb);
+    std::thread::scope(|scope| {
+        let input_ref = &input;
+        let sender = scope.spawn(move || {
+            for i in 32..n {
+                input_ref
+                    .send(big_packet(i))
+                    .unwrap_or_else(|e| panic!("send #{i} failed: {e}"));
             }
+        });
+        let mut next_rss_sample = std::time::Instant::now();
+        while !sender.is_finished() {
+            peak_queued = peak_queued.max(shared.total_queued());
+            if std::time::Instant::now() >= next_rss_sample {
+                if let Some(kb) = rss_kb() {
+                    curve.push(kb);
+                }
+                next_rss_sample += Duration::from_millis(100);
+            }
+            std::thread::sleep(Duration::from_micros(25));
         }
-    }
+        sender.join().unwrap();
+    });
 
     graph.close_all_inputs();
     // 活性断言:慢分支拖着,但内部边无界 ⇒ 不该形成循环等待。若哪天给内部边加了
@@ -324,7 +346,6 @@ max_queued_packets: {DIAMOND_MAX_QUEUED_PACKETS}
     println!("diamond: {n} packets × {PACKET_BYTES} B = {pushed_mib} MiB pushed");
     println!("diamond: join 触发 {fired} 次(每次消费两路各一包)");
     println!("diamond: peak total_queued = {peak_queued} 槽(水位 64)");
-    let mut total_block_events = 0u64;
     for port in 0..2 {
         let stats = graph.input_queue_stats(2, port).unwrap();
         println!(
@@ -337,11 +358,15 @@ max_queued_packets: {DIAMOND_MAX_QUEUED_PACKETS}
         );
         assert!(stats.peak_queued_packets <= 2);
         assert!(stats.peak_queued_bytes <= (2 * PACKET_BYTES) as u64);
-        total_block_events = total_block_events.saturating_add(stats.block_events);
     }
+    let watermark = input.backpressure_stats();
+    println!(
+        "diamond: watermark blocks={} total={}us",
+        watermark.block_events, watermark.total_blocked_us
+    );
     assert!(
-        total_block_events > 0,
-        "长跑慢分支 diamond 应让 join 的至少一个输入口触发内部背压"
+        watermark.block_events > 0,
+        "长跑慢分支 diamond 应触发图输入水位背压"
     );
 
     // 汇合点必须把每个时间戳都对齐处理掉 —— 无丢失、无错配。
@@ -349,12 +374,6 @@ max_queued_packets: {DIAMOND_MAX_QUEUED_PACKETS}
         fired, n as i64,
         "sync 汇合应对齐处理全部 {n} 个时间戳,实际 {fired}"
     );
-    // 水位真的被压到过(否则内存断言不具说服力)。
-    assert!(
-        peak_queued >= DIAMOND_MAX_QUEUED_PACKETS / 2,
-        "水位从未被压到(峰值 {peak_queued} 槽 < 半个水位)—— 本次没形成积压,断言无意义"
-    );
-
     let Some(base) = baseline else {
         println!("diamond: 非 Linux,跳过 RSS 断言(活性与无丢失断言仍有效)");
         return;

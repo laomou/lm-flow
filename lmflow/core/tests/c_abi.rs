@@ -625,6 +625,132 @@ fn from_buffer_handles_negative_stride() {
 }
 
 #[test]
+fn from_buffer_rejects_invalid_descriptors_before_dereferencing() {
+    unsafe {
+        let data = [1u8, 2];
+        let valid = LMFlowBuffer {
+            data: data.as_ptr() as *mut c_void,
+            shape: [2, 0, 0, 0, 0, 0, 0, 0],
+            strides: [1, 0, 0, 0, 0, 0, 0, 0],
+            ndim: 1,
+            dtype: 0,
+            ..Default::default()
+        };
+
+        let rejected = |buffer: &LMFlowBuffer, expected: &str| {
+            let packet = lmflow_packet_from_buffer(buffer, 0);
+            assert!(
+                packet.payload.is_null(),
+                "invalid descriptor unexpectedly produced a packet"
+            );
+            let message = last_error();
+            assert!(message.contains(expected), "{message}");
+        };
+
+        let mut buffer = valid;
+        buffer.ndim = 0;
+        rejected(&buffer, "ndim");
+
+        let mut buffer = valid;
+        buffer.ndim = 9;
+        rejected(&buffer, "ndim");
+
+        let mut buffer = valid;
+        buffer.dtype = 99;
+        rejected(&buffer, "dtype");
+
+        let mut buffer = valid;
+        buffer.shape[0] = -1;
+        rejected(&buffer, "must not be negative");
+
+        let mut buffer = valid;
+        buffer.device = 1;
+        buffer.data = std::ptr::dangling_mut::<c_void>();
+        rejected(&buffer, "only LMFLOW_DEVICE_CPU");
+
+        let mut buffer = valid;
+        buffer.flags = 2;
+        rejected(&buffer, "unknown bits");
+
+        let mut buffer = valid;
+        buffer.reserved[0] = 1;
+        rejected(&buffer, "reserved fields must be zero");
+
+        let mut buffer = valid;
+        buffer.shape[1] = 1;
+        rejected(&buffer, "shape entries after ndim");
+
+        let mut buffer = valid;
+        buffer.strides[1] = 1;
+        rejected(&buffer, "stride entries after ndim");
+
+        let mut buffer = valid;
+        buffer.data = std::ptr::null_mut();
+        rejected(&buffer, "data must be non-null");
+
+        let mut buffer = valid;
+        buffer.data = std::ptr::dangling_mut::<c_void>();
+        buffer.shape[0] = 3;
+        buffer.strides[0] = i64::MAX;
+        rejected(&buffer, "exceeds platform pointer offsets");
+
+        let mut buffer = valid;
+        buffer.data = std::ptr::dangling_mut::<c_void>();
+        buffer.shape[0] = 3;
+        buffer.strides[0] = i64::MIN;
+        rejected(&buffer, "exceeds platform pointer offsets");
+
+        let mut readonly = valid;
+        readonly.flags = 1;
+        let mut packet = lmflow_packet_from_buffer(&readonly, 0);
+        assert!(!packet.payload.is_null(), "{}", last_error());
+        lmflow_packet_drop(&mut packet);
+
+        let broadcast_source = [9u8];
+        let broadcast = LMFlowBuffer {
+            data: broadcast_source.as_ptr() as *mut c_void,
+            shape: [3, 0, 0, 0, 0, 0, 0, 0],
+            strides: [0, 0, 0, 0, 0, 0, 0, 0],
+            ndim: 1,
+            dtype: 0,
+            ..Default::default()
+        };
+        let mut packet = lmflow_packet_from_buffer(&broadcast, 0);
+        assert!(!packet.payload.is_null(), "{}", last_error());
+        let mut view = LMFlowBuffer::default();
+        assert!(lmflow_packet_as_buffer(&packet, &mut view));
+        assert_eq!(
+            std::slice::from_raw_parts(view.data as *const u8, 3),
+            &[9, 9, 9],
+            "zero strides are valid broadcast views"
+        );
+        lmflow_packet_drop(&mut packet);
+    }
+}
+
+#[test]
+fn new_buffer_rejects_ndim_above_the_fixed_descriptor_limit() {
+    unsafe {
+        let shape = [1i64; 9];
+        let packet = lmflow_packet_new_buffer(9, shape.as_ptr(), 0, 0, std::ptr::null_mut());
+        assert!(packet.payload.is_null());
+        let message = last_error();
+        assert!(message.contains("1..=8"), "{message}");
+    }
+}
+
+#[test]
+fn new_buffer_rejects_byte_count_overflow_without_allocating() {
+    unsafe {
+        let shape = [i64::MAX];
+        let packet = lmflow_packet_new_buffer(1, shape.as_ptr(), 8, 0, std::ptr::null_mut());
+        assert!(packet.payload.is_null());
+        let message = last_error();
+        assert!(message.contains("overflow"), "{message}");
+    }
+}
+
+#[test]
 fn make_mutable_rejects_borrowed_packet() {
     unsafe {
         // owner==NULL 的自建包不属于引擎,不能 CoW
