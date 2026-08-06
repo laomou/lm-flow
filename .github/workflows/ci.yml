@@ -125,7 +125,7 @@ jobs:
           }
           EOF
           g++ -std=c++17 -Wall -Wextra -Werror -Iinclude \
-              /tmp/cpp_host -Wl,--whole-archive \
+              /tmp/cpp_host.cc -Wl,--whole-archive \
               /tmp/lmflow-external/liblmflow_kernels.a \
               -Wl,--no-whole-archive \
               core/target/release/liblmflow.a \
