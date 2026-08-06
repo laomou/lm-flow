@@ -43,6 +43,11 @@ struct ThrowingProcessKernel : lmflow::Kernel {
   lmflow::Status Process(lmflow::Context&) override { throw std::runtime_error("process boom"); }
 };
 
+struct ThrowingContractKernel : lmflow::Kernel {
+  static void GetContract(lmflow::Contract&) { throw std::runtime_error("contract boom"); }
+  lmflow::Status Process(lmflow::Context&) override { return lmflow::Status::Ok(); }
+};
+
 // 正常算子:Process 不碰 Context,便于纯头文件测试(无需引擎符号)。
 struct OkKernel : lmflow::Kernel {
   lmflow::Status Process(lmflow::Context&) override { return lmflow::Status::Ok(); }
@@ -71,7 +76,9 @@ struct RetCheckMsgKernel : lmflow::Kernel {
 // 一个非空的假句柄即可 —— 糖层只把它原样传给下面这个桩。
 namespace {
 char g_last_error[512];
+char g_contract_error[512];
 LMFlowContext* const kFakeCtx = reinterpret_cast<LMFlowContext*>(1);
+LMFlowContract* const kFakeContract = reinterpret_cast<LMFlowContract*>(1);
 struct RegisteredType {
   std::string name;
   size_t size;
@@ -82,6 +89,10 @@ std::map<uint64_t, RegisteredType> g_registered_types;
 
 extern "C" void lmflow_ctx_set_error(const LMFlowContext*, const char* msg) {
   std::snprintf(g_last_error, sizeof(g_last_error), "%s", msg ? msg : "");
+}
+
+extern "C" void lmflow_contract_set_error(LMFlowContract*, const char* msg) {
+  std::snprintf(g_contract_error, sizeof(g_contract_error), "%s", msg ? msg : "");
 }
 
 extern "C" const char* lmflow_last_error() { return g_last_error; }
@@ -194,6 +205,14 @@ int main() {
     assert(self != nullptr);
     assert(vt->process(self, nullptr) == LMFLOW_OK);
     vt->destroy(self);
+  }
+
+  // 5) GetContract 抛异常:必须记录到 Contract,不能静默继续建图。
+  {
+    g_contract_error[0] = '\0';
+    const LMFlowKernelVTable* vt = lmflow::KernelAdapter<ThrowingContractKernel>::vtable();
+    vt->get_contract(nullptr, kFakeContract);
+    assert(std::strstr(g_contract_error, "contract boom") != nullptr);
   }
 
   test_type_id();

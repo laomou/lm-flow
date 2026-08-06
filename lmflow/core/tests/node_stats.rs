@@ -422,7 +422,7 @@ fn dot_node_state_tracks_idle_running_closed_and_error() {
     let idle = Graph::from_yaml(
         r#"
 nodes:
-  - { name: idle, kernel: PassThrough, input_ports: [in], output_ports: [] }
+  - { name: idle, kernel: Sink, input_ports: [in], output_ports: [] }
 input_ports: [in]
 "#,
     )

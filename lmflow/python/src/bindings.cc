@@ -509,7 +509,14 @@ void py_get_contract(void* factory, LMFlowContract* out) {
     Contract pc(out);
     reg->cls.attr("get_contract")(py::cast(pc, py::return_value_policy::move));
   } catch (py::error_already_set& e) {
-    e.discard_as_unraisable("lmflow: get_contract raised an exception");
+    const std::string message = e.what();
+    lmflow_contract_set_error(out, message.c_str());
+    e.restore();
+    PyErr_Clear();
+  } catch (const std::exception& e) {
+    lmflow_contract_set_error(out, e.what());
+  } catch (...) {
+    lmflow_contract_set_error(out, "Python GetContract threw a non-standard exception");
   }
 }
 

@@ -274,6 +274,7 @@ pub struct Contract {
     pub input_types: Vec<u64>,
     pub output_types: Vec<u64>,
     pub required_side_packets: Vec<String>,
+    error: Option<String>,
 }
 
 impl Contract {
@@ -286,7 +287,18 @@ impl Contract {
             input_types: vec![0; ni],
             output_types: vec![0; no],
             required_side_packets: Vec::new(),
+            error: None,
         }
+    }
+
+    pub(crate) fn record_error(&mut self, message: impl Into<String>) {
+        if self.error.is_none() {
+            self.error = Some(message.into());
+        }
+    }
+
+    pub(crate) fn take_error(&mut self) -> Option<String> {
+        self.error.take()
     }
 }
 
