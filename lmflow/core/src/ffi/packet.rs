@@ -7,7 +7,7 @@
 use std::ffi::{c_char, c_void};
 use std::sync::Arc;
 
-use crate::packet::{self, BufferData, Builtin, Packet, Payload};
+use crate::packet::{self, BufferData, BufferView, Builtin, ExternalBuffer, Packet, Payload};
 use crate::runtime::{self, last_error};
 use crate::status::{code, Error};
 use crate::timestamp::Timestamp;
@@ -402,6 +402,7 @@ struct ValidatedBuffer<'a> {
     strides: &'a [i64],
     element_size: usize,
     element_count: usize,
+    byte_size: u64,
 }
 
 fn validate_buffer_descriptor(src: &LMFlowBuffer) -> crate::status::Result<ValidatedBuffer<'_>> {
@@ -511,12 +512,18 @@ fn validate_buffer_descriptor(src: &LMFlowBuffer) -> crate::status::Result<Valid
             )));
         }
     }
+    let byte_size = element_count
+        .checked_mul(element_size)
+        .ok_or_else(|| Error::InvalidArg("buffer logical byte count overflow".into()))?
+        .try_into()
+        .map_err(|_| Error::InvalidArg("buffer logical byte count exceeds u64".into()))?;
 
     Ok(ValidatedBuffer {
         dims,
         strides,
         element_size,
         element_count,
+        byte_size,
     })
 }
 
@@ -535,6 +542,23 @@ fn fill_buffer(out: *mut LMFlowBuffer, b: &BufferData, readonly: bool, data: *mu
         reserved: [0; 2],
     };
     unsafe { std::ptr::write(out, v) };
+}
+
+fn fill_buffer_view(out: *mut LMFlowBuffer, view: BufferView) {
+    if out.is_null() {
+        return;
+    }
+    let value = LMFlowBuffer {
+        data: view.data,
+        shape: view.shape,
+        strides: view.strides,
+        ndim: view.ndim,
+        dtype: view.dtype,
+        flags: if view.readonly { BUF_FLAG_READONLY } else { 0 },
+        device: DEVICE_CPU,
+        reserved: [0; 2],
+    };
+    unsafe { std::ptr::write(out, value) };
 }
 
 #[no_mangle]
@@ -696,16 +720,65 @@ pub unsafe extern "C" fn lmflow_packet_from_buffer(
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn lmflow_packet_adopt_buffer(
+    src: *const LMFlowBuffer,
+    ts: i64,
+    release_fn: Option<unsafe extern "C" fn(*mut c_void)>,
+    user_data: *mut c_void,
+) -> LMFlowPacket {
+    guard_val(LMFlowPacket::default(), || {
+        if src.is_null() {
+            last_error::set("lmflow_packet_adopt_buffer: src is null");
+            return LMFlowPacket::default();
+        }
+        let Some(release_fn) = release_fn else {
+            last_error::set("lmflow_packet_adopt_buffer: release_fn is null");
+            return LMFlowPacket::default();
+        };
+        let source = &*src;
+        let validated = match validate_buffer_descriptor(source) {
+            Ok(validated) => validated,
+            Err(error) => {
+                last_error::set(&format!("lmflow_packet_adopt_buffer: {error}"));
+                return LMFlowPacket::default();
+            }
+        };
+        let packet = Packet::from_external_buffer(ExternalBuffer {
+            data: source.data,
+            shape: source.shape,
+            strides: source.strides,
+            ndim: source.ndim,
+            dtype: source.dtype,
+            readonly: source.flags & BUF_FLAG_READONLY != 0,
+            element_count: validated.element_count,
+            byte_size: validated.byte_size,
+            release_fn,
+            user_data,
+        })
+        .at(Timestamp(ts));
+        own_packet(packet)
+    })
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn lmflow_packet_as_buffer(
     pkt: *const LMFlowPacket,
     out: *mut LMFlowBuffer,
 ) -> bool {
-    guard_val(false, || match peek_builtin(pkt) {
-        Some(Builtin::Buffer(b)) => {
-            fill_buffer(out, b, true, b.bytes.as_ptr() as *mut c_void);
-            true
+    guard_val(false, || {
+        if pkt.is_null() {
+            return false;
         }
-        _ => false,
+        let packet = &*pkt;
+        if packet.owner.is_null() {
+            return false;
+        }
+        let payload = &*(packet.owner as *const Payload);
+        let Some(view) = payload.buffer_view() else {
+            return false;
+        };
+        fill_buffer_view(out, view);
+        true
     })
 }
 
@@ -726,16 +799,11 @@ pub unsafe extern "C" fn lmflow_packet_make_mutable_buffer(
         }
         // 取回所有权 → CoW → 再交还
         let mut p = take_packet(*fp);
-        let r = match p.make_mutable_builtin() {
-            Ok(Builtin::Buffer(b)) => {
-                let data = b.bytes.as_mut_ptr() as *mut c_void;
-                let snapshot = b.clone();
-                fill_buffer(out, &snapshot, false, data);
+        let r = match p.make_mutable_buffer() {
+            Ok(view) => {
+                fill_buffer_view(out, view);
                 code::OK
             }
-            Ok(_) => fail(Error::InvalidArg(
-                "this packet is not an LMFlowBuffer".into(),
-            )),
             Err(e) => fail(e),
         };
         *fp = own_packet(p);

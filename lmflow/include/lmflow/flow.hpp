@@ -167,6 +167,13 @@ class Packet {
   static Packet NewBuffer(int32_t ndim, const int64_t* shape, int32_t dtype, LMFlowBuffer* out) {
     return Adopt(lmflow_packet_new_buffer(ndim, shape, dtype, LMFLOW_TS_UNSET, out));
   }
+  /// 零拷贝接管外部 CPU buffer。成功后最后一个 Packet 引用释放时调用
+  /// release_fn(user_data)；失败时所有权仍归调用方。
+  static Packet AdoptBuffer(const LMFlowBuffer& buffer, LMFlowBufferReleaseFn release_fn,
+                            void* user_data) {
+    return Adopt(
+        lmflow_packet_adopt_buffer(&buffer, LMFLOW_TS_UNSET, release_fn, user_data));
+  }
 
   bool AsBytes(const void** d, size_t* n) const { return lmflow_packet_as_bytes(&raw_, d, n); }
   bool AsI64(int64_t* o) const { return lmflow_packet_as_i64(&raw_, o); }

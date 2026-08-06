@@ -7,7 +7,10 @@
 mod common;
 
 use std::ffi::{c_char, c_void, CStr, CString};
-use std::sync::Once;
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc, Once,
+};
 
 use lmflow::ffi::*;
 use lmflow::packet::type_id;
@@ -48,6 +51,50 @@ unsafe fn last_error() -> String {
 /// C 调用方自建包:owner=NULL + 自备 drop_fn(所有权在提交时移交引擎)。
 unsafe extern "C" fn drop_boxed_i32(p: *mut c_void) {
     drop(Box::from_raw(p as *mut i32));
+}
+
+struct AdoptedBufferOwner {
+    bytes: Vec<u8>,
+    releases: Arc<AtomicUsize>,
+}
+
+struct SendPacket(LMFlowPacket);
+unsafe impl Send for SendPacket {}
+
+impl SendPacket {
+    unsafe fn drop_packet(self) {
+        let mut packet = self.0;
+        lmflow_packet_drop(&mut packet);
+    }
+}
+
+unsafe extern "C" fn release_adopted_buffer(user_data: *mut c_void) {
+    let owner = Box::from_raw(user_data as *mut AdoptedBufferOwner);
+    owner.releases.fetch_add(1, Ordering::SeqCst);
+}
+
+fn adopted_u8_buffer(
+    bytes: Vec<u8>,
+    shape: [i64; 8],
+    strides: [i64; 8],
+    ndim: i32,
+    readonly: bool,
+) -> (LMFlowBuffer, *mut c_void, Arc<AtomicUsize>) {
+    let releases = Arc::new(AtomicUsize::new(0));
+    let mut owner = Box::new(AdoptedBufferOwner {
+        bytes,
+        releases: releases.clone(),
+    });
+    let buffer = LMFlowBuffer {
+        data: owner.bytes.as_mut_ptr() as *mut c_void,
+        shape,
+        strides,
+        ndim,
+        dtype: 0,
+        flags: u32::from(readonly),
+        ..Default::default()
+    };
+    (buffer, Box::into_raw(owner) as *mut c_void, releases)
 }
 
 unsafe extern "C" fn c_contract_error(_factory: *mut c_void, contract: *mut LMFlowContract) {
@@ -498,6 +545,258 @@ fn cow_copies_when_shared() {
 }
 
 #[test]
+fn adopt_buffer_is_zero_copy_and_releases_after_last_clone() {
+    unsafe {
+        let (source, user_data, releases) = adopted_u8_buffer(
+            vec![1, 2, 3, 4],
+            [4, 0, 0, 0, 0, 0, 0, 0],
+            [1, 0, 0, 0, 0, 0, 0, 0],
+            1,
+            false,
+        );
+        let mut packet =
+            lmflow_packet_adopt_buffer(&source, 7, Some(release_adopted_buffer), user_data);
+        assert!(!packet.payload.is_null(), "{}", last_error());
+        assert_eq!(packet.payload, source.data, "adoption must not copy");
+        assert_eq!(packet.type_id, type_id::BUFFER);
+        assert_eq!(packet.timestamp, 7);
+
+        let mut view = LMFlowBuffer::default();
+        assert!(lmflow_packet_as_buffer(&packet, &mut view));
+        assert_eq!(view.data, source.data);
+        assert_eq!(&view.shape[..1], &[4]);
+        assert_eq!(view.flags, 1, "all borrowed views are read-only");
+
+        let mut clone = lmflow_packet_clone(&packet);
+        assert_eq!(clone.payload, source.data);
+        lmflow_packet_drop(&mut packet);
+        assert_eq!(
+            releases.load(Ordering::SeqCst),
+            0,
+            "the first drop must keep shared external memory alive"
+        );
+        lmflow_packet_drop(&mut clone);
+        assert_eq!(
+            releases.load(Ordering::SeqCst),
+            1,
+            "the external owner must be released exactly once"
+        );
+    }
+}
+
+#[test]
+fn adopted_buffer_final_release_may_run_on_another_thread() {
+    unsafe {
+        let (source, user_data, releases) = adopted_u8_buffer(
+            vec![1, 2, 3, 4],
+            [4, 0, 0, 0, 0, 0, 0, 0],
+            [1, 0, 0, 0, 0, 0, 0, 0],
+            1,
+            false,
+        );
+        let mut original =
+            lmflow_packet_adopt_buffer(&source, 0, Some(release_adopted_buffer), user_data);
+        let clone = SendPacket(lmflow_packet_clone(&original));
+        lmflow_packet_drop(&mut original);
+        let releases_in_thread = releases.clone();
+        std::thread::spawn(move || {
+            clone.drop_packet();
+            assert_eq!(releases_in_thread.load(Ordering::SeqCst), 1);
+        })
+        .join()
+        .unwrap();
+        assert_eq!(releases.load(Ordering::SeqCst), 1);
+    }
+}
+
+#[test]
+fn adopted_empty_buffer_is_still_a_typed_packet() {
+    unsafe {
+        let (source, user_data, releases) = adopted_u8_buffer(
+            Vec::new(),
+            [0, 0, 0, 0, 0, 0, 0, 0],
+            [1, 0, 0, 0, 0, 0, 0, 0],
+            1,
+            false,
+        );
+        let mut packet =
+            lmflow_packet_adopt_buffer(&source, 0, Some(release_adopted_buffer), user_data);
+        assert!(
+            !packet.payload.is_null(),
+            "a zero-element buffer must not be confused with an empty packet"
+        );
+        assert_eq!(packet.type_id, type_id::BUFFER);
+        let mut view = LMFlowBuffer::default();
+        assert!(lmflow_packet_as_buffer(&packet, &mut view));
+        assert_eq!(view.shape[0], 0);
+        assert_eq!(view.data, source.data);
+        lmflow_packet_drop(&mut packet);
+        assert_eq!(releases.load(Ordering::SeqCst), 1);
+    }
+}
+
+#[test]
+fn writable_adopted_buffer_mutates_in_place_when_exclusive() {
+    unsafe {
+        let (source, user_data, releases) = adopted_u8_buffer(
+            vec![10, 20, 30, 40],
+            [2, 2, 0, 0, 0, 0, 0, 0],
+            [2, 1, 0, 0, 0, 0, 0, 0],
+            2,
+            false,
+        );
+        let mut packet =
+            lmflow_packet_adopt_buffer(&source, 0, Some(release_adopted_buffer), user_data);
+        let mut writable = LMFlowBuffer::default();
+        assert_eq!(
+            lmflow_packet_make_mutable_buffer(&mut packet, &mut writable),
+            0,
+            "{}",
+            last_error()
+        );
+        assert_eq!(writable.data, source.data);
+        assert_eq!(&writable.strides[..2], &[2, 1]);
+        assert_eq!(writable.flags, 0);
+        *(writable.data as *mut u8).add(1) = 99;
+
+        let mut view = LMFlowBuffer::default();
+        assert!(lmflow_packet_as_buffer(&packet, &mut view));
+        assert_eq!(
+            std::slice::from_raw_parts(view.data as *const u8, 4),
+            &[10, 99, 30, 40]
+        );
+        lmflow_packet_drop(&mut packet);
+        assert_eq!(releases.load(Ordering::SeqCst), 1);
+    }
+}
+
+#[test]
+fn readonly_and_shared_adopted_buffers_copy_on_write() {
+    unsafe {
+        let (readonly, readonly_owner, readonly_releases) = adopted_u8_buffer(
+            vec![5, 6, 7, 8],
+            [4, 0, 0, 0, 0, 0, 0, 0],
+            [1, 0, 0, 0, 0, 0, 0, 0],
+            1,
+            true,
+        );
+        let mut packet =
+            lmflow_packet_adopt_buffer(&readonly, 0, Some(release_adopted_buffer), readonly_owner);
+        let mut writable = LMFlowBuffer::default();
+        assert_eq!(
+            lmflow_packet_make_mutable_buffer(&mut packet, &mut writable),
+            0
+        );
+        assert_ne!(writable.data, readonly.data);
+        assert_eq!(
+            readonly_releases.load(Ordering::SeqCst),
+            1,
+            "copying a read-only adopted view releases its external owner"
+        );
+        *(writable.data as *mut u8) = 42;
+        lmflow_packet_drop(&mut packet);
+        assert_eq!(readonly_releases.load(Ordering::SeqCst), 1);
+
+        let (shared, shared_owner, shared_releases) = adopted_u8_buffer(
+            vec![11, 12, 13, 14],
+            [4, 0, 0, 0, 0, 0, 0, 0],
+            [1, 0, 0, 0, 0, 0, 0, 0],
+            1,
+            false,
+        );
+        let mut original =
+            lmflow_packet_adopt_buffer(&shared, 0, Some(release_adopted_buffer), shared_owner);
+        let mut branch = lmflow_packet_clone(&original);
+        let mut branch_view = LMFlowBuffer::default();
+        assert_eq!(
+            lmflow_packet_make_mutable_buffer(&mut branch, &mut branch_view),
+            0
+        );
+        assert_ne!(branch_view.data, shared.data);
+        assert_eq!(shared_releases.load(Ordering::SeqCst), 0);
+        *(branch_view.data as *mut u8) = 77;
+        assert_eq!(*(shared.data as *const u8), 11);
+        lmflow_packet_drop(&mut branch);
+        assert_eq!(shared_releases.load(Ordering::SeqCst), 0);
+        lmflow_packet_drop(&mut original);
+        assert_eq!(shared_releases.load(Ordering::SeqCst), 1);
+    }
+}
+
+#[test]
+fn adopt_buffer_preserves_non_contiguous_and_negative_strides() {
+    unsafe {
+        let (transposed, owner, releases) = adopted_u8_buffer(
+            vec![0, 1, 2, 3, 4, 5],
+            [3, 2, 0, 0, 0, 0, 0, 0],
+            [1, 3, 0, 0, 0, 0, 0, 0],
+            2,
+            false,
+        );
+        let mut packet =
+            lmflow_packet_adopt_buffer(&transposed, 0, Some(release_adopted_buffer), owner);
+        let mut view = LMFlowBuffer::default();
+        assert!(lmflow_packet_as_buffer(&packet, &mut view));
+        assert_eq!(view.data, transposed.data);
+        assert_eq!(&view.strides[..2], &[1, 3]);
+        lmflow_packet_drop(&mut packet);
+        assert_eq!(releases.load(Ordering::SeqCst), 1);
+
+        let (mut reversed, owner, releases) = adopted_u8_buffer(
+            vec![10, 20, 30, 40],
+            [4, 0, 0, 0, 0, 0, 0, 0],
+            [-1, 0, 0, 0, 0, 0, 0, 0],
+            1,
+            true,
+        );
+        reversed.data = (reversed.data as *mut u8).add(3) as *mut c_void;
+        let mut packet =
+            lmflow_packet_adopt_buffer(&reversed, 0, Some(release_adopted_buffer), owner);
+        let mut writable = LMFlowBuffer::default();
+        assert_eq!(
+            lmflow_packet_make_mutable_buffer(&mut packet, &mut writable),
+            0
+        );
+        assert_eq!(&writable.strides[..1], &[1]);
+        assert_eq!(
+            std::slice::from_raw_parts(writable.data as *const u8, 4),
+            &[40, 30, 20, 10]
+        );
+        assert_eq!(releases.load(Ordering::SeqCst), 1);
+        lmflow_packet_drop(&mut packet);
+    }
+}
+
+#[test]
+fn adopt_buffer_failure_does_not_take_ownership() {
+    unsafe {
+        let (mut source, user_data, releases) = adopted_u8_buffer(
+            vec![1, 2],
+            [2, 0, 0, 0, 0, 0, 0, 0],
+            [1, 0, 0, 0, 0, 0, 0, 0],
+            1,
+            false,
+        );
+        source.device = 1;
+        let packet =
+            lmflow_packet_adopt_buffer(&source, 0, Some(release_adopted_buffer), user_data);
+        assert!(packet.payload.is_null());
+        assert!(last_error().contains("device"));
+        assert_eq!(
+            releases.load(Ordering::SeqCst),
+            0,
+            "failed adoption must leave ownership with the caller"
+        );
+        release_adopted_buffer(user_data);
+        assert_eq!(releases.load(Ordering::SeqCst), 1);
+
+        let packet = lmflow_packet_adopt_buffer(&source, 0, None, std::ptr::null_mut());
+        assert!(packet.payload.is_null());
+        assert!(last_error().contains("release_fn"));
+    }
+}
+
+#[test]
 fn from_buffer_handles_non_contiguous_strides() {
     unsafe {
         // 源:行优先连续的 2x3 i32 = [[0,1,2],[3,4,5]]
@@ -725,6 +1024,65 @@ fn from_buffer_rejects_invalid_descriptors_before_dereferencing() {
             "zero strides are valid broadcast views"
         );
         lmflow_packet_drop(&mut packet);
+    }
+}
+
+#[test]
+fn adopted_buffer_releases_once_after_graph_fanout_and_cancel() {
+    common::register_test_kernels();
+    unsafe {
+        let graph = lmflow_graph_new();
+        let yaml = cs(r#"
+nodes:
+  - { name: left, kernel: PassThrough, input_ports: [in], output_ports: [left_out] }
+  - { name: right, kernel: PassThrough, input_ports: [in], output_ports: [right_out] }
+input_ports: [in]
+output_ports: [left_out, right_out]
+"#);
+        assert_eq!(lmflow_graph_init_from_yaml(graph, yaml.as_ptr()), 0);
+        let left = lmflow_graph_add_poller(graph, c"left_out".as_ptr());
+        let right = lmflow_graph_add_poller(graph, c"right_out".as_ptr());
+        assert!(!left.is_null() && !right.is_null(), "{}", last_error());
+        assert_eq!(lmflow_graph_start(graph), 0);
+        let input = lmflow_graph_input(graph, c"in".as_ptr());
+
+        let (source, user_data, releases) = adopted_u8_buffer(
+            vec![1, 2, 3, 4],
+            [4, 0, 0, 0, 0, 0, 0, 0],
+            [1, 0, 0, 0, 0, 0, 0, 0],
+            1,
+            false,
+        );
+        let packet =
+            lmflow_packet_adopt_buffer(&source, 1, Some(release_adopted_buffer), user_data);
+        assert_eq!(lmflow_input_send(input, packet), 0, "{}", last_error());
+        assert_eq!(lmflow_graph_wait_until_idle(graph), 0, "{}", last_error());
+        assert_eq!(
+            releases.load(Ordering::SeqCst),
+            0,
+            "graph outputs still retain both fanout references"
+        );
+
+        lmflow_graph_cancel(graph);
+        lmflow_graph_free(graph);
+        lmflow_input_free(input);
+        assert_eq!(
+            releases.load(Ordering::SeqCst),
+            0,
+            "poller queues retain the two fanout references after graph cancellation"
+        );
+        lmflow_poller_free(left);
+        assert_eq!(
+            releases.load(Ordering::SeqCst),
+            0,
+            "the second poller still retains the shared external buffer"
+        );
+        lmflow_poller_free(right);
+        assert_eq!(
+            releases.load(Ordering::SeqCst),
+            1,
+            "the last fanout consumer must release the external owner once"
+        );
     }
 }
 

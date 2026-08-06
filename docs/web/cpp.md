@@ -489,8 +489,20 @@ address calculations overflow. Negative strides and non-contiguous CPU views rem
 LMFlowPacket lmflow_packet_new_buffer(int32_t ndim, const int64_t* shape, int32_t dtype,
                                       int64_t ts, LMFlowBuffer* out);
 LMFlowPacket lmflow_packet_from_buffer(const LMFlowBuffer* src, int64_t ts); /* copies */
+LMFlowPacket lmflow_packet_adopt_buffer(const LMFlowBuffer* src, int64_t ts,
+                                        LMFlowBufferReleaseFn release_fn,
+                                        void* user_data); /* zero-copy ownership transfer */
 bool         lmflow_packet_as_buffer(const LMFlowPacket*, LMFlowBuffer* out); /* read-only view */
 ```
+
+Use `lmflow_packet_adopt_buffer` when an allocator, decoder, camera SDK or tensor runtime already
+owns a CPU allocation that should enter the graph without copying. On success, the packet stores the
+descriptor by value and calls `release_fn(user_data)` exactly once when its final clone is released.
+The callback may run on an engine worker thread. On failure no ownership is transferred.
+
+Adopted buffers preserve non-contiguous, negative and zero strides. A writable, exclusively owned
+adopted buffer remains zero-copy through `lmflow_packet_make_mutable_buffer`; a read-only or shared
+buffer is copied into packed engine storage before mutation.
 
 ### Copy-on-write
 
