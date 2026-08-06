@@ -19,22 +19,30 @@
 //! in a single graph.
 //!
 //! This crate is a **pure-Rust engine by default**: it neither compiles nor bundles any C++, so
-//! `cargo add lmflow` needs no C++ toolchain. Two structural kernels ship with it and are
-//! registered automatically when a graph is built (see [`builtin`]): `PassThrough` (zero-copy
-//! forward) and `Sink` (consume only, so a branch can terminate itself). Anything that would have
-//! to assume a concrete payload type is deliberately left to you — the engine never interprets
+//! `cargo add lmflow` needs no C++ toolchain. Kernels are always supplied explicitly by the host
+//! or by a linked kernel component; the engine itself only schedules them and never interprets
 //! payloads.
 //!
 //! # Running a graph
 //!
 //! ```
-//! use lmflow::{Graph, Packet, Timestamp};
+//! use lmflow::{register_kernel, Graph, Kernel, KernelCtx, Packet, Timestamp};
+//!
+//! #[derive(Default)]
+//! struct Relay;
+//!
+//! impl Kernel for Relay {
+//!     fn process(&mut self, context: &mut KernelCtx) -> lmflow::Result<()> {
+//!         context.forward(0, 0)
+//!     }
+//! }
 //!
 //! # fn main() -> lmflow::Result<()> {
+//! register_kernel::<Relay>("Relay")?;
 //! let graph = Graph::from_yaml(
 //!     r#"
 //! nodes:
-//!   - { name: relay, kernel: PassThrough, input_ports: [in], output_ports: [out] }
+//!   - { name: relay, kernel: Relay, input_ports: [in], output_ports: [out] }
 //! input_ports: [in]
 //! output_ports: [out]
 //! "#,
@@ -83,7 +91,6 @@
 //! timestamp and termination semantics, lock ordering rules and the decision log — is
 //! `docs/design.md` (written in Chinese).
 
-pub mod builtin;
 pub mod config;
 pub mod context;
 pub mod executor;

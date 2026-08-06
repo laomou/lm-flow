@@ -85,8 +85,8 @@ impl Kernel for Double {
     }
 }
 
-register_kernel::<Double>("Double")?;          // your own kernel
-let g = Graph::from_yaml(yaml)?;               // `PassThrough` / `Sink` need no registration
+register_kernel::<Double>("Double")?;          // register before building the graph
+let g = Graph::from_yaml(yaml)?;
 ```
 
 The published crate is the **pure-Rust engine**. The 18 bundled C++ kernels are a separate CMake

@@ -3,6 +3,8 @@
 //! `rate: N` 让源每两次 `process` 至少隔 1/N 秒,算子不必自己写 sleep。
 //! 用一个纯 Rust 源算子(产 count 个整数后 source_done),断言实际墙钟符合速率。
 
+mod common;
+
 use std::time::{Duration, Instant};
 
 use lmflow::{register_kernel, Graph, Kernel, KernelCtx, Packet, Timestamp};
@@ -57,6 +59,7 @@ impl Kernel for InvalidYield {
 }
 
 fn reg() {
+    common::register_test_kernels();
     let _ = register_kernel::<Counter>("RateCounter");
     let _ = register_kernel::<CooperativeSource>("CooperativeSource");
     let _ = register_kernel::<InvalidYield>("InvalidYield");

@@ -6,6 +6,8 @@
 //!
 //! 用一个「按时间戳反向睡眠」的算子构造「完成顺序 ≠ 时间戳顺序」,专门压这两点。
 
+mod common;
+
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
@@ -13,7 +15,7 @@ use std::time::Duration;
 use lmflow::{Graph, Packet, Timestamp};
 
 fn init() {
-    lmflow::builtin::register_defaults();
+    common::register_test_kernels();
 }
 
 /// 需要一个可重入的、耗时可控的 Python/C++ 算子。这里用 Rust 侧的自定义 C 回调注册一个

@@ -16,7 +16,9 @@ to each GitHub Release.
   `lmflow::lmflow` / `lmflow::kernels` is linked. The manual
   `lmflow_register_builtin_kernels` entry point and the name-only
   `lmflow_registered_kernel_count` / `lmflow_registered_kernel_name` enumeration APIs are removed;
-  Python likewise no longer exposes `register_builtin_kernels()` or `registered_kernels()`.
+  Python likewise no longer exposes `register_builtin_kernels()` or `registered_kernels()`. The
+  pure Rust engine also no longer installs `PassThrough` / `Sink` while building a graph; Rust
+  hosts register every kernel explicitly.
 - **Graph runtime module layout.** The former monolithic graph implementation is split into
   dedicated Poller, node/readiness, backpressure, runtime scheduling, and lifecycle files without
   changing the public API or execution behavior.

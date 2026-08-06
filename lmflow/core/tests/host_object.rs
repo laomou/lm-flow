@@ -11,8 +11,10 @@
 //!
 //! 本文件钉住两条入口都被明确拒绝。纯 Rust 算子,故两种 feature 配置下都跑。
 
+mod common;
+
 use lmflow::packet::type_id;
-use lmflow::{register_kernel, Graph, Kernel, KernelContract, KernelCtx, Packet, Timestamp};
+use lmflow::{register_kernel, Kernel, KernelContract, KernelCtx, Packet, Timestamp};
 
 /// 契约里声明 HOST_OBJECT 的算子 —— 建图期就该被拒。
 #[derive(Default)]
@@ -94,7 +96,7 @@ output_ports: ["out"]
 #[test]
 fn contract_declaring_host_object_is_rejected_at_build() {
     let _ = register_kernel::<DeclaresHostObject>("DeclaresHostObject");
-    let err = Graph::from_yaml(&one_node("DeclaresHostObject")).unwrap_err();
+    let err = common::graph_from_yaml(&one_node("DeclaresHostObject")).unwrap_err();
     let msg = err.to_string();
     assert!(
         msg.contains("HOST_OBJECT") && msg.contains("not enabled"),
@@ -115,7 +117,7 @@ fn contract_declaring_host_object_is_rejected_at_build() {
 #[test]
 fn output_contract_declaring_host_object_is_rejected() {
     let _ = register_kernel::<EmitsHostObject>("EmitsHostObject");
-    let msg = Graph::from_yaml(&one_node("EmitsHostObject"))
+    let msg = common::graph_from_yaml(&one_node("EmitsHostObject"))
         .unwrap_err()
         .to_string();
     assert!(
@@ -134,7 +136,7 @@ fn packet_carrying_host_object_is_rejected_at_runtime() {
         drop(unsafe { Box::from_raw(p as *mut i64) });
     }
     // PassThrough 声明的是 any —— 正是漏网最可能发生的配置
-    let graph = Graph::from_yaml(&one_node("PassThrough")).unwrap();
+    let graph = common::graph_from_yaml(&one_node("PassThrough")).unwrap();
     graph.add_poller("out").unwrap();
     graph.start().unwrap();
 
@@ -159,7 +161,7 @@ fn packet_carrying_host_object_is_rejected_at_runtime() {
 /// 证明上面拒的是 HOST_OBJECT 本身,而不是把 `any` 端口整个弄坏了。
 #[test]
 fn any_port_still_accepts_normal_packets() {
-    let graph = Graph::from_yaml(&one_node("PassThrough")).unwrap();
+    let graph = common::graph_from_yaml(&one_node("PassThrough")).unwrap();
     let poller = graph.add_poller("out").unwrap();
     graph.start().unwrap();
     graph
@@ -177,7 +179,7 @@ fn any_port_still_accepts_normal_packets() {
 #[test]
 fn source_output_carrying_host_object_is_rejected_before_dispatch() {
     let _ = register_kernel::<HostObjectSource>("HostObjectSource");
-    let graph = Graph::from_yaml(
+    let graph = common::graph_from_yaml(
         r#"
 executors:
   - { name: pool, type: ThreadPoolExecutor, num_threads: 1 }
@@ -205,7 +207,7 @@ output_ports: [out]
 #[test]
 fn close_output_carrying_host_object_is_rejected_before_dispatch() {
     let _ = register_kernel::<HostObjectOnClose>("HostObjectOnClose");
-    let graph = Graph::from_yaml(&one_node("HostObjectOnClose")).unwrap();
+    let graph = common::graph_from_yaml(&one_node("HostObjectOnClose")).unwrap();
     let poller = graph.add_poller("out").unwrap();
     graph.start().unwrap();
     graph
@@ -230,7 +232,7 @@ fn close_output_carrying_host_object_is_rejected_before_dispatch() {
 /// 直接取得这个未启用类型。
 #[test]
 fn side_packet_carrying_host_object_is_rejected() {
-    let graph = Graph::from_yaml(&one_node("PassThrough")).unwrap();
+    let graph = common::graph_from_yaml(&one_node("PassThrough")).unwrap();
     let ptr = Box::into_raw(Box::new(1i64)) as *mut std::ffi::c_void;
     unsafe extern "C" fn drop_i64(p: *mut std::ffi::c_void) {
         drop(unsafe { Box::from_raw(p as *mut i64) });

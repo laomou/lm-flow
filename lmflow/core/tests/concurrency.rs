@@ -7,6 +7,8 @@
 //!  * 所有权守恒在并发下仍然成立;
 //!  * 混合执行器(一部分节点在池里、一部分交还宿主线程)不会死锁。
 
+mod common;
+
 use std::sync::atomic::{AtomicIsize, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Once};
 use std::time::Duration;
@@ -14,7 +16,7 @@ use std::time::Duration;
 use lmflow::{register_kernel, Graph, Kernel, KernelCtx, Packet, Timestamp};
 
 fn init() {
-    lmflow::builtin::register_defaults();
+    common::register_test_kernels();
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
         register_kernel::<DelegatedSlowPass>("DelegatedSlowPass").unwrap();

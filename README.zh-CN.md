@@ -86,8 +86,8 @@ impl Kernel for Double {
     }
 }
 
-register_kernel::<Double>("Double")?;          // 自己的算子
-let g = Graph::from_yaml(yaml)?;               // 自带的 `PassThrough` / `Sink` 无需注册
+register_kernel::<Double>("Double")?;          // 建图前注册
+let g = Graph::from_yaml(yaml)?;
 ```
 
 发布出去的 crate 是**纯 Rust 引擎**；18 个官方 C++ kernels 是独立 CMake 组件，

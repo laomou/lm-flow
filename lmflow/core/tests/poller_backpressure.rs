@@ -1,3 +1,5 @@
+mod common;
+
 use std::ffi::{c_char, CStr};
 use std::sync::Mutex;
 use std::time::Duration;
@@ -51,7 +53,7 @@ impl Kernel for DiagnosticBusySource {
 }
 
 fn graph() -> Graph {
-    Graph::from_yaml(
+    common::graph_from_yaml(
         r#"
 nodes:
   - { name: pass, kernel: PassThrough, input_ports: [in], output_ports: [out] }
@@ -136,7 +138,7 @@ fn wait_until_idle_does_not_report_empty_backpressure_stall() {
 
 #[test]
 fn poller_retention_triggers_graph_input_watermark() {
-    let graph = Graph::from_yaml(
+    let graph = common::graph_from_yaml(
         r#"
 nodes:
   - { name: pass, kernel: PassThrough, input_ports: [in], output_ports: [out] }
@@ -174,7 +176,7 @@ fn global_watermark_reports_block_and_recovery() {
         .unwrap_or_else(|error| error.into_inner());
     let _callback_guard = LogCallbackGuard::install();
     let _ = register_kernel::<DiagnosticBusySource>("DiagnosticBusySource");
-    let graph = Graph::from_yaml(
+    let graph = common::graph_from_yaml(
         r#"
 executors:
   - { name: diagnostic_pool, num_threads: 1 }
@@ -389,7 +391,7 @@ fn poller_block_reports_stats_and_recovery() {
         .lock()
         .unwrap_or_else(|error| error.into_inner());
     let _callback_guard = LogCallbackGuard::install();
-    let graph = Graph::from_yaml(
+    let graph = common::graph_from_yaml(
         r#"
 nodes:
   - { name: poller_diagnostic_pass, kernel: PassThrough, input_ports: [in], output_ports: [poller_diagnostic_out] }
@@ -487,7 +489,7 @@ fn poller_drop_warning_includes_policy_capacity_and_queue() {
         .lock()
         .unwrap_or_else(|error| error.into_inner());
     let _callback_guard = LogCallbackGuard::install();
-    let graph = Graph::from_yaml(
+    let graph = common::graph_from_yaml(
         r#"
 nodes:
   - { name: drop_diagnostic_pass, kernel: PassThrough, input_ports: [in], output_ports: [drop_diagnostic_out] }

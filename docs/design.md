@@ -364,13 +364,9 @@ LMFLOW_REGISTER_KERNEL(PassThroughKernel)    // 或 LMFLOW_REGISTER_KERNEL_AS(T,
   `kernel::register`,引擎不知道算子是什么语言写的。内置的 18 个 C++ 算子因此只是**捆绑的
   算子库**、不是引擎的一部分 —— 它们放在 crate 之外(`lmflow/cpp/`,见 §11),**不随发布的
   crate 分发**；由 CMake 构建为独立 `lmflow::kernels` 组件。
-- **引擎自带默认 Rust 算子**(`src/builtin.rs`,建图时 `Graph::from_config` 自动注册一次、
-  零 C++、任何配置下都在)—— **刻意只有两个**,且都纯结构性、零 payload 假设:
-  `PassThrough`(直通接线)与 `Sink`(只消费,让分支自行终结;计 `sink.packets`)。
-  名字**不带 `Kernel` 后缀**,以免与 C++ 内置算子重名(注册表按名字唯一,重名直接报错)。
-  **为什么不多放**:`Scale`/`Sum`/`Zip`/`Filter` 之类必须假设 payload 是 i64,与 ADR #6
-  「引擎不解释 payload」相悖;演示引擎语义是 `cpp/kernels/` 那 18 个与 `examples/` 的职责。
-  扇出也不需要算子 —— **一条边可直接挂多个消费者**是原生能力(见 §7.5),故不放 `Split`。
+- **引擎不隐式安装任何算子**。Rust 宿主显式调用 `register_kernel`；原生 SDK 与 Python
+  通过链接可选的 `lmflow::kernels` 获得 C++ 算子。注册来源只有“宿主代码”或“链接组件”，
+  不再存在建图时修改全局注册表的隐藏路径。
 - 内置算子清单见 `cpp/kernels/`，每个翻译单元各自注册。其中**张量前处理组**(纯数值 BUFFER):
   `Cast`(dtype 转换)、`Affine`(`x*scale+shift`)、`Clamp`、`Reduce`(→F64 标量)——
   统一走 double 做 dtype 分派,要求连续缓冲。**含 F16**:`buffer_util.hpp` 自带

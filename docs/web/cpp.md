@@ -1044,10 +1044,6 @@ alignment, advancing bounds, `SourceDone` — and double as worked examples; see
 present in the released SDK's `liblmflow.a`, but **not** in the crate published to crates.io, since
 their sources live outside the crate directory.
 
-The engine's own two Rust kernels, `PassThrough` and `Sink`, are always available and need no
-registration call. Note the missing suffix: the names are deliberately distinct from the C++ ones,
-because the registry is keyed by name and a duplicate registration is an error.
-
 ## Mobile embedding
 
 Link the **static** library. Working integrations:

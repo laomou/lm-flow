@@ -6,6 +6,8 @@
 //!   * `running` 靠 `in_flight > 0` 判断 —— `started_us` 归零时不清,故不能直接看它;
 //!   * `to_dot_with_stats` 在标注统计的同时,**不破坏** subgraph cluster 与执行器图例。
 
+mod common;
+
 use std::sync::{Condvar, Mutex};
 use std::time::Duration;
 
@@ -113,7 +115,7 @@ fn run_chain(n: i64) -> Graph {
 }
 
 fn run_chain_of(yaml: &str, n: i64) -> Graph {
-    let g = Graph::from_yaml(yaml).unwrap();
+    let g = common::graph_from_yaml(yaml).unwrap();
     let out = g.add_poller("out").unwrap();
     g.start().unwrap();
     let inp = g.input("in").unwrap();
@@ -189,7 +191,7 @@ fn diagnostics_show_latency_percentiles() {
         }
     }
     let _ = lmflow::register_kernel::<PercentileSlow>("PercentileSlow");
-    let graph = Graph::from_yaml(
+    let graph = common::graph_from_yaml(
         r#"
 stats: full
 executors:
@@ -293,7 +295,7 @@ fn dot_with_stats_annotates_and_keeps_structure() {
 fn dot_marks_saturated_executor_and_lists_queued_nodes() {
     let _ = lmflow::register_kernel::<DotQueued>("DotQueued");
     let gate = ExecutorQueueGateGuard::hold();
-    let graph = Graph::from_yaml(
+    let graph = common::graph_from_yaml(
         r#"
 stats: full
 executors:
@@ -388,7 +390,7 @@ fn dot_stats_use_deltas_between_exports() {
 
 #[test]
 fn start_rebases_dot_interval_after_prestart_export() {
-    let graph = Graph::from_yaml(CHAIN).unwrap();
+    let graph = common::graph_from_yaml(CHAIN).unwrap();
     let prestart = graph.to_dot_compact();
     assert!(prestart.contains("window since start 0µs"));
 
@@ -401,7 +403,7 @@ fn start_rebases_dot_interval_after_prestart_export() {
 
 #[test]
 fn dot_view_modes_separate_compact_and_diagnostics() {
-    let graph = Graph::from_yaml(CHAIN).unwrap();
+    let graph = common::graph_from_yaml(CHAIN).unwrap();
     let compact = graph.to_dot_compact();
     let explicit = graph.to_dot_with_view(DotView::Compact);
     let diagnostics = graph.to_dot_with_stats();
@@ -423,7 +425,7 @@ fn dot_node_state_tracks_idle_running_closed_and_error() {
     let _ = lmflow::register_kernel::<DotRunning>("DotRunning");
     let _ = lmflow::register_kernel::<DotError>("DotError");
 
-    let idle = Graph::from_yaml(
+    let idle = common::graph_from_yaml(
         r#"
 nodes:
   - { name: idle, kernel: Sink, input_ports: [in], output_ports: [] }
@@ -441,7 +443,7 @@ input_ports: [in]
     let closed_dot = idle.to_dot_compact();
     assert!(closed_dot.contains("@default\\nCLOSED"));
 
-    let running = Graph::from_yaml(
+    let running = common::graph_from_yaml(
         r#"
 executors:
   - { name: pool, num_threads: 1 }
@@ -476,7 +478,7 @@ input_ports: [in]
     running.close_all_inputs();
     running.wait_done_timeout(Duration::from_secs(2)).unwrap();
 
-    let failed = Graph::from_yaml(
+    let failed = common::graph_from_yaml(
         r#"
 nodes:
   - { name: failed, kernel: DotError, input_ports: [in], output_ports: [] }
@@ -504,7 +506,7 @@ input_ports: [in]
 
 #[test]
 fn dot_truncates_long_labels_but_keeps_full_tooltips_and_layout_hints() {
-    let graph = Graph::from_yaml(
+    let graph = common::graph_from_yaml(
         r#"
 executors:
   - { name: extremely_long_executor_name_for_layout_grouping, num_threads: 1 }
@@ -541,7 +543,7 @@ output_ports: [extremely_long_output_port_name_for_visualization]
 /// 子图 cluster 与统计模式共存(热力图不该吃掉 cluster)。
 #[test]
 fn dot_with_stats_keeps_subgraph_clusters() {
-    let g = Graph::from_yaml(
+    let g = common::graph_from_yaml(
         r#"
 subgraphs:
   inner:
@@ -563,7 +565,7 @@ output_ports: ["out"]
 /// 默认 `basic` 关闭每次回调计时，但保留低成本计数。
 #[test]
 fn basic_stats_zeroes_only_full_fields() {
-    let g = Graph::from_yaml(
+    let g = common::graph_from_yaml(
         r#"
 stats: basic
 nodes:
@@ -626,7 +628,7 @@ fn watchdog_forces_timing_on() {
     }
     lmflow::register_kernel::<Slow>("SlowForWatchdogTest").unwrap();
 
-    let g = Graph::from_yaml(
+    let g = common::graph_from_yaml(
         r#"
 stats: off
 watchdog_ms: 1
@@ -659,7 +661,7 @@ output_ports: ["out"]
 
 #[test]
 fn stats_off_keeps_state_and_errors_but_skips_throughput_counters() {
-    let g = Graph::from_yaml(
+    let g = common::graph_from_yaml(
         r#"
 stats: off
 nodes:
