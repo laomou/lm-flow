@@ -1216,6 +1216,23 @@ fn errors_are_reported_with_readable_text() {
 }
 
 #[test]
+fn config_diagnostics_survive_the_c_abi() {
+    register_test_kernels();
+    unsafe {
+        let g = lmflow_graph_new();
+        let yaml = cs(
+            "nodes:\n  - { name: sink, kernel: Sink, input_ports: [metdata] }\n\
+             input_ports: [metadata]\n",
+        );
+        assert_ne!(lmflow_graph_init_from_yaml(g, yaml.as_ptr()), 0);
+        let message = last_error();
+        assert!(message.contains("nodes[0].input_ports[0]"), "{message}");
+        assert!(message.contains("did you mean `metadata`"), "{message}");
+        lmflow_graph_free(g);
+    }
+}
+
+#[test]
 fn unknown_subgraph_is_rejected_not_ignored() {
     unsafe {
         let g = lmflow_graph_new();

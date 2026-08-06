@@ -114,9 +114,11 @@ pub fn registered_names() -> Vec<String> {
 /// 「算子未注册」的统一报错 —— 必须列出可用名字,否则用户无从下手
 /// (常见原因是对应 kernel 组件尚未注册，或算子名拼错)。
 fn not_registered(name: &str) -> Error {
+    let registered = registered_names();
+    let suggestion = crate::diagnostic::did_you_mean(name, registered.iter().map(String::as_str));
     Error::NotFound(format!(
-        "kernel `{name}` not registered. registered: [{}]",
-        registered_names().join(", ")
+        "kernel `{name}` not registered{suggestion}. registered: [{}]",
+        registered.join(", ")
     ))
 }
 

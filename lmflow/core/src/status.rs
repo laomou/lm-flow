@@ -58,6 +58,20 @@ impl Error {
             Error::State(_) => code::STATE,
         }
     }
+
+    pub(crate) fn context(self, context: impl AsRef<str>) -> Self {
+        let context = context.as_ref();
+        match self {
+            Error::InvalidArg(message) => Error::InvalidArg(format!("{context}: {message}")),
+            Error::NotFound(message) => Error::NotFound(format!("{context}: {message}")),
+            Error::Kernel(message) => Error::Kernel(format!("{context}: {message}")),
+            Error::Panic(message) => Error::Panic(format!("{context}: {message}")),
+            Error::Abi(message) => Error::Abi(format!("{context}: {message}")),
+            Error::Unsupported(message) => Error::Unsupported(format!("{context}: {message}")),
+            Error::State(message) => Error::State(format!("{context}: {message}")),
+            other => other,
+        }
+    }
 }
 
 impl fmt::Display for Error {

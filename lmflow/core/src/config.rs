@@ -297,7 +297,7 @@ impl GraphConfig {
     pub fn from_yaml_file(path: &str) -> Result<Self> {
         let text = std::fs::read_to_string(path)
             .map_err(|e| Error::InvalidArg(format!("failed to read `{path}`: {e}")))?;
-        let cfg = Self::parse(&text)?;
+        let cfg = Self::parse(&text).map_err(|error| error.context(format!("file `{path}`")))?;
         let merged = crate::expand::resolve_includes(cfg, std::path::Path::new(path))?;
         let flat = crate::expand::expand(merged)?;
         flat.check_supported()?;
@@ -311,7 +311,8 @@ impl GraphConfig {
                 "`stats` and legacy `stats_timing` cannot be used together".into(),
             ));
         }
-        for n in &self.nodes {
+        for (node_index, n) in self.nodes.iter().enumerate() {
+            let node_path = format!("nodes[{node_index}]");
             let who = if n.name.is_empty() {
                 n.kernel.clone()
             } else {
@@ -324,7 +325,7 @@ impl GraphConfig {
             if n.rate != 0.0 {
                 if !n.input_ports.is_empty() {
                     return Err(Error::InvalidArg(format!(
-                        "node `{who}`: rate only applies to source nodes (no input ports); \
+                        "{node_path}.rate (node `{who}`): rate only applies to source nodes (no input ports); \
                          a non-source is driven by upstream data"
                     )));
                 }
@@ -332,7 +333,7 @@ impl GraphConfig {
                 // `is_finite` 挡住 inf。
                 if !(n.rate.is_finite() && n.rate > 0.0) {
                     return Err(Error::InvalidArg(format!(
-                        "node `{who}`: rate must be a positive, finite number (Hz), got {}",
+                        "{node_path}.rate (node `{who}`): rate must be a positive, finite number (Hz), got {}",
                         n.rate
                     )));
                 }
@@ -343,7 +344,7 @@ impl GraphConfig {
                     if n.input_policy.capacity == 0 {
                         // 容量 0 意味着「每个包都丢」,几乎肯定是漏配
                         return Err(Error::InvalidArg(format!(
-                            "node `{who}`: fixed_size policy capacity must be >= 1"
+                            "{node_path}.input_policy.capacity (node `{who}`): fixed_size policy capacity must be >= 1"
                         )));
                     }
                 }
@@ -351,7 +352,7 @@ impl GraphConfig {
                     // batch:攒够 capacity 个**对齐元组**一次交给算子。
                     if n.input_policy.capacity == 0 {
                         return Err(Error::InvalidArg(format!(
-                            "node `{who}`: batch policy capacity (the batch size) must be >= 1"
+                            "{node_path}.input_policy.capacity (node `{who}`): batch policy capacity (the batch size) must be >= 1"
                         )));
                     }
                 }
@@ -360,25 +361,40 @@ impl GraphConfig {
                 "sync_set" => {
                     if n.input_policy.sets.is_empty() {
                         return Err(Error::InvalidArg(format!(
-                            "node `{who}`: sync_set policy must provide sets (input port groups)"
+                            "{node_path}.input_policy.sets (node `{who}`): sync_set policy must provide sets (input port groups)"
                         )));
                     }
                 }
                 other => {
                     return Err(Error::InvalidArg(format!(
-                    "node `{who}`: unknown input_policy `{other}` (valid: sync / immediate / fixed_size / sync_set / batch)"
+                    "{node_path}.input_policy.type (node `{who}`): unknown input_policy `{other}`{} (valid: sync / immediate / fixed_size / sync_set / batch)",
+                    crate::diagnostic::did_you_mean(
+                        other,
+                        ["sync", "immediate", "fixed_size", "sync_set", "batch"]
+                    )
                 )))
                 }
             }
             let port_names: Vec<String> = n
                 .input_ports
                 .iter()
-                .map(|d| parse_port_spec(d).map(|s| s.name))
+                .enumerate()
+                .map(|(port_index, declaration)| {
+                    parse_port_spec(declaration)
+                        .map(|spec| spec.name)
+                        .map_err(|error| {
+                            error.context(format!("{node_path}.input_ports[{port_index}]"))
+                        })
+                })
                 .collect::<Result<_>>()?;
             for port in n.input_queues.ports.keys() {
                 if !port_names.contains(port) {
                     return Err(Error::InvalidArg(format!(
-                        "node `{who}`: input queue capacity override references unknown input port `{port}`"
+                        "{node_path}.input_queues.ports.{port} (node `{who}`): input queue capacity override references unknown input port `{port}`{}",
+                        crate::diagnostic::did_you_mean(
+                            port,
+                            port_names.iter().map(String::as_str)
+                        )
                     )));
                 }
             }
@@ -387,7 +403,7 @@ impl GraphConfig {
                     && n.back_edges.contains(port)
                 {
                     return Err(Error::InvalidArg(format!(
-                        "node `{who}`: input queue capacity override for back-edge input `{port}` is not supported; \
+                        "{node_path}.input_queues.ports.{port} (node `{who}`): input queue capacity override for back-edge input `{port}` is not supported; \
                          back-edges always use their capacity-1 latest-value register"
                     )));
                 }
@@ -399,7 +415,7 @@ impl GraphConfig {
                     .any(|limits| limits.packets.is_some_and(|capacity| capacity != 0));
             if has_lossless_capacity && n.input_policy.r#type == "fixed_size" {
                 return Err(Error::InvalidArg(format!(
-                    "node `{who}`: lossless input queue capacities cannot be combined with \
+                    "{node_path}.input_queues (node `{who}`): lossless input queue capacities cannot be combined with \
                      input_policy=fixed_size (lossy drop-oldest)"
                 )));
             }
@@ -407,8 +423,9 @@ impl GraphConfig {
             // 错误策略:未知值明确拒掉,不静默当默认(与 input_policy / executor type 同规矩)。
             if !n.on_error.is_empty() && n.on_error != "abort" && n.on_error != "skip" {
                 return Err(Error::InvalidArg(format!(
-                    "node `{who}`: unknown on_error `{}` (expected \"abort\" or \"skip\")",
-                    n.on_error
+                    "{node_path}.on_error (node `{who}`): unknown on_error `{}`{} (expected \"abort\" or \"skip\")",
+                    n.on_error,
+                    crate::diagnostic::did_you_mean(&n.on_error, ["abort", "skip"])
                 )));
             }
 
@@ -417,7 +434,11 @@ impl GraphConfig {
                 for be in &n.back_edges {
                     if !port_names.contains(be) {
                         return Err(Error::InvalidArg(format!(
-                            "node `{who}`: back_edge `{be}` is not one of this node's input ports"
+                            "{node_path}.back_edges (node `{who}`): back_edge `{be}` is not one of this node's input ports{}",
+                            crate::diagnostic::did_you_mean(
+                                be,
+                                port_names.iter().map(String::as_str)
+                            )
                         )));
                     }
                 }
@@ -427,21 +448,21 @@ impl GraphConfig {
                     .count();
                 if forward == 0 {
                     return Err(Error::InvalidArg(format!(
-                        "node `{who}`: every input port is a back_edge -- a node needs at least one forward input to ever fire"
+                        "{node_path}.back_edges (node `{who}`): every input port is a back_edge -- a node needs at least one forward input to ever fire"
                     )));
                 }
                 if n.input_policy.r#type == "sync_set" {
                     for set in &n.input_policy.sets {
                         if let Some(name) = set.iter().find(|p| n.back_edges.contains(p)) {
                             return Err(Error::InvalidArg(format!(
-                                "node `{who}`: back_edge `{name}` must not appear in a sync_set group"
+                                "{node_path}.input_policy.sets (node `{who}`): back_edge `{name}` must not appear in a sync_set group"
                             )));
                         }
                     }
                 }
             }
         }
-        for e in &self.executors {
+        for (executor_index, e) in self.executors.iter().enumerate() {
             // 空 type 视作 ThreadPoolExecutor(历史默认)。字段是否对得上类型
             // (如 DelegatingExecutor 不该配 num_threads)在 Graph::build 里查。
             if !matches!(
@@ -449,8 +470,12 @@ impl GraphConfig {
                 "" | "ThreadPoolExecutor" | "DelegatingExecutor"
             ) {
                 return Err(Error::InvalidArg(format!(
-                    "unknown executor type `{}` (supported: ThreadPoolExecutor, DelegatingExecutor)",
-                    e.r#type
+                    "executors[{executor_index}].type: unknown executor type `{}`{} (supported: ThreadPoolExecutor, DelegatingExecutor)",
+                    e.r#type,
+                    crate::diagnostic::did_you_mean(
+                        &e.r#type,
+                        ["ThreadPoolExecutor", "DelegatingExecutor"]
+                    )
                 )));
             }
         }

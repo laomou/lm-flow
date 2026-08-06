@@ -100,6 +100,22 @@ class TNeedsSidePacket(lmflow.Kernel):
         cc.forward(0, 0)
 
 
+class ConfigDiagnosticTests(unittest.TestCase):
+    def test_from_yaml_preserves_path_and_suggestion(self):
+        with self.assertRaises(ValueError) as caught:
+            lmflow.Graph.from_yaml(
+                """
+nodes:
+  - { name: sink, kernel: TDouble, input_ports: [metdata], output_ports: [out] }
+input_ports: [metadata]
+output_ports: [out]
+"""
+            )
+        message = str(caught.exception)
+        self.assertIn("nodes[0].input_ports[0]", message)
+        self.assertIn("did you mean `metadata`", message)
+
+
 @lmflow.kernel("TBadContract")
 class TBadContract(lmflow.Kernel):
     @staticmethod

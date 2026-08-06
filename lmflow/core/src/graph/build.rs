@@ -58,8 +58,9 @@ impl GraphInner {
         // ---- 图输入口 ----
         let mut graph_inputs = Vec::new();
         let mut input_by_name = BTreeMap::new();
-        for decl in &cfg.input_ports {
-            let spec = crate::config::parse_port_spec(decl)?;
+        for (input_index, decl) in cfg.input_ports.iter().enumerate() {
+            let spec = crate::config::parse_port_spec(decl)
+                .map_err(|error| error.context(format!("input_ports[{input_index}]")))?;
             if input_by_name.contains_key(&spec.name) {
                 return Err(Error::InvalidArg(format!(
                     "graph input port `{}` declared more than once",
@@ -76,25 +77,25 @@ impl GraphInner {
         let mut node_port_tables: Vec<(Arc<PortTable>, Arc<PortTable>)> = Vec::new();
         for (idx, n) in cfg.nodes.iter().enumerate() {
             let who = node_label(n, idx);
-            let ins = Arc::new(PortTable::build(
-                &n.input_ports,
-                &format!("node `{who}` input ports"),
-            )?);
-            let outs = Arc::new(PortTable::build(
-                &n.output_ports,
-                &format!("node `{who}` output ports"),
-            )?);
+            let ins = Arc::new(
+                PortTable::build(&n.input_ports, &format!("node `{who}` input ports"))
+                    .map_err(|error| error.context(format!("nodes[{idx}].input_ports")))?,
+            );
+            let outs = Arc::new(
+                PortTable::build(&n.output_ports, &format!("node `{who}` output ports"))
+                    .map_err(|error| error.context(format!("nodes[{idx}].output_ports")))?,
+            );
             for name in outs.names() {
                 let id = get_or_create(name, &mut edges);
                 if edges[id].is_graph_input {
                     return Err(Error::InvalidArg(format!(
-                        "port name `{name}` is both a graph input port and node `{who}`'s output port -- name conflict"
+                        "nodes[{idx}].output_ports (node `{who}`): port name `{name}` is also a graph input port -- name conflict"
                     )));
                 }
                 if let Some(prev) = edges[id].producer {
                     return Err(Error::InvalidArg(format!(
-                        "port `{name}` has multiple producers: node `{}` and `{who}`",
-                        node_label(&cfg.nodes[prev], prev)
+                        "nodes[{idx}].output_ports (node `{who}`): port `{name}` has multiple producers; first produced by nodes[{prev}] (node `{}`)",
+                        node_label(&cfg.nodes[prev], prev),
                     )));
                 }
                 edges[id].producer = Some(idx);
@@ -110,13 +111,17 @@ impl GraphInner {
             // config.check_supported 校验;源的输出边已在生产者环节连好。
             for (port, name) in ins.names().iter().enumerate() {
                 let id = *edge_by_name.get(name).ok_or_else(|| {
+                    let suggestion = crate::diagnostic::did_you_mean(
+                        name,
+                        edge_by_name.keys().map(String::as_str),
+                    );
                     Error::InvalidArg(format!(
-                        "node `{who}` input port `{name}` has no producer: neither a graph input port nor produced by any node"
+                        "nodes[{idx}].input_ports[{port}] (node `{who}`): input port `{name}` has no producer{suggestion}; it is neither a graph input nor produced by any node"
                     ))
                 })?;
                 if edges[id].producer.is_none() && !edges[id].is_graph_input {
                     return Err(Error::InvalidArg(format!(
-                        "port `{name}` has no producer (node `{who}` consumes it)"
+                        "nodes[{idx}].input_ports[{port}] (node `{who}`): port `{name}` has no producer"
                     )));
                 }
                 edges[id].consumers.push((idx, port));
@@ -126,12 +131,17 @@ impl GraphInner {
         // ---- 图输出口 ----
         let mut graph_outputs = Vec::new();
         let mut output_by_name = BTreeMap::new();
-        for decl in &cfg.output_ports {
-            let spec = crate::config::parse_port_spec(decl)?;
+        for (output_index, decl) in cfg.output_ports.iter().enumerate() {
+            let spec = crate::config::parse_port_spec(decl)
+                .map_err(|error| error.context(format!("output_ports[{output_index}]")))?;
             let id = *edge_by_name.get(&spec.name).ok_or_else(|| {
+                let suggestion = crate::diagnostic::did_you_mean(
+                    &spec.name,
+                    edge_by_name.keys().map(String::as_str),
+                );
                 Error::InvalidArg(format!(
-                    "graph output port `{}`: no node produces it",
-                    spec.name
+                    "output_ports[{output_index}]: graph output port `{}` has no producer{suggestion}",
+                    spec.name,
                 ))
             })?;
             edges[id].is_graph_output = true;
@@ -185,15 +195,15 @@ impl GraphInner {
         // 节点侧 `executor` 留空即归默认执行器,归一化到同一个名字。于是默认执行器和
         // 其它执行器完全同构 —— 有名字、可索引、可提交任务,派任务时无需为它开特例。
         let mut executors: Vec<Executor> = vec![Executor::Pool(default_thread_pool(stats_level))];
-        for e in &cfg.executors {
+        for (executor_index, e) in cfg.executors.iter().enumerate() {
             if e.name.is_empty() {
-                return Err(Error::InvalidArg(
-                    "executors entry must have a name; nodes select an executor by it".into(),
-                ));
+                return Err(Error::InvalidArg(format!(
+                    "executors[{executor_index}].name: executor entry must have a name; nodes select an executor by it"
+                )));
             }
             if e.name == DEFAULT_EXECUTOR_NAME {
                 return Err(Error::InvalidArg(format!(
-                    "executor name `{DEFAULT_EXECUTOR_NAME}` is reserved for the engine's implicit \
+                    "executors[{executor_index}].name: executor name `{DEFAULT_EXECUTOR_NAME}` is reserved for the engine's implicit \
                      default executor (where nodes without an `executor` run) and cannot be declared. \
                      Pick another name; to control threads / affinity / priority, declare your own \
                      pool and point the nodes at it with `executor:`"
@@ -201,17 +211,22 @@ impl GraphInner {
             }
             if executors.iter().any(|p| p.name() == e.name) {
                 return Err(Error::InvalidArg(format!(
-                    "executor `{}` defined more than once",
+                    "executors[{executor_index}].name: executor `{}` defined more than once",
                     e.name
                 )));
             }
-            executors.push(build_executor(&e.name, e, stats_level)?);
+            executors.push(
+                build_executor(&e.name, e, stats_level)
+                    .map_err(|error| error.context(format!("executors[{executor_index}]")))?,
+            );
         }
         let known: Vec<&str> = executors.iter().map(|p| p.name()).collect();
         for (idx, n) in cfg.nodes.iter().enumerate() {
             if !known.contains(&exec_name(&n.executor)) {
+                let suggestion =
+                    crate::diagnostic::did_you_mean(&n.executor, known.iter().copied());
                 return Err(Error::InvalidArg(format!(
-                    "node `{}` references undefined executor `{}` (defined: [{}])",
+                    "nodes[{idx}].executor (node `{}`): undefined executor `{}`{suggestion} (defined: [{}])",
                     node_label(n, idx),
                     n.executor,
                     known.join(", ")
@@ -247,22 +262,26 @@ impl GraphInner {
             let (ins, outs) = node_port_tables[idx].clone();
             let mut contract = Contract::new(ins, outs);
             // 安全性:contract 是本栈帧上存活的对象,回调期间无人访问它。
-            unsafe {
+            let contract_result = unsafe {
                 KernelInstance::fill_contract(
                     &n.kernel,
                     &mut contract as *mut Contract as *mut c_void,
-                )?
+                )
             };
+            contract_result.map_err(|error| error.context(format!("nodes[{idx}].kernel")))?;
             if let Some(error) = contract.take_error() {
                 return Err(Error::InvalidArg(format!(
-                    "node `{name}` GetContract failed: {error}"
+                    "nodes[{idx}].kernel (node `{name}`): GetContract failed: {error}"
                 )));
             }
-            validate_contract(&name, &contract)?;
+            validate_contract(&format!("nodes[{idx}]"), &name, &contract)?;
             contracts.push(contract);
             // 保持历史顺序:每个节点都是 get_contract 后立刻 create,而不是先询问完
             // 所有契约再统一创建。静态检查失败时这些实例随局部 Vec 正常析构。
-            kernels.push(KernelInstance::create(&n.kernel)?);
+            kernels.push(
+                KernelInstance::create(&n.kernel)
+                    .map_err(|error| error.context(format!("nodes[{idx}].kernel")))?,
+            );
         }
         check_edge_type_compatibility(&cfg, &edges, &contracts)?;
 
@@ -482,7 +501,7 @@ fn check_node_executor_fit(cfg: &GraphConfig, executors: &[Executor]) -> Result<
         // 与单线程池都恒为 1,宁可报错也不让宿主误以为开了并行。
         if n.max_in_flight > 1 && ex.num_threads() < 2 {
             return Err(Error::InvalidArg(format!(
-                "node `{who}`: max_in_flight={} needs an executor with more than one thread, \
+                "nodes[{idx}].max_in_flight (node `{who}`): max_in_flight={} needs an executor with more than one thread, \
                  but `{}` provides {} -- there would be no parallelism",
                 n.max_in_flight,
                 ex.name(),
@@ -495,7 +514,7 @@ fn check_node_executor_fit(cfg: &GraphConfig, executors: &[Executor]) -> Result<
             // 抽取别的委托任务,而它正卡在源的 process 里。
             if ex.is_delegating() {
                 return Err(Error::InvalidArg(format!(
-                    "node `{who}`: a source node (no input ports) cannot run on the delegating \
+                    "nodes[{idx}].executor (node `{who}`): a source node (no input ports) cannot run on the delegating \
                      executor `{}` -- its process typically blocks waiting for the next item, \
                      which would monopolise the host thread and stall the whole graph. \
                      Give it a ThreadPoolExecutor",
@@ -507,7 +526,7 @@ fn check_node_executor_fit(cfg: &GraphConfig, executors: &[Executor]) -> Result<
     Ok(())
 }
 
-fn validate_contract(name: &str, contract: &Contract) -> Result<()> {
+fn validate_contract(path: &str, name: &str, contract: &Contract) -> Result<()> {
     for (which, types) in [
         ("input", &contract.input_types),
         ("output", &contract.output_types),
@@ -515,7 +534,7 @@ fn validate_contract(name: &str, contract: &Contract) -> Result<()> {
         for (i, &type_id) in types.iter().enumerate() {
             if type_id == crate::packet::type_id::HOST_OBJECT {
                 return Err(Error::InvalidArg(format!(
-                    "node `{name}`: {which} port {i} declares LMFLOW_TYPE_HOST_OBJECT, \
+                    "{path}.kernel (node `{name}`): {which} port {i} declares LMFLOW_TYPE_HOST_OBJECT, \
                      which is reserved and not enabled (see ADR #26). Host-language native \
                      objects (e.g. PyObject) would create a second type system invisible to \
                      the YAML graph, and their refcount can drop on an engine worker thread \
@@ -525,14 +544,14 @@ fn validate_contract(name: &str, contract: &Contract) -> Result<()> {
             }
             if (8..16).contains(&type_id) {
                 return Err(Error::InvalidArg(format!(
-                    "node `{name}`: {which} port {i} declares reserved type id {type_id}; \
+                    "{path}.kernel (node `{name}`): {which} port {i} declares reserved type id {type_id}; \
                      built-in ids currently end at LMFLOW_TYPE_HOST_OBJECT (7), and custom \
                      type ids must be >= 16"
                 )));
             }
             if type_id >= 16 && crate::packet::type_descriptor(type_id).is_none() {
                 return Err(Error::InvalidArg(format!(
-                    "node `{name}`: {which} port {i} declares unregistered custom type id \
+                    "{path}.kernel (node `{name}`): {which} port {i} declares unregistered custom type id \
                      {type_id}; register its stable name, size, and alignment with \
                      lmflow_register_type_descriptor before building the graph"
                 )));
@@ -543,12 +562,12 @@ fn validate_contract(name: &str, contract: &Contract) -> Result<()> {
     for side_packet in &contract.required_side_packets {
         if side_packet.is_empty() {
             return Err(Error::InvalidArg(format!(
-                "node `{name}`: GetContract declares an empty required side packet name"
+                "{path}.kernel (node `{name}`): GetContract declares an empty required side packet name"
             )));
         }
         if !required.insert(side_packet) {
             return Err(Error::InvalidArg(format!(
-                "node `{name}`: GetContract declares required side packet `{side_packet}` more than once"
+                "{path}.kernel (node `{name}`): GetContract declares required side packet `{side_packet}` more than once"
             )));
         }
     }
@@ -578,8 +597,8 @@ fn check_edge_type_compatibility(
                 continue;
             }
             return Err(Error::InvalidArg(format!(
-                "type mismatch on edge `{}`: node `{}` output port `{}` declares {}, \
-                 but node `{}` input port `{}` declares {}",
+                "nodes[{consumer}].input_ports[{consumer_port}]: type mismatch on edge `{}`: \
+                 nodes[{producer}] `{}` output port `{}` declares {}, but node `{}` input port `{}` declares {}",
                 edge.name,
                 node_label(&cfg.nodes[producer], producer),
                 contracts[producer]
