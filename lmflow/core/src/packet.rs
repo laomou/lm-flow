@@ -263,7 +263,9 @@ impl BufferData {
                 .checked_mul(d)
                 .ok_or_else(|| Error::InvalidArg("shape product overflow".into()))?;
         }
-        let total = (count as usize)
+        let count = usize::try_from(count)
+            .map_err(|_| Error::InvalidArg("shape product exceeds addressable memory".into()))?;
+        let total = count
             .checked_mul(esz)
             .ok_or_else(|| Error::InvalidArg("buffer byte count overflow".into()))?;
 
@@ -274,10 +276,17 @@ impl BufferData {
         let mut acc = esz as i64;
         for i in (0..shape.len()).rev() {
             st[i] = acc;
-            acc *= shape[i];
+            acc = acc
+                .checked_mul(shape[i])
+                .ok_or_else(|| Error::InvalidArg("buffer stride overflow".into()))?;
         }
+        let mut bytes = Vec::new();
+        bytes
+            .try_reserve_exact(total)
+            .map_err(|_| Error::InvalidArg(format!("cannot allocate {total} buffer bytes")))?;
+        bytes.resize(total, 0);
         Ok(Self {
-            bytes: vec![0u8; total],
+            bytes,
             shape: s,
             strides: st,
             ndim: shape.len() as i32,

@@ -394,6 +394,131 @@ impl Default for LMFlowBuffer {
 }
 
 pub const BUF_FLAG_READONLY: u32 = 1;
+pub const DEVICE_CPU: i32 = 0;
+const BUF_FLAG_MASK: u32 = BUF_FLAG_READONLY;
+
+struct ValidatedBuffer<'a> {
+    dims: &'a [i64],
+    strides: &'a [i64],
+    element_size: usize,
+    element_count: usize,
+}
+
+fn validate_buffer_descriptor(src: &LMFlowBuffer) -> crate::status::Result<ValidatedBuffer<'_>> {
+    let ndim = usize::try_from(src.ndim).map_err(|_| {
+        Error::InvalidArg(format!(
+            "buffer ndim must be in 1..={}, got {}",
+            packet::MAX_DIMS,
+            src.ndim
+        ))
+    })?;
+    if !(1..=packet::MAX_DIMS).contains(&ndim) {
+        return Err(Error::InvalidArg(format!(
+            "buffer ndim must be in 1..={}, got {}",
+            packet::MAX_DIMS,
+            src.ndim
+        )));
+    }
+    if src.device != DEVICE_CPU {
+        return Err(Error::InvalidArg(format!(
+            "buffer device {} is not supported; only LMFLOW_DEVICE_CPU (0) is available",
+            src.device
+        )));
+    }
+    if src.flags & !BUF_FLAG_MASK != 0 {
+        return Err(Error::InvalidArg(format!(
+            "buffer flags contain unknown bits: 0x{:x}",
+            src.flags & !BUF_FLAG_MASK
+        )));
+    }
+    if src.reserved != [0; 2] {
+        return Err(Error::InvalidArg(
+            "buffer reserved fields must be zero".into(),
+        ));
+    }
+    if src.shape[ndim..].iter().any(|&value| value != 0) {
+        return Err(Error::InvalidArg(
+            "buffer shape entries after ndim must be zero".into(),
+        ));
+    }
+    if src.strides[ndim..].iter().any(|&value| value != 0) {
+        return Err(Error::InvalidArg(
+            "buffer stride entries after ndim must be zero".into(),
+        ));
+    }
+
+    let dims = &src.shape[..ndim];
+    let strides = &src.strides[..ndim];
+    let element_size = packet::dtype_size(src.dtype);
+    if element_size == 0 {
+        return Err(Error::InvalidArg(format!(
+            "buffer dtype {} is unknown",
+            src.dtype
+        )));
+    }
+
+    let mut element_count = 1usize;
+    let mut min_offset = 0i128;
+    let mut max_offset = 0i128;
+    for (axis, (&dim, &stride)) in dims.iter().zip(strides).enumerate() {
+        if dim < 0 {
+            return Err(Error::InvalidArg(format!(
+                "buffer shape[{axis}] must not be negative, got {dim}"
+            )));
+        }
+        let dim = usize::try_from(dim)
+            .map_err(|_| Error::InvalidArg(format!("buffer shape[{axis}] is too large")))?;
+        element_count = element_count
+            .checked_mul(dim)
+            .ok_or_else(|| Error::InvalidArg("buffer element count overflow".into()))?;
+        let extent = (dim.saturating_sub(1) as i128)
+            .checked_mul(i128::from(stride))
+            .ok_or_else(|| Error::InvalidArg("buffer stride extent overflow".into()))?;
+        if extent < 0 {
+            min_offset = min_offset
+                .checked_add(extent)
+                .ok_or_else(|| Error::InvalidArg("buffer minimum offset overflow".into()))?;
+        } else {
+            max_offset = max_offset
+                .checked_add(extent)
+                .ok_or_else(|| Error::InvalidArg("buffer maximum offset overflow".into()))?;
+        }
+    }
+    let last_byte = max_offset
+        .checked_add(element_size.saturating_sub(1) as i128)
+        .ok_or_else(|| Error::InvalidArg("buffer byte extent overflow".into()))?;
+    if min_offset < isize::MIN as i128 || last_byte > isize::MAX as i128 {
+        return Err(Error::InvalidArg(format!(
+            "buffer address range [{min_offset}, {last_byte}] exceeds platform pointer offsets"
+        )));
+    }
+    if element_count > 0 && src.data.is_null() {
+        return Err(Error::InvalidArg(
+            "buffer data must be non-null for a non-empty shape".into(),
+        ));
+    }
+    if element_count > 0 {
+        let base = src.data as usize as i128;
+        let first_address = base
+            .checked_add(min_offset)
+            .ok_or_else(|| Error::InvalidArg("buffer start address overflow".into()))?;
+        let last_address = base
+            .checked_add(last_byte)
+            .ok_or_else(|| Error::InvalidArg("buffer end address overflow".into()))?;
+        if first_address < 0 || last_address > usize::MAX as i128 {
+            return Err(Error::InvalidArg(format!(
+                "buffer address range [{first_address}, {last_address}] is outside the platform address space"
+            )));
+        }
+    }
+
+    Ok(ValidatedBuffer {
+        dims,
+        strides,
+        element_size,
+        element_count,
+    })
+}
 
 fn fill_buffer(out: *mut LMFlowBuffer, b: &BufferData, readonly: bool, data: *mut c_void) {
     if out.is_null() {
@@ -406,7 +531,7 @@ fn fill_buffer(out: *mut LMFlowBuffer, b: &BufferData, readonly: bool, data: *mu
         ndim: b.ndim,
         dtype: b.dtype,
         flags: if readonly { BUF_FLAG_READONLY } else { 0 },
-        device: 0,
+        device: DEVICE_CPU,
         reserved: [0; 2],
     };
     unsafe { std::ptr::write(out, v) };
@@ -426,8 +551,11 @@ pub unsafe extern "C" fn lmflow_packet_new_buffer(
     out: *mut LMFlowBuffer,
 ) -> LMFlowPacket {
     guard_val(LMFlowPacket::default(), || {
-        if ndim <= 0 || shape.is_null() {
-            last_error::set("lmflow_packet_new_buffer: ndim must be positive and shape non-null");
+        if !(1..=packet::MAX_DIMS as i32).contains(&ndim) || shape.is_null() {
+            last_error::set(&format!(
+                "lmflow_packet_new_buffer: ndim must be in 1..={}, and shape must be non-null",
+                packet::MAX_DIMS
+            ));
             return LMFlowPacket::default();
         }
         let dims = std::slice::from_raw_parts(shape, ndim as usize);
@@ -456,24 +584,34 @@ pub unsafe extern "C" fn lmflow_packet_from_buffer(
 ) -> LMFlowPacket {
     guard_val(LMFlowPacket::default(), || {
         if src.is_null() {
+            last_error::set("lmflow_packet_from_buffer: src is null");
             return LMFlowPacket::default();
         }
         let s = &*src;
-        let dims = &s.shape[..s.ndim.max(0) as usize];
+        let validated = match validate_buffer_descriptor(s) {
+            Ok(validated) => validated,
+            Err(error) => {
+                last_error::set(&format!("lmflow_packet_from_buffer: {error}"));
+                return LMFlowPacket::default();
+            }
+        };
+        let dims = validated.dims;
         let Ok(mut b) = BufferData::new(dims, s.dtype) else {
             last_error::set("lmflow_packet_from_buffer: invalid shape/dtype");
             return LMFlowPacket::default();
         };
         // 拷进一份行优先连续的缓冲,支持**任意 strides** —— 转置、带步长切片、
         // 甚至负步长的 numpy 视图都要拷对(否则静默数据损坏)。
-        if !s.data.is_null() {
-            let esz = packet::dtype_size(s.dtype);
+        if validated.element_count > 0 {
+            let esz = validated.element_size;
             let ndim = dims.len();
             if ndim >= 1 && esz > 0 {
                 let last = *dims.last().unwrap();
-                let last_stride = s.strides[ndim - 1];
-                let row_bytes = (last as usize) * esz;
-                let n_rows: i64 = dims[..ndim - 1].iter().product::<i64>().max(1);
+                let last_stride = validated.strides[ndim - 1];
+                let row_bytes = (last as usize)
+                    .checked_mul(esz)
+                    .expect("validated buffer byte count");
+                let n_rows = validated.element_count / last.max(1) as usize;
                 let src_base = s.data as *const u8;
                 let dst_base = b.bytes.as_mut_ptr();
                 // 先判**整块连续**(strides 恰好是紧密行优先布局),一次拷完。
@@ -486,7 +624,7 @@ pub unsafe extern "C" fn lmflow_packet_from_buffer(
                     let mut expected = esz as i64;
                     let mut ok = true;
                     for d in (0..ndim).rev() {
-                        if s.strides[d] != expected {
+                        if validated.strides[d] != expected {
                             ok = false;
                             break;
                         }
@@ -510,24 +648,31 @@ pub unsafe extern "C" fn lmflow_packet_from_buffer(
                     // 里程表遍历外层维度索引,按完整 strides 求每行源偏移。
                     let mut idx = vec![0i64; ndim - 1];
                     for r in 0..n_rows {
-                        let mut so: i64 = 0;
+                        let mut source_offset = 0i128;
                         for (d, &ix) in idx.iter().enumerate() {
-                            so += ix * s.strides[d];
+                            source_offset += i128::from(ix) * i128::from(validated.strides[d]);
                         }
-                        let dofs = (r as usize) * row_bytes;
+                        let source_offset =
+                            isize::try_from(source_offset).expect("validated source offset");
+                        let dofs = r * row_bytes;
                         if dofs + row_bytes <= b.bytes.len() {
                             if last_stride == esz as i64 {
                                 // 最后一维连续:整行拷
                                 std::ptr::copy_nonoverlapping(
-                                    src_base.offset(so as isize),
+                                    src_base.offset(source_offset),
                                     dst_base.add(dofs),
                                     row_bytes,
                                 );
                             } else {
                                 // 最后一维也跳跃(转置/步长切片/负步长):逐元素拷
                                 for k in 0..last {
+                                    let element_offset = source_offset as i128
+                                        + i128::from(k) * i128::from(last_stride);
                                     std::ptr::copy_nonoverlapping(
-                                        src_base.offset((so + k * last_stride) as isize),
+                                        src_base.offset(
+                                            isize::try_from(element_offset)
+                                                .expect("validated element offset"),
+                                        ),
                                         dst_base.add(dofs + (k as usize) * esz),
                                         esz,
                                     );
