@@ -5,8 +5,6 @@
 
 #include "lmflow/flow.hpp"
 
-#include "builtins.hpp"
-
 namespace {
 class RangeSourceKernel : public lmflow::Kernel {
  public:
@@ -33,7 +31,4 @@ class RangeSourceKernel : public lmflow::Kernel {
 };
 }  // namespace
 
-void RegisterRangeSourceKernel() {
-  lmflow_register_kernel("RangeSourceKernel", lmflow::KernelAdapter<RangeSourceKernel>::vtable(),
-                         nullptr);
-}
+LMFLOW_REGISTER_KERNEL(RangeSourceKernel)

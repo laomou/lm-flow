@@ -1,8 +1,6 @@
 // scale.cc —— 参数化数值变换:读 options.factor,输出 输入×factor(示范读参数 + 类型声明)。
 #include "lmflow/flow.hpp"
 
-#include "builtins.hpp"
-
 namespace {
 class ScaleKernel : public lmflow::Kernel {
  public:
@@ -26,6 +24,4 @@ class ScaleKernel : public lmflow::Kernel {
 };
 }  // namespace
 
-void RegisterScaleKernel() {
-  lmflow_register_kernel("ScaleKernel", lmflow::KernelAdapter<ScaleKernel>::vtable(), nullptr);
-}
+LMFLOW_REGISTER_KERNEL(ScaleKernel)

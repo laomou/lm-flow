@@ -21,9 +21,6 @@ import numpy as np
 
 import lmflow
 
-lmflow.register_builtin_kernels()
-
-
 # ---------------------------------------------------------------- 测试用算子
 # 注册是全局且一次性的,故在模块级定义。
 
@@ -241,6 +238,9 @@ input_ports: [in]
 output_ports: [out]
 """
         ) as g:
+            dot = g.to_dot()
+            self.assertIn("PassThroughKernel · C++", dot)
+            self.assertIn("TDouble · Python", dot)
             out = g.add_poller("out")
             g.start()
             inp = g.input("in")
@@ -566,12 +566,6 @@ output_ports: [out]
             g.wait_done(timeout=5.0)
             # 批 [1,2,3]=6、[4,5,6]=15,关流余 [7]=7
             self.assertEqual([p.as_int() for p in out], [6, 15, 7])
-
-    def test_registered_kernels_includes_both_languages(self):
-        names = lmflow.registered_kernels()
-        self.assertIn("PassThroughKernel", names, "C++ built-in kernel")
-        self.assertIn("TDouble", names, "Python kernel")
-
 
 # ---------------------------------------------------------------- numpy
 

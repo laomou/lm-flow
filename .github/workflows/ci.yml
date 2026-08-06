@@ -67,16 +67,19 @@ jobs:
       - name: Rust 测试(含 Graphviz SVG 渲染)
         env: { LMFLOW_REQUIRE_GRAPHVIZ: '1' }
         run: timeout 300 cargo test
+      - name: Benchmark 冒烟(实际执行,捕获运行期算子注册错误)
+        run: |
+          timeout 300 cargo bench --bench dispatch -- --test
+          timeout 300 cargo bench --bench throughput -- --test
+          timeout 300 cargo bench --bench packet -- --test
       - name: 默认构建必须真的零 C++
         run: |
           A=target/debug/liblmflow.a
-          n=$(nm -g --defined-only "$A" | grep -c 'lmflow_register_builtin_kernels' || true)
-          [ "$n" = 0 ] || { echo "默认(纯 Rust)构建里仍有内置算子符号($n 个)"; exit 1; }
           cpp=$(ar t "$A" | grep -cE 'passthrough|abi_assert|register\.o' || true)
           [ "$cpp" = 0 ] || { echo "默认构建里仍打进了 C++ 目标文件($cpp 个)"; exit 1; }
           eh=$(nm -u "$A" | grep -cE '__gxx_personality|__cxa_begin_catch|__cxa_throw' || true)
           [ "$eh" = 0 ] || { echo "默认构建里仍引用 C++ 异常运行时($eh 处)"; exit 1; }
-          echo "默认构建校验通过:无内置算子符号 / 无 C++ 目标文件 / 无 C++ 异常运行时"
+          echo "默认构建校验通过:无 C++ 目标文件 / 无 C++ 异常运行时"
       # 守住「crate 可发布」这个性质。它极易被无声破坏:`cpp/` 与 `include/` **在 crate 目录
       # 之外**(故不随发布的 crate 分发),任何把它们挪回 crate 内、或让默认构建依赖它们的
       # 改动,都会让 `cargo publish` 失败 —— 而那原本只有真发版时才会发现。
@@ -106,7 +109,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: cmake -S .. -B /tmp/lmflow-external -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF
         working-directory: lmflow
-      - run: cmake --build /tmp/lmflow-external --target flow_engine lmflow_kernels
+      - run: cmake --build /tmp/lmflow-external --target flow_engine lmflow_kernels_archive
         working-directory: lmflow
       - name: header 声明与库导出符号对齐
         run: |
@@ -122,12 +125,24 @@ jobs:
           cat >/tmp/cpp_host.cc <<'EOF'
           #include "lmflow/flow.h"
           int main() {
-            lmflow_register_builtin_kernels();
-            return lmflow_abi_version() == LMFLOW_ABI_VERSION ? 0 : 1;
+            if (lmflow_abi_version() != LMFLOW_ABI_VERSION) return 1;
+            LMFlowGraph* graph = lmflow_graph_new();
+            if (!graph) return 2;
+            const char* yaml = R"(
+          nodes:
+            - { name: pass, kernel: PassThroughKernel, input_ports: [in], output_ports: [out] }
+          input_ports: [in]
+          output_ports: [out]
+          )";
+            const LMFlowStatus status = lmflow_graph_init_from_yaml(graph, yaml);
+            lmflow_graph_free(graph);
+            return status == LMFLOW_OK ? 0 : 3;
           }
           EOF
           g++ -std=c++17 -Wall -Wextra -Werror -Iinclude \
-              /tmp/cpp_host.cc /tmp/lmflow-external/liblmflow_kernels.a \
+              /tmp/cpp_host.cc -Wl,--whole-archive \
+              /tmp/lmflow-external/liblmflow_kernels.a \
+              -Wl,--no-whole-archive \
               core/target/release/liblmflow.a \
               -lpthread -ldl -lm -o /tmp/cpp_host
           /tmp/cpp_host
@@ -161,8 +176,17 @@ jobs:
           cat >/tmp/lmflow-sdk-consumer/main.cc <<'EOF'
           #include "lmflow/flow.h"
           int main() {
-            lmflow_register_builtin_kernels();
-            return lmflow_registered_kernel_count() >= 18 ? 0 : 1;
+            LMFlowGraph* graph = lmflow_graph_new();
+            if (!graph) return 1;
+            const char* yaml = R"(
+          nodes:
+            - { name: pass, kernel: PassThroughKernel, input_ports: [in], output_ports: [out] }
+          input_ports: [in]
+          output_ports: [out]
+          )";
+            const LMFlowStatus status = lmflow_graph_init_from_yaml(graph, yaml);
+            lmflow_graph_free(graph);
+            return status == LMFLOW_OK ? 0 : 2;
           }
           EOF
           cmake -S /tmp/lmflow-sdk-consumer -B /tmp/ex -Dlmflow_DIR=/tmp/sdk/lib/cmake/lmflow
@@ -175,16 +199,28 @@ jobs:
           cmake --build build-shared -j
           test -f build-shared/liblmflow.so
           test -f build-shared/liblmflow_core.so
-          nm -D --defined-only build-shared/liblmflow.so \
-            | grep -q ' lmflow_register_builtin_kernels$'
+          cat >/tmp/shared_host.cc <<'EOF'
+          #include "lmflow/flow.h"
+          int main() {
+            LMFlowGraph* graph = lmflow_graph_new();
+            if (!graph) return 1;
+            const char* yaml = R"(
+          nodes:
+            - { name: pass, kernel: PassThroughKernel, input_ports: [in], output_ports: [out] }
+          input_ports: [in]
+          output_ports: [out]
+          )";
+            const LMFlowStatus status = lmflow_graph_init_from_yaml(graph, yaml);
+            lmflow_graph_free(graph);
+            return status == LMFLOW_OK ? 0 : 2;
+          }
+          EOF
+          g++ -std=c++17 -Ilmflow/include /tmp/shared_host.cc \
+            -Lbuild-shared -Wl,-rpath,"$PWD/build-shared" -llmflow -o /tmp/shared_host
+          /tmp/shared_host
           cmake -B build-core-only -DCMAKE_BUILD_TYPE=Release \
             -DBUILD_SHARED_LIBS=ON -DLMFLOW_BUILD_KERNELS=OFF
           cmake --build build-core-only -j
-          if nm -D --defined-only build-core-only/liblmflow.so \
-              | grep -q ' lmflow_register_builtin_kernels$'; then
-            echo "kernels 关闭后完整库仍导出了内置算子注册符号"
-            exit 1
-          fi
       - run: sudo apt-get update && sudo apt-get install -y ninja-build
       - name: 多配置生成器下 cargo profile 必须跟随 --config
         # 守一个**静默**的坑:`CMAKE_BUILD_TYPE` 只对单配置生成器有意义,而多配置生成器
@@ -359,8 +395,17 @@ jobs:
           Set-Content -Path "$source\main.cc" -Value @'
           #include "lmflow/flow.h"
           int main() {
-            lmflow_register_builtin_kernels();
-            return lmflow_registered_kernel_count() >= 18 ? 0 : 1;
+            LMFlowGraph* graph = lmflow_graph_new();
+            if (!graph) return 1;
+            const char* yaml = R"(
+          nodes:
+            - { name: pass, kernel: PassThroughKernel, input_ports: [in], output_ports: [out] }
+          input_ports: [in]
+          output_ports: [out]
+          )";
+            const LMFlowStatus status = lmflow_graph_init_from_yaml(graph, yaml);
+            lmflow_graph_free(graph);
+            return status == LMFLOW_OK ? 0 : 2;
           }
           '@
 
@@ -439,7 +484,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: sudo apt-get update && sudo apt-get install -y libopencv-dev
       - run: cmake -S . -B build-opencv -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DLMFLOW_BUILD_KERNELS=ON -DLMFLOW_BUILD_TESTS=OFF
-      - run: cmake --build build-opencv --target flow_engine lmflow_kernels --parallel
+      - run: cmake --build build-opencv --target flow_engine lmflow_kernels_archive --parallel
       - name: 编译并运行 flow_cv.hpp 测试(含非连续 ROI 拷贝)
         run: |
           g++ -std=c++17 -Wall -Wextra -Werror -Ilmflow/include lmflow/cpp/tests/flow_cv_test.cc \

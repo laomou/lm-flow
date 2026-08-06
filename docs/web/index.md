@@ -67,14 +67,12 @@ impl Kernel for Double {
     }
 }
 
-register_kernel::<Double>("Double")?;   // your own kernel
-let graph = Graph::from_yaml(yaml)?;    // `PassThrough` / `Sink` need no registration
+register_kernel::<Double>("Double")?;   // register before building the graph
+let graph = Graph::from_yaml(yaml)?;
 ```
 
-Two structural kernels ship with the engine and are registered automatically: `PassThrough`
-(zero-copy forward) and `Sink` (consume only, so a branch can terminate itself). Anything that
-would have to assume a concrete payload type is deliberately left to you — the engine never
-interprets payloads.
+The engine does not install any kernels implicitly. Rust hosts register their own implementations;
+native SDK and Python consumers get the optional bundled C++ kernels from the linked component.
 
 ### Python
 

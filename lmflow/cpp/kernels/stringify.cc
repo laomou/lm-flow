@@ -3,8 +3,6 @@
 
 #include "lmflow/flow.hpp"
 
-#include "builtins.hpp"
-
 namespace {
 class StringifyKernel : public lmflow::Kernel {
  public:
@@ -21,7 +19,4 @@ class StringifyKernel : public lmflow::Kernel {
 };
 }  // namespace
 
-void RegisterStringifyKernel() {
-  lmflow_register_kernel("StringifyKernel", lmflow::KernelAdapter<StringifyKernel>::vtable(),
-                         nullptr);
-}
+LMFLOW_REGISTER_KERNEL(StringifyKernel)

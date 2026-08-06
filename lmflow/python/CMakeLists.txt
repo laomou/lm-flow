@@ -27,12 +27,10 @@ endif()
 # profile 优化；这里开 GCC full LTO 只会产生串行 LTRANS job 提示并拖慢 wheel 构建。
 pybind11_add_module(_lmflow NO_EXTRAS ${_srcs})
 target_include_directories(_lmflow PRIVATE "${LMFLOW_SRC}/include" "${NUMPY_INCLUDE}")
-target_link_libraries(_lmflow PRIVATE lmflow::core_static)
 if(LMFLOW_BUILD_KERNELS)
-  target_link_libraries(_lmflow PRIVATE lmflow::kernels)
-  target_compile_definitions(_lmflow PRIVATE LMFLOW_HAS_BUILTIN_KERNELS=1)
+  _lmflow_whole_archive(_lmflow lmflow_core_static lmflow_kernels_archive)
 else()
-  target_compile_definitions(_lmflow PRIVATE LMFLOW_HAS_BUILTIN_KERNELS=0)
+  target_link_libraries(_lmflow PRIVATE lmflow::core_static)
 endif()
 add_dependencies(_lmflow flow_engine)  # cargo 先出库再链
 

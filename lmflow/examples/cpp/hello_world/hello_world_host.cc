@@ -58,9 +58,6 @@ int main() {
     return 1;
   }
 
-  /* 必须先注册内置算子,否则 init 会报「算子未注册」 */
-  lmflow_register_builtin_kernels();
-
   LMFlowGraph* graph = lmflow_graph_new();
   if (!graph) {
     fprintf(stderr, "lmflow_graph_new: %s\n", lmflow_last_error());

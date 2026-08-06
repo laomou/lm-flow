@@ -48,7 +48,7 @@ use std::ffi::c_void;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
 use crate::context::Context;
-use crate::kernel::{register, Contract, KernelVTable};
+use crate::kernel::{register_with_language, Contract, KernelLanguage, KernelVTable};
 use crate::packet::Packet;
 use crate::status::{code, Error, Result};
 use crate::timestamp::Timestamp;
@@ -338,5 +338,5 @@ pub fn register_kernel<T: Kernel>(name: &str) -> Result<()> {
         close: Some(tramp_close::<T>),
         destroy: Some(tramp_destroy::<T>),
     };
-    register(name, vt, std::ptr::null_mut())
+    register_with_language(name, vt, std::ptr::null_mut(), KernelLanguage::Rust)
 }

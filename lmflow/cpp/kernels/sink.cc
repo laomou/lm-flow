@@ -3,8 +3,6 @@
 
 #include "lmflow/flow.hpp"
 
-#include "builtins.hpp"
-
 namespace {
 class SinkKernel : public lmflow::Kernel {
  public:
@@ -33,6 +31,4 @@ class SinkKernel : public lmflow::Kernel {
 };
 }  // namespace
 
-void RegisterSinkKernel() {
-  lmflow_register_kernel("SinkKernel", lmflow::KernelAdapter<SinkKernel>::vtable(), nullptr);
-}
+LMFLOW_REGISTER_KERNEL(SinkKernel)

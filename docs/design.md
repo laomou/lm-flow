@@ -306,7 +306,7 @@ bool       lmflow_ctx_has_side_packet(const LMFlowContext*, const char* name);
 | 参数(增强) | 点号路径嵌套、`lmflow_ctx_require_option_*`(必需参数)、`lmflow_ctx_option_*_array`(数组) |
 | 全局水位 | `lmflow_graph_total_queued` `…_total_queued_bytes`;YAML `max_queued_packets/bytes` |
 | 统计 | `lmflow_graph_node_stats`(`LMFlowNodeStats`,**全原子无锁**采集)、`lmflow_graph_counter_value`;YAML `watchdog_ms` |
-| 状态 / 拓扑 | `lmflow_graph_state` `…_num_input_ports/output_ports/num_nodes` `lmflow_registered_kernel_*` |
+| 状态 / 拓扑 | `lmflow_graph_state` `…_num_input_ports/output_ports/num_nodes` |
 | 内省 | `lmflow_graph_dump` `lmflow_graph_to_dot_view`(Graphviz DOT) `lmflow_graph_queue_depth` `lmflow_graph_dropped_count` `lmflow_graph_last_error` `lmflow_packet_debug_string` |
 
 **接口设计要点**
@@ -356,21 +356,18 @@ LMFLOW_REGISTER_KERNEL(PassThroughKernel)    // 或 LMFLOW_REGISTER_KERNEL_AS(T,
   绑成一个动作,让人**难以**漏掉文本。内置 `CastKernel` 是用法样板。
 - **异常路径也带原因**:`KernelAdapter` 的 `catch` 会把 `std::exception::what()` 写进 Context
   (非 std 异常则给出固定说明)。此前异常这条路只剩一个错误码、诊断信息为零。
-- 注册:**内置算子用显式聚合注册**(`lmflow_register_builtin_kernels`),因为静态初始化
-  对象在静态库中可能被链接器裁剪;用户算子可直接用宏。
+- 注册:**所有 C++ 算子统一使用 `LMFLOW_REGISTER_KERNEL` 自注册**。静态库中的注册对象
+  可能被链接器裁剪，因此 `lmflow::lmflow` / `lmflow::kernels` 在各平台自动使用
+  whole-archive / force-load；自定义静态算子库也必须采用等价链接方式。
 - **算子与引擎解耦**:注册表(`src/kernel.rs`)是唯一一张语言无关的 `name → vtable` 表,
   C++(`flow.hpp`)、Python(pybind11)、Rust(`trait Kernel`)三条路都汇入同一个
   `kernel::register`,引擎不知道算子是什么语言写的。内置的 18 个 C++ 算子因此只是**捆绑的
   算子库**、不是引擎的一部分 —— 它们放在 crate 之外(`lmflow/cpp/`,见 §11),**不随发布的
   crate 分发**；由 CMake 构建为独立 `lmflow::kernels` 组件。
-- **引擎自带默认 Rust 算子**(`src/builtin.rs`,建图时 `Graph::from_config` 自动注册一次、
-  零 C++、任何配置下都在)—— **刻意只有两个**,且都纯结构性、零 payload 假设:
-  `PassThrough`(直通接线)与 `Sink`(只消费,让分支自行终结;计 `sink.packets`)。
-  名字**不带 `Kernel` 后缀**,以免与 C++ 内置算子重名(注册表按名字唯一,重名直接报错)。
-  **为什么不多放**:`Scale`/`Sum`/`Zip`/`Filter` 之类必须假设 payload 是 i64,与 ADR #6
-  「引擎不解释 payload」相悖;演示引擎语义是 `cpp/kernels/` 那 18 个与 `examples/` 的职责。
-  扇出也不需要算子 —— **一条边可直接挂多个消费者**是原生能力(见 §7.5),故不放 `Split`。
-- 内置算子清单见 `cpp/kernels/register.cc` 表头。其中**张量前处理组**(纯数值 BUFFER):
+- **引擎不隐式安装任何算子**。Rust 宿主显式调用 `register_kernel`；原生 SDK 与 Python
+  通过链接可选的 `lmflow::kernels` 获得 C++ 算子。注册来源只有“宿主代码”或“链接组件”，
+  不再存在建图时修改全局注册表的隐藏路径。
+- 内置算子清单见 `cpp/kernels/`，每个翻译单元各自注册。其中**张量前处理组**(纯数值 BUFFER):
   `Cast`(dtype 转换)、`Affine`(`x*scale+shift`)、`Clamp`、`Reduce`(→F64 标量)——
   统一走 double 做 dtype 分派,要求连续缓冲。**含 F16**:`buffer_util.hpp` 自带
   binary16 ↔ double 的软件转换(见 §5.3),故 `dtype: f16` 可直接作输入或输出。示例见
@@ -1285,7 +1282,8 @@ cc.emit(0, packet)
 - **布局一致性**:`cpp/abi_assert.cc` 的 `static_assert` 与 `core/tests/abi_layout.rs`
   钉在同一组常量上,任一侧改字段而忘同步 → **构建失败**(已实测能拦住)。
 - **ABI 演进**:`LMFlowBuffer` 留了 `reserved` 供未来加字段(最可能是 GPU 内存空间);
-  一旦改变既有布局,必须提升 `LMFLOW_ABI_VERSION`,所有既有二进制都要重编。
+  一旦改变既有布局或删除/改变既有导出符号,必须提升 `LMFLOW_ABI_VERSION`,所有既有
+  二进制都要重编。
 
 ---
 
@@ -1334,7 +1332,7 @@ lm-flow/                          仓库根
 │   │       ├── flow_cv.hpp       可选:LMFlowBuffer ↔ cv::Mat(仅需 OpenCV 者 include)
 │   │       └── flow_platform_log.hpp  可选:引擎日志接平台日志(logcat/os_log/HiLog)
 │   ├── cpp/                      C++ 侧(**非引擎**,且在 crate 之外 → 不随发布的 crate 分发)
-│   │   ├── kernels/              18 个内置 C++ 算子(一文件一算子 + register.cc 显式聚合)
+│   │   ├── kernels/              18 个内置 C++ 算子(一文件一算子、自注册)
 │   │   ├── abi_assert.cc         跨界结构体布局的编译期校验
 │   │   └── tests/                flow_hpp_test.cc / flow_cv_test.cc + CMakeLists
 │   ├── python/                   src/bindings.cc(pybind11)+ lmflow 包 + CMakeLists
@@ -1453,7 +1451,7 @@ lm-flow/                          仓库根
 | CoW 测试用单节点管线,覆盖不到上一条 | 修复后回看测试设计 | 不变量测试必须覆盖「最短能触发的拓扑」而非最简拓扑 |
 | `KernelInstance::open/process/close` 是 `pub` 且解引用裸指针却未标 `unsafe` | clippy `not_unsafe_ptr_arg_deref` | |
 | `Context` 用 `Mutex` 时,持 guard 的 `&mut` 与回调内从裸指针再造的 `&mut` 构成别名 UB | 手工审查 | 改用 `UnsafeCell` + 令牌不变量 |
-| `lmflow_register_builtin_kernels` 在库里但漏出 header;C++ 示例忘了调它(一跑就「算子未注册」) | `nm` 对比 header 声明与库导出符号 | 已固化为 CI 的 external-host 门禁 |
+| 静态算子注册对象被链接器裁剪，宿主建图时报「算子未注册」 | 外部静态 SDK consumer 不做手动注册并实际建图 | CMake targets 跨平台传播 whole-archive / force-load |
 | 「算子未注册」的报错分两处,其中一处没列出可用算子 | e2e 测试断言报错内容 | 报错要能指导用户,不只是标明失败 |
 | `SinkKernel` 用 `printf` 抢 stdout,违反自己文档里的规定 | 测试输出里看到 | 内置算子也要遵守对用户提的要求 |
 | 必需 side packet 借用计数器承载,会把内部键暴露到用户可见的 counter 列表 | 自我审查 | |
@@ -1603,7 +1601,7 @@ Debug 三个配置做 `ninja -n` 干跑,断言 profile 与 `--config` 一致,并
 |---|---|---|
 | payload 跨线程析构 | 在 A 线程建、B 线程析构 | R3 保证访问串行;`Send` 断言写明前提 |
 | panic / 异常穿越 FFI | 双向 UB | 双向 `catch_unwind` / `try-catch` 转错误码 |
-| 静态注册被链接器裁剪 | 注册对象无引用被 strip | 内置算子用显式聚合注册;必要时 `--whole-archive` |
+| 静态注册被链接器裁剪 | 注册对象无引用被 strip | 官方 CMake targets 自动 whole-archive；自定义静态算子库采用等价选项 |
 | 静态库链两份 → 双注册表 | 算子在一份里注册、另一份看不见 | Python 侧强制用动态库;符号可见性只导出 `flow_*` |
 | ABI 布局不一致 | 内存错乱 | `#[repr(C)]` + 双向 `static_assert`;`LMFLOW_ABI_VERSION` 运行期校验 |
 | CoW 静默失效 | 引擎多留一份引用 → 恒复制、不报错只变慢 | 写成显式不变量(§3.4)+ 加断言/测试 |

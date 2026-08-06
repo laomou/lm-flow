@@ -502,8 +502,9 @@ struct KernelAdapter {
  * 注册宏。LMFLOW_REGISTER_KERNEL(T) 用 #T 当注册名(须与 YAML 的 kernel 字段一致);
  * 若类在命名空间内、或想让 YAML 用别名,请用 LMFLOW_REGISTER_KERNEL_AS。
  *
- * 注意:静态初始化在静态库中可能被链接器裁剪。若发现算子「未注册」,
- * 改用显式聚合注册(见设计文档 §9)或链接时加 --whole-archive。
+ * 注意:静态初始化在静态库中可能被链接器裁剪。官方 lmflow::lmflow /
+ * lmflow::kernels target 会自动保留完整 archive；自定义静态算子库也须使用
+ * --whole-archive、-force_load 或 /WHOLEARCHIVE 等平台对应选项。
  */
 /*
  * 条件断言:不成立就**带着「哪个表达式、哪个文件哪一行」**返回算子失败。
@@ -545,7 +546,10 @@ struct KernelAdapter {
 #define LMFLOW_REGISTER_KERNEL_AS(T, name_str)                                             \
   namespace {                                                                            \
   struct LMFlowReg_##T {                                                                   \
-    LMFlowReg_##T() { lmflow_register_kernel(name_str, lmflow::KernelAdapter<T>::vtable(), nullptr); } \
+    LMFlowReg_##T() {                                                                      \
+      lmflow_register_kernel_with_language(name_str, lmflow::KernelAdapter<T>::vtable(),   \
+                                           nullptr, LMFLOW_KERNEL_LANGUAGE_CPP);            \
+    }                                                                                      \
   };                                                                                     \
   static LMFlowReg_##T g_flow_reg_##T;                                                     \
   }

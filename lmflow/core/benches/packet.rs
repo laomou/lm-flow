@@ -6,6 +6,8 @@
 //! cargo bench --bench packet
 //! ```
 
+mod common;
+
 use std::hint::black_box;
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
@@ -20,6 +22,7 @@ fn buffer_packet(bytes: usize) -> Packet {
 }
 
 fn bench_clone(c: &mut Criterion) {
+    common::register_bench_kernels();
     let mut group = c.benchmark_group("packet_clone");
     group.throughput(Throughput::Elements(1));
 

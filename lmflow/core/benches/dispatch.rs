@@ -7,7 +7,7 @@
 //! `next()` 本身就在 **pump 任务**(design §7.9)—— 于是「驱动图」和「取输出」被算进了同一个数字里,
 //! 还额外含 poller 队列锁与 condvar。那个数字是**宿主往返延迟**,不是引擎吞吐。
 //!
-//! 这里换一种口径:图以 **`Sink` 结尾、没有图输出口**,喂满一批后用
+//! 这里换一种口径:图以私有 benchmark `BenchSink` 结尾、没有图输出口,喂满一批后用
 //! `wait_until_idle` 排干。**全程不涉及 poller**,量到的是
 //! 入队 → 就绪判定 → 派发 → vtable 调用 → 算子体 → 汇点。
 //! `wait_until_idle` 每批只调一次(BATCH=256),摊到每包近乎为零。
@@ -19,7 +19,7 @@
 //! 所以它比任何单点绝对值都稳。
 //!
 //! ⚠ **不要**拿本组的 `depth1` 直接减 `throughput.rs` 的端到端数字去算「poller 的代价」:
-//! 本组 `depth1` 是**两个节点**(1 个 PassThrough + 末端 Sink),而 `end_to_end` 是
+//! 本组 `depth1` 是**两个节点**(1 个 BenchPassThrough + 末端 BenchSink),而 `end_to_end` 是
 //! 一个节点 + poller,节点数就不一样,减出来的数没有意义。要比就比每跳边际值。
 //!
 //! `main_thread` 与 `pool*` 之差 = 走线程池派发(投递 + 唤醒 + 跨线程 + activity 通知)
@@ -72,10 +72,12 @@
 //! 函数指针 vtable**(`kernel_api` 的蹦床同样是 `extern "C"`),差的是**算子体**本身,
 //! 不是过不过边界。
 //!
-//! 本组只用引擎自带的 Rust 默认算子(`PassThrough` / `Sink`),故**不需要
-//! 全程使用 core 自带的纯 Rust kernel，不依赖 C++ 工具链。
+//! 本组显式注册 benchmark 私有的纯 Rust `BenchPassThrough` / `BenchSink`,
+//! 不依赖 C++ 工具链。
 //!
 //! 跑:在 `lmflow/core` 下 `cargo bench --bench dispatch`;报告在 `target/criterion/`。
+
+mod common;
 
 use std::cell::Cell;
 use std::time::Duration;
@@ -86,7 +88,7 @@ use lmflow::{Graph, Packet, Timestamp};
 /// 每次 Criterion 迭代喂入并排干的包数(吞吐以此为单位)。
 const BATCH: u64 = 256;
 
-/// `depth` 级 `PassThrough` 之后接一个 `Sink`,**没有图输出口**。
+/// `depth` 级 `BenchPassThrough` 之后接一个 `BenchSink`,**没有图输出口**。
 /// `pool > 0` 时全部节点挂线程池,否则显式用委托执行器(交还宿主线程)。
 /// `max_queue_size` 调大,批量喂入不撞全局软水位(那会转成输入口背压,污染测量)。
 fn sink_chain_yaml(depth: usize, pool: usize) -> String {
@@ -119,12 +121,12 @@ fn sink_chain_yaml_stats(depth: usize, pool: usize, stats: &str) -> String {
             format!("e{}", i - 1)
         };
         s += &format!(
-            "  - {{ name: \"n{i}\", kernel: \"PassThrough\", input_ports: [\"{inp}\"], output_ports: [\"e{i}\"]{exec} }}\n"
+            "  - {{ name: \"n{i}\", kernel: \"BenchPassThrough\", input_ports: [\"{inp}\"], output_ports: [\"e{i}\"]{exec} }}\n"
         );
     }
     // 末端汇点:只消费、零输出口 —— 于是整张图没有图输出口,poller 完全不参与。
     s += &format!(
-        "  - {{ name: \"sink\", kernel: \"Sink\", input_ports: [\"e{}\"], output_ports: []{exec} }}\n",
+        "  - {{ name: \"sink\", kernel: \"BenchSink\", input_ports: [\"e{}\"], output_ports: []{exec} }}\n",
         depth - 1
     );
     s += "input_ports: [\"in\"]\noutput_ports: []\n";
@@ -132,6 +134,7 @@ fn sink_chain_yaml_stats(depth: usize, pool: usize, stats: &str) -> String {
 }
 
 fn bench_dispatch(c: &mut Criterion) {
+    common::register_bench_kernels();
     let mut g = c.benchmark_group("dispatch");
     g.throughput(Throughput::Elements(BATCH));
 
@@ -167,6 +170,7 @@ fn bench_dispatch(c: &mut Criterion) {
 /// 只量「送进图输入口」这一步(图暂停,不派发)—— 作为上面各数字的下界参照。
 /// 与 `throughput.rs` 的输入热路径同口径,但暂停图以排除派发成本。
 fn bench_enqueue_only(c: &mut Criterion) {
+    common::register_bench_kernels();
     let mut g = c.benchmark_group("dispatch");
     g.throughput(Throughput::Elements(BATCH));
     g.bench_function("enqueue_only_paused", |b| {
@@ -194,6 +198,7 @@ fn bench_enqueue_only(c: &mut Criterion) {
 
 /// 三级统计的成本：full 额外包含时钟、百分位、CoW 和执行器耗时，off 则连吞吐原子也跳过。
 fn bench_stats_cost(c: &mut Criterion) {
+    common::register_bench_kernels();
     let mut g = c.benchmark_group("dispatch");
     g.throughput(Throughput::Elements(BATCH));
     for level in ["full", "basic", "off"] {

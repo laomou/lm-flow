@@ -1,8 +1,6 @@
 // sum.cc —— 有状态累加:跨包保持 total,Close 时在流尾单包位置吐出总和。
 #include "lmflow/flow.hpp"
 
-#include "builtins.hpp"
-
 namespace {
 class SumKernel : public lmflow::Kernel {
  public:
@@ -30,6 +28,4 @@ class SumKernel : public lmflow::Kernel {
 };
 }  // namespace
 
-void RegisterSumKernel() {
-  lmflow_register_kernel("SumKernel", lmflow::KernelAdapter<SumKernel>::vtable(), nullptr);
-}
+LMFLOW_REGISTER_KERNEL(SumKernel)

@@ -65,7 +65,6 @@ def main() -> None:
     if args.iterations < 1:
         parser.error("--iterations must be positive")
 
-    lmflow.register_builtin_kernels()
     benchmark("python/pass_through/i64", "PassThroughKernel", 0, args.iterations)
 
     large = np.zeros((512, 512, 3), dtype=np.uint8)

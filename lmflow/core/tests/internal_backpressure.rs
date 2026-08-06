@@ -1,3 +1,5 @@
+mod common;
+
 use std::ffi::{c_char, CStr};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
@@ -137,6 +139,7 @@ impl Kernel for PortJoinCount {
 }
 
 fn register_test_kernels() {
+    common::register_test_kernels();
     let _ = register_kernel::<SlowPass>("InternalBpSlowPass");
     let _ = register_kernel::<CountingSource>("InternalBpCountingSource");
     let _ = register_kernel::<Duplicate>("InternalBpDuplicate");

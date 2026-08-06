@@ -52,8 +52,6 @@ Java_com_lmflow_demo_LmFlow_abiVersion(JNIEnv*, jclass) {
  * 建一张 ScaleKernel 图,把 inputs 逐个送入,返回每个乘以 factor 的结果。 */
 JNIEXPORT jlongArray JNICALL
 Java_com_lmflow_demo_LmFlow_runScale(JNIEnv* env, jclass, jlongArray inputs, jlong factor) {
-  lmflow_register_builtin_kernels();  // 幂等
-
   LMFlowGraph* g = lmflow_graph_new();
   if (!g) {
     ThrowRuntime(env, "lmflow_graph_new failed");

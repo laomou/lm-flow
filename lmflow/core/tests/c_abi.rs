@@ -4,6 +4,8 @@
 //! `LMFlowPacket` 裸结构体,不碰任何 Rust 侧便利 API —— 因为外部 C/C++/Python
 //! 宿主看到的就只有这些。`examples/cpp/hello_world/hello_world_host.cc` 的逻辑与此一致。
 
+mod common;
+
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::sync::Once;
 
@@ -26,6 +28,7 @@ impl Kernel for CAbiI64Pass {
 }
 
 fn register_test_kernels() {
+    common::register_test_kernels();
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
         register_kernel::<CAbiI64Pass>("CAbiI64Pass").unwrap();
@@ -112,7 +115,7 @@ input_ports: [in]
 fn abi_version_and_handshake() {
     assert_eq!(
         lmflow_abi_version(),
-        2,
+        3,
         "matches LMFLOW_ABI_VERSION in include/flow.h"
     );
 }
@@ -160,7 +163,7 @@ fn custom_type_descriptor_registration_is_strict_and_queryable() {
 
 #[test]
 fn bounded_poller_exposes_drop_policy_and_watermark_accounting() {
-    lmflow::builtin::register_defaults();
+    common::register_test_kernels();
     unsafe {
         let graph = lmflow_graph_new();
         let yaml = cs(r#"
@@ -201,7 +204,7 @@ output_ports: [out]
 /// 与 examples/cpp/hello_world/hello_world_host.cc 等价的完整流程。
 #[test]
 fn full_pipeline_through_c_abi() {
-    lmflow::builtin::register_defaults();
+    common::register_test_kernels();
     unsafe {
         let g = lmflow_graph_new();
         assert!(!g.is_null());
@@ -277,7 +280,7 @@ fn full_pipeline_through_c_abi() {
 
 #[test]
 fn c_abi_can_pump_a_delegating_executor() {
-    lmflow::builtin::register_defaults();
+    common::register_test_kernels();
     unsafe {
         let graph = lmflow_graph_new();
         let yaml = cs(r#"
@@ -320,7 +323,7 @@ fn c_abi_wakeup_callback_coalesces_delegated_tasks() {
         WAKES.fetch_add(1, Ordering::SeqCst);
     }
 
-    lmflow::builtin::register_defaults();
+    common::register_test_kernels();
     WAKES.store(0, Ordering::SeqCst);
     unsafe {
         let graph = lmflow_graph_new();
@@ -654,7 +657,7 @@ fn null_pointers_do_not_crash() {
 /// 绝不 use-after-free。这守卫的是 Python/C++ 宿主先销毁 graph、后用 input/poller 的场景。
 #[test]
 fn handles_stay_safe_after_graph_free() {
-    lmflow::builtin::register_defaults();
+    common::register_test_kernels();
     unsafe {
         let g = lmflow_graph_new();
         let yaml = cs(CONFIG);
@@ -743,7 +746,7 @@ fn to_dot_on_uninitialized_graph_is_valid_empty_digraph() {
 
 #[test]
 fn introspection_through_c_abi() {
-    lmflow::builtin::register_defaults();
+    common::register_test_kernels();
     unsafe {
         let g = lmflow_graph_new();
         let yaml = cs(CONFIG);
@@ -878,7 +881,7 @@ fn introspection_through_c_abi() {
 
 #[test]
 fn observer_receives_packets() {
-    lmflow::builtin::register_defaults();
+    common::register_test_kernels();
 
     // 用 Mutex 而非 static mut:后者创建共享引用本身就是坏实践
     static SEEN: std::sync::Mutex<Vec<i32>> = std::sync::Mutex::new(Vec::new());
@@ -931,7 +934,7 @@ fn log_callback_receives_engine_messages() {
         assert!(!msg.is_null());
         COUNT.fetch_add(1, Ordering::SeqCst);
     }
-    lmflow::builtin::register_defaults();
+    common::register_test_kernels();
     register_test_kernels();
     unsafe {
         lmflow_set_log_callback(Some(sink), std::ptr::null_mut());

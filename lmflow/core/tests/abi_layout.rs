@@ -55,8 +55,8 @@ fn input_queue_stats_uses_struct_size_for_forward_compat() {
 
 #[test]
 fn abi_version_matches_header() {
-    // include/flow.h: #define LMFLOW_ABI_VERSION 2u
-    assert_eq!(lmflow::ffi::lmflow_abi_version(), 2);
+    // include/flow.h: #define LMFLOW_ABI_VERSION 3u
+    assert_eq!(lmflow::ffi::lmflow_abi_version(), 3);
 }
 
 #[test]

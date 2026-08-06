@@ -526,7 +526,9 @@ const LMFlowKernelVTable kPyVTable = {&py_create, &py_get_contract, &py_open,
 void register_python_kernel(const std::string& name, const py::object& cls) {
   auto* reg = new PyKernelReg{cls, name};
   py_registry().push_back(reg);
-  check(lmflow_register_kernel(name.c_str(), &kPyVTable, reg), "register_kernel");
+  check(lmflow_register_kernel_with_language(name.c_str(), &kPyVTable, reg,
+                                             LMFLOW_KERNEL_LANGUAGE_PYTHON),
+        "register_kernel");
 }
 
 }  // namespace
@@ -852,33 +854,12 @@ PYBIND11_MODULE(_lmflow, m) {
   m.attr("CLOSE_CANCELLED") = static_cast<int>(LMFLOW_CLOSE_CANCELLED);
 
   m.def("abi_version", &lmflow_abi_version);
-  m.def(
-      "register_builtin_kernels",
-      [] {
-#if LMFLOW_HAS_BUILTIN_KERNELS
-        lmflow_register_builtin_kernels();
-#else
-        throw std::runtime_error(
-            "this lmflow extension was built with LMFLOW_BUILD_KERNELS=OFF");
-#endif
-      },
-      "Register the C++ builtin kernels (idempotent; call before building a graph)");
 #ifdef LMFLOW_WITH_CV_TEST
   m.def("register_cv_test_kernels", [] { lmflow_register_cv_test_kernels(); },
         "Test-only: register the CV kernel (CvInvertTest); present only when the extension is built with --with-cv-test");
 #endif
   m.def("register_kernel", &register_python_kernel, py::arg("name"), py::arg("cls"),
         "Register a Python class as a kernel");
-  m.def(
-      "registered_kernels",
-      [] {
-        std::vector<std::string> v;
-        for (size_t i = 0, n = lmflow_registered_kernel_count(); i < n; ++i) {
-          v.emplace_back(lmflow_registered_kernel_name(i));
-        }
-        return v;
-      },
-      "Names of registered kernels (including the C++ builtins)");
   m.def(
       "set_log_callback",
       [](const py::object& cb) {

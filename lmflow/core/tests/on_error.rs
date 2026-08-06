@@ -5,6 +5,8 @@
 //! 你**管不到**的失败用的:引擎侧的契约类型校验失败、以及算子的 panic / C++ 异常
 //! (那些没法「返回 Ok」)。
 
+mod common;
+
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::Duration;
 
@@ -53,6 +55,7 @@ impl Kernel for PanicOdd {
 
 static ONCE: AtomicI64 = AtomicI64::new(0);
 fn reg() {
+    common::register_test_kernels();
     if ONCE.fetch_add(1, Ordering::SeqCst) == 0 {
         register_kernel::<DropOdd>("DropOdd").unwrap();
         register_kernel::<FailOdd>("FailOdd").unwrap();

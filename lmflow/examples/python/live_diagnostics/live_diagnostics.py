@@ -19,7 +19,11 @@ import time
 
 import lmflow
 
-lmflow.register_builtin_kernels()
+
+@lmflow.kernel("DiagnosticPassThrough")
+class DiagnosticPassThrough(lmflow.Kernel):
+    def process(self, context):
+        context.forward(0, 0)
 
 
 @lmflow.kernel("DiagnosticSlowPass")
@@ -34,7 +38,7 @@ executors:
   - { name: workers, num_threads: 2 }
 nodes:
   - name: decode
-    kernel: PassThrough
+    kernel: DiagnosticPassThrough
     input_ports: [in]
     output_ports: [decoded]
     executor: workers

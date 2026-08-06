@@ -1,7 +1,9 @@
+mod common;
+
 use std::io::Write;
 use std::process::{Command, Stdio};
 
-use lmflow::{DotView, Graph, PollerOptions, PollerOverflow};
+use lmflow::{DotView, PollerOptions, PollerOverflow};
 
 fn render_svg(dot: &str) -> Option<String> {
     let available = Command::new("dot").arg("-V").output().is_ok();
@@ -37,7 +39,7 @@ fn render_svg(dot: &str) -> Option<String> {
 
 #[test]
 fn graphviz_renders_plain_and_diagnostic_svg() {
-    let graph = Graph::from_yaml(
+    let graph = common::graph_from_yaml(
         r#"
 subgraphs:
   pair:

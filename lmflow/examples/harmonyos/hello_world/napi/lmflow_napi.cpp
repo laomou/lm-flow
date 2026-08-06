@@ -28,7 +28,6 @@ napi_value RunScale(napi_env env, napi_callback_info info) {
   int64_t factor = 1;
   napi_get_value_int64(env, args[1], &factor);
 
-  lmflow_register_builtin_kernels();  // 幂等
   LMFlowGraph* g = lmflow_graph_new();
   std::string yaml =
       "nodes:\n  - name: \"scale\"\n    kernel: \"ScaleKernel\"\n"

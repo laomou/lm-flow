@@ -1,6 +1,6 @@
 //! Pure-Rust end-to-end throughput benchmarks.
 //!
-//! These benchmarks include graph input, scheduling, the Rust `PassThrough`
+//! These benchmarks include graph input, scheduling, a private Rust pass-through
 //! kernel, and Poller output. They complement `dispatch.rs`, which deliberately
 //! removes Poller overhead to isolate scheduler dispatch cost.
 //!
@@ -9,6 +9,8 @@
 //! ```sh
 //! cargo bench --bench throughput
 //! ```
+
+mod common;
 
 use std::cell::Cell;
 use std::hint::black_box;
@@ -43,7 +45,7 @@ fn chain_yaml(depth: usize, threads: usize) -> String {
             format!("edge{index}")
         };
         yaml.push_str(&format!(
-            "  - {{ name: \"node{index}\", kernel: \"PassThrough\", executor: \"{executor}\", input_ports: [\"{input}\"], output_ports: [\"{output}\"] }}\n"
+            "  - {{ name: \"node{index}\", kernel: \"BenchPassThrough\", executor: \"{executor}\", input_ports: [\"{input}\"], output_ports: [\"{output}\"] }}\n"
         ));
     }
     yaml.push_str("input_ports: [\"in\"]\noutput_ports: [\"out\"]\n");
@@ -51,6 +53,7 @@ fn chain_yaml(depth: usize, threads: usize) -> String {
 }
 
 fn bench_round_trip(c: &mut Criterion) {
+    common::register_bench_kernels();
     let mut group = c.benchmark_group("rust_end_to_end");
     group.throughput(Throughput::Elements(BATCH));
 
@@ -82,6 +85,7 @@ fn bench_round_trip(c: &mut Criterion) {
 }
 
 fn bench_thread_pool(c: &mut Criterion) {
+    common::register_bench_kernels();
     let mut group = c.benchmark_group("rust_end_to_end");
     group.throughput(Throughput::Elements(BATCH));
 
@@ -118,6 +122,7 @@ fn bench_thread_pool(c: &mut Criterion) {
 }
 
 fn bench_payload_independence(c: &mut Criterion) {
+    common::register_bench_kernels();
     let mut group = c.benchmark_group("rust_zero_copy");
     group.throughput(Throughput::Elements(BATCH));
 

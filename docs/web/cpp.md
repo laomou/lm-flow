@@ -25,10 +25,30 @@ lmflow-v0.3.0-linux-x86_64/
 └── lib/              liblmflow_core.a · liblmflow_kernels.a · liblmflow.so
 ```
 
-The static library is self-contained and is the right choice for mobile embedding:
+Prefer the installed CMake target. It carries the core archive, bundled kernels, system libraries,
+and the platform-specific option that preserves every static kernel registrar:
+
+```cmake
+find_package(lmflow REQUIRED)
+target_link_libraries(my_host PRIVATE lmflow::lmflow)
+```
+
+When invoking the linker directly, retain the entire kernels archive explicitly:
 
 ```bash
-g++ -std=c++17 -Iinclude my_host.cc lib/liblmflow.a -lpthread -ldl -lm -o my_host
+# Linux / ELF
+g++ -std=c++17 -Iinclude my_host.cc \
+  -Wl,--whole-archive lib/liblmflow_kernels.a -Wl,--no-whole-archive \
+  lib/liblmflow_core.a -lpthread -ldl -lm -o my_host
+
+# macOS / iOS
+clang++ -std=c++17 -Iinclude my_host.cc \
+  -Wl,-force_load,lib/liblmflow_kernels.a lib/liblmflow_core.a \
+  -lpthread -o my_host
+
+# MSVC
+cl /std:c++17 /Iinclude my_host.cc lib\lmflow_kernels.lib \
+  lib\lmflow_core_static.lib /link /WHOLEARCHIVE:lib\lmflow_kernels.lib
 ```
 
 ### With CMake
@@ -63,14 +83,13 @@ cmake --build build
 ```
 
 `LMFLOW_BUILD_KERNELS` controls the separate official C++ kernels component. It defaults to `ON`;
-set it to `OFF` for a pure-Rust native library without
-`lmflow_register_builtin_kernels()`. The core Cargo crate never compiles C++.
+set it to `OFF` for a pure-Rust native library. The core Cargo crate never compiles C++.
 
 ## ABI version checking
 
 ```c
 #if 0 /* illustrative */
-#define LMFLOW_ABI_VERSION 2u
+#define LMFLOW_ABI_VERSION 3u
 #endif
 uint32_t lmflow_abi_version(void);
 ```
@@ -163,8 +182,6 @@ output_ports: ["output2"]
 
 int main(void) {
   if (lmflow_abi_version() != LMFLOW_ABI_VERSION) return 1;
-
-  lmflow_register_builtin_kernels();          /* before init, or "kernel not registered" */
 
   LMFlowGraph* graph = lmflow_graph_new();
   if (!graph) { fprintf(stderr, "%s\n", lmflow_last_error()); return 1; }
@@ -531,12 +548,11 @@ LMFLOW_REGISTER_KERNEL(ScaleKernel);   // registers under "ScaleKernel"
 
 `LMFLOW_REGISTER_KERNEL_AS(T, "OtherName")` registers under a different name.
 
-> **Static-initialisation caveat.** `LMFLOW_REGISTER_KERNEL` works by declaring a static registrar
-> object, and a linker may strip static initialisers out of a *static* library that nothing else
-> references. That is precisely why the bundled kernels are also registered explicitly through
-> `lmflow_register_builtin_kernels()`. If your own kernels live in a static library and go missing,
-> either add an explicit aggregate registration function that the host calls, or link that archive
-> with `--whole-archive`.
+> **Static-initialisation caveat.** `LMFLOW_REGISTER_KERNEL` declares a static registrar object,
+> which an ordinary static-library link may strip when nothing else references its object file.
+> `lmflow::lmflow` and `lmflow::kernels` preserve the complete bundled archive automatically
+> (`--whole-archive`, `-force_load`, or `/WHOLEARCHIVE`). Apply the equivalent option when
+> distributing custom kernels in your own static archive.
 
 ### `LMFLOW_RET_CHECK` — failing with a reason
 
@@ -1033,8 +1049,9 @@ cc.Emit(0, std::move(p).At(cc.InputTimestamp()));
 
 ## The bundled C++ kernels
 
-Available after `lmflow_register_builtin_kernels()`. **The registered names all carry the `Kernel`
-suffix** — that is what YAML must say.
+Available automatically when the bundled kernels component is linked. **The registered names all
+carry the `Kernel` suffix** — that is what YAML must say. DOT output displays the implementation
+language separately, so kernel names remain language-neutral.
 
 `PassThroughKernel`, `ScaleKernel`, `SumKernel`, `SplitKernel`, `ZipKernel`, `FilterKernel`,
 `StringifyKernel`, `SinkKernel`, `InvertKernel`, `NormalizeKernel`, `MuxKernel`,
@@ -1046,10 +1063,6 @@ alignment, advancing bounds, `SourceDone` — and double as worked examples; see
 [`lmflow/cpp/kernels/`](https://github.com/laomou/lm-flow/tree/main/lmflow/cpp/kernels). They are
 present in the released SDK's `liblmflow.a`, but **not** in the crate published to crates.io, since
 their sources live outside the crate directory.
-
-The engine's own two Rust kernels, `PassThrough` and `Sink`, are always available and need no
-registration call. Note the missing suffix: the names are deliberately distinct from the C++ ones,
-because the registry is keyed by name and a duplicate registration is an error.
 
 ## Mobile embedding
 

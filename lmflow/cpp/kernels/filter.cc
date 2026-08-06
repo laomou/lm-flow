@@ -1,8 +1,6 @@
 // filter.cc —— 条件过滤:>= threshold 才转发;丢弃时必须推进时间戳边界,否则下游会一直等。
 #include "lmflow/flow.hpp"
 
-#include "builtins.hpp"
-
 namespace {
 class FilterKernel : public lmflow::Kernel {
  public:
@@ -31,6 +29,4 @@ class FilterKernel : public lmflow::Kernel {
 };
 }  // namespace
 
-void RegisterFilterKernel() {
-  lmflow_register_kernel("FilterKernel", lmflow::KernelAdapter<FilterKernel>::vtable(), nullptr);
-}
+LMFLOW_REGISTER_KERNEL(FilterKernel)

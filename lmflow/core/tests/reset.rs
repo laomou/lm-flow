@@ -5,6 +5,8 @@
 //! 钉几个最易漏的:时间戳单调性(Edge::last_sent)、旧错误残留(GraphShared)、
 //! input_bounds、统计归零;并反向钉「open 不该重跑」。
 
+mod common;
+
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
@@ -148,7 +150,7 @@ fn reset_clears_prior_error() {
 #[test]
 fn reset_on_running_is_rejected() {
     reg();
-    let g = Graph::from_yaml(&one_node("PassThrough")).unwrap();
+    let g = common::graph_from_yaml(&one_node("PassThrough")).unwrap();
     g.add_poller("out").unwrap();
     g.start().unwrap();
     // 此刻 Running,未 wait_done

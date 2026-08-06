@@ -12,6 +12,13 @@ target_include_directories(buffer_util_test
   PRIVATE "${LMFLOW_SRC}/include" "${LMFLOW_SRC}/cpp/kernels")
 add_test(NAME buffer_util_test COMMAND buffer_util_test)
 
+# 链接完整产物后，bundled C++ kernels 应靠静态注册自动可用，宿主不调用任何注册函数。
+add_executable(auto_register_test auto_register_test.cc)
+target_include_directories(auto_register_test PRIVATE "${LMFLOW_SRC}/include")
+target_link_libraries(auto_register_test PRIVATE lmflow::lmflow)
+add_dependencies(auto_register_test flow_engine)
+add_test(NAME auto_register_test COMMAND auto_register_test)
+
 # flow_cv.hpp 转换测试:仅当装了 OpenCV 才编(引擎本身不含 CV)。
 find_package(OpenCV QUIET)
 if(OpenCV_FOUND)

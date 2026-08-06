@@ -146,8 +146,6 @@ impl Graph {
     }
 
     pub fn from_config(cfg: GraphConfig) -> Result<Self> {
-        // 引擎自带的默认 Rust 算子(PassThrough 等)在此自动注册一次 —— 宿主无需调用。
-        crate::builtin::register_defaults();
         let inner = GraphInner::build(cfg)?;
         Ok(Self {
             inner: Arc::new(inner),

@@ -4,8 +4,6 @@
 // 输出时间戳继承 input_ts(= 批内最后一个包的时间戳),下游单调。
 #include "lmflow/flow.hpp"
 
-#include "builtins.hpp"
-
 namespace {
 class BatchSumKernel : public lmflow::Kernel {
  public:
@@ -26,6 +24,4 @@ class BatchSumKernel : public lmflow::Kernel {
 };
 }  // namespace
 
-void RegisterBatchSumKernel() {
-  lmflow_register_kernel("BatchSumKernel", lmflow::KernelAdapter<BatchSumKernel>::vtable(), nullptr);
-}
+LMFLOW_REGISTER_KERNEL(BatchSumKernel)

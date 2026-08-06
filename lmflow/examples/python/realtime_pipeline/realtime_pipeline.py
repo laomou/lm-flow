@@ -19,7 +19,6 @@ import numpy as np
 
 import lmflow
 
-lmflow.register_builtin_kernels()  # 需要内置的 SplitKernel
 
 
 @lmflow.kernel("Normalize")
