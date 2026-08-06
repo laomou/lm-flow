@@ -223,7 +223,7 @@ impl Drop for KernelInstance {
 /// 端口表:把 YAML 的端口声明整理成「序号 ↔ 名字 ↔ (tag,index)」三向查询。
 ///
 /// **扁平序号 = 声明顺序**(ADR #17)。
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct PortTable {
     names: Vec<String>,
     tags: Vec<(String, usize)>,
