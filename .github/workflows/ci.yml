@@ -1,5 +1,14 @@
 name: ci
-on: [push, pull_request]
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# 同一 PR 只保留最新提交；main 连续合入时也取消已过时的旧构建。
+# 功能分支的 push 不再单独触发，避免与 pull_request 完整矩阵重复。
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 # CI is grouped into five categories (the job-name prefix is the category, so the
 # GitHub Actions page groups them):
