@@ -1,0 +1,104 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "lm-flow graph configuration",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "include": { "type": "array", "items": { "type": "string" } },
+    "executors": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/executor" }
+    },
+    "nodes": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/node" }
+    },
+    "subgraphs": {
+      "type": "object",
+      "additionalProperties": { "$ref": "#/$defs/subgraph" }
+    },
+    "input_ports": { "type": "array", "items": { "type": "string" } },
+    "output_ports": { "type": "array", "items": { "type": "string" } },
+    "max_queue_size": { "type": "integer", "minimum": 0 },
+    "max_queued_packets": { "type": "integer", "minimum": 0 },
+    "watchdog_ms": { "type": "integer", "minimum": 0 },
+    "stats": { "enum": ["off", "basic", "full"] },
+    "stats_timing": { "type": "boolean" }
+  },
+  "$defs": {
+    "executor": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string" },
+        "type": { "enum": ["", "ThreadPoolExecutor", "DelegatingExecutor"] },
+        "num_threads": { "type": "integer", "minimum": 0 },
+        "affinity": { "type": "array", "items": { "type": "integer", "minimum": 0 } },
+        "priority": { "type": "integer", "minimum": 0, "maximum": 99 }
+      }
+    },
+    "node": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string" },
+        "kernel": { "type": "string" },
+        "type": { "type": "string" },
+        "input_ports": { "type": "array", "items": { "type": "string" } },
+        "output_ports": { "type": "array", "items": { "type": "string" } },
+        "executor": { "type": "string" },
+        "max_in_flight": { "type": "integer", "minimum": 0 },
+        "options": {},
+        "input_policy": { "$ref": "#/$defs/inputPolicy" },
+        "input_queues": { "$ref": "#/$defs/inputQueues" },
+        "back_edges": { "type": "array", "items": { "type": "string" } },
+        "on_error": { "enum": ["", "abort", "skip"] },
+        "rate": { "type": "number", "minimum": 0 }
+      }
+    },
+    "inputPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "enum": ["sync", "immediate", "fixed_size", "sync_set", "batch"]
+        },
+        "capacity": { "type": "integer", "minimum": 0 },
+        "sets": {
+          "type": "array",
+          "items": {
+            "type": "array",
+            "items": { "type": "string" },
+            "minItems": 1
+          }
+        }
+      }
+    },
+    "inputQueues": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "packets": { "type": "integer", "minimum": 0 },
+        "ports": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "packets": { "type": "integer", "minimum": 0 }
+            }
+          }
+        }
+      }
+    },
+    "subgraph": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "nodes": { "type": "array", "items": { "$ref": "#/$defs/node" } },
+        "input_ports": { "type": "array", "items": { "type": "string" } },
+        "output_ports": { "type": "array", "items": { "type": "string" } }
+      }
+    }
+  }
+}
