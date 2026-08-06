@@ -105,23 +105,6 @@ unsafe fn register_kernel_impl(
     })
 }
 
-#[no_mangle]
-pub extern "C" fn lmflow_registered_kernel_count() -> usize {
-    guard_val(0, || crate::kernel::registered_names().len())
-}
-
-#[no_mangle]
-pub extern "C" fn lmflow_registered_kernel_name(idx: usize) -> *const c_char {
-    guard_val(c"".as_ptr(), || {
-        static ARENA: std::sync::LazyLock<runtime::CStrArena> =
-            std::sync::LazyLock::new(runtime::CStrArena::default);
-        match crate::kernel::registered_names().get(idx) {
-            Some(n) => ARENA.intern(n),
-            None => c"".as_ptr(),
-        }
-    })
-}
-
 // ---------------------------------------------------------------- Contract
 
 #[no_mangle]

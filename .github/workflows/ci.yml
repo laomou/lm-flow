@@ -121,7 +121,17 @@ jobs:
           #include "lmflow/flow.h"
           int main() {
             if (lmflow_abi_version() != LMFLOW_ABI_VERSION) return 1;
-            return lmflow_registered_kernel_count() >= 18 ? 0 : 2;
+            LMFlowGraph* graph = lmflow_graph_new();
+            if (!graph) return 2;
+            const char* yaml = R"(
+          nodes:
+            - { name: pass, kernel: PassThroughKernel, input_ports: [in], output_ports: [out] }
+          input_ports: [in]
+          output_ports: [out]
+          )";
+            const LMFlowStatus status = lmflow_graph_init_from_yaml(graph, yaml);
+            lmflow_graph_free(graph);
+            return status == LMFLOW_OK ? 0 : 3;
           }
           EOF
           g++ -std=c++17 -Wall -Wextra -Werror -Iinclude \
@@ -161,7 +171,17 @@ jobs:
           cat >/tmp/lmflow-sdk-consumer/main.cc <<'EOF'
           #include "lmflow/flow.h"
           int main() {
-            return lmflow_registered_kernel_count() >= 18 ? 0 : 1;
+            LMFlowGraph* graph = lmflow_graph_new();
+            if (!graph) return 1;
+            const char* yaml = R"(
+          nodes:
+            - { name: pass, kernel: PassThroughKernel, input_ports: [in], output_ports: [out] }
+          input_ports: [in]
+          output_ports: [out]
+          )";
+            const LMFlowStatus status = lmflow_graph_init_from_yaml(graph, yaml);
+            lmflow_graph_free(graph);
+            return status == LMFLOW_OK ? 0 : 2;
           }
           EOF
           cmake -S /tmp/lmflow-sdk-consumer -B /tmp/ex -Dlmflow_DIR=/tmp/sdk/lib/cmake/lmflow
@@ -177,7 +197,17 @@ jobs:
           cat >/tmp/shared_host.cc <<'EOF'
           #include "lmflow/flow.h"
           int main() {
-            return lmflow_registered_kernel_count() >= 18 ? 0 : 1;
+            LMFlowGraph* graph = lmflow_graph_new();
+            if (!graph) return 1;
+            const char* yaml = R"(
+          nodes:
+            - { name: pass, kernel: PassThroughKernel, input_ports: [in], output_ports: [out] }
+          input_ports: [in]
+          output_ports: [out]
+          )";
+            const LMFlowStatus status = lmflow_graph_init_from_yaml(graph, yaml);
+            lmflow_graph_free(graph);
+            return status == LMFLOW_OK ? 0 : 2;
           }
           EOF
           g++ -std=c++17 -Ilmflow/include /tmp/shared_host.cc \
@@ -360,7 +390,17 @@ jobs:
           Set-Content -Path "$source\main.cc" -Value @'
           #include "lmflow/flow.h"
           int main() {
-            return lmflow_registered_kernel_count() >= 18 ? 0 : 1;
+            LMFlowGraph* graph = lmflow_graph_new();
+            if (!graph) return 1;
+            const char* yaml = R"(
+          nodes:
+            - { name: pass, kernel: PassThroughKernel, input_ports: [in], output_ports: [out] }
+          input_ports: [in]
+          output_ports: [out]
+          )";
+            const LMFlowStatus status = lmflow_graph_init_from_yaml(graph, yaml);
+            lmflow_graph_free(graph);
+            return status == LMFLOW_OK ? 0 : 2;
           }
           '@
 

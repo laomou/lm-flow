@@ -744,10 +744,6 @@ size_t lmflow_graph_node_num_input_ports(LMFlowGraph*, size_t node_idx);
 const char* lmflow_graph_node_input_port_name(
     LMFlowGraph*, size_t node_idx, size_t port_idx);
 
-/* 已注册算子清单(全局)。「kernel 未注册」报错时可据此列出可用名字。 */
-size_t lmflow_registered_kernel_count(void);
-const char* lmflow_registered_kernel_name(size_t idx);
-
 /* ---------- 节点级统计:让「卡死」可定位 ----------
  * 若某算子内部阻塞(网络调用、死循环、等锁),它会占住一个 executor 线程;
  * 若干个就把线程池掏空,整图静止。此时 wait_done_timeout 只能告诉你「超时了」,

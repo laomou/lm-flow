@@ -861,16 +861,6 @@ PYBIND11_MODULE(_lmflow, m) {
   m.def("register_kernel", &register_python_kernel, py::arg("name"), py::arg("cls"),
         "Register a Python class as a kernel");
   m.def(
-      "registered_kernels",
-      [] {
-        std::vector<std::string> v;
-        for (size_t i = 0, n = lmflow_registered_kernel_count(); i < n; ++i) {
-          v.emplace_back(lmflow_registered_kernel_name(i));
-        }
-        return v;
-      },
-      "Names of registered kernels (including the C++ builtins)");
-  m.def(
       "set_log_callback",
       [](const py::object& cb) {
         g_log_cb = cb;

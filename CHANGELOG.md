@@ -12,6 +12,11 @@ to each GitHub Release.
 
 ### Changed
 
+- **BREAKING — kernel registration is now link-driven.** Bundled C++ kernels self-register when
+  `lmflow::lmflow` / `lmflow::kernels` is linked. The manual
+  `lmflow_register_builtin_kernels` entry point and the name-only
+  `lmflow_registered_kernel_count` / `lmflow_registered_kernel_name` enumeration APIs are removed;
+  Python likewise no longer exposes `register_builtin_kernels()` or `registered_kernels()`.
 - **Graph runtime module layout.** The former monolithic graph implementation is split into
   dedicated Poller, node/readiness, backpressure, runtime scheduling, and lifecycle files without
   changing the public API or execution behavior.

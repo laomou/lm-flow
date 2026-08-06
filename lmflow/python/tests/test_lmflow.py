@@ -567,12 +567,6 @@ output_ports: [out]
             # 批 [1,2,3]=6、[4,5,6]=15,关流余 [7]=7
             self.assertEqual([p.as_int() for p in out], [6, 15, 7])
 
-    def test_registered_kernels_includes_both_languages(self):
-        names = lmflow.registered_kernels()
-        self.assertIn("PassThroughKernel", names, "C++ built-in kernel")
-        self.assertIn("TDouble", names, "Python kernel")
-
-
 # ---------------------------------------------------------------- numpy
 
 

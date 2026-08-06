@@ -306,7 +306,7 @@ bool       lmflow_ctx_has_side_packet(const LMFlowContext*, const char* name);
 | 参数(增强) | 点号路径嵌套、`lmflow_ctx_require_option_*`(必需参数)、`lmflow_ctx_option_*_array`(数组) |
 | 全局水位 | `lmflow_graph_total_queued` `…_total_queued_bytes`;YAML `max_queued_packets/bytes` |
 | 统计 | `lmflow_graph_node_stats`(`LMFlowNodeStats`,**全原子无锁**采集)、`lmflow_graph_counter_value`;YAML `watchdog_ms` |
-| 状态 / 拓扑 | `lmflow_graph_state` `…_num_input_ports/output_ports/num_nodes` `lmflow_registered_kernel_*` |
+| 状态 / 拓扑 | `lmflow_graph_state` `…_num_input_ports/output_ports/num_nodes` |
 | 内省 | `lmflow_graph_dump` `lmflow_graph_to_dot_view`(Graphviz DOT) `lmflow_graph_queue_depth` `lmflow_graph_dropped_count` `lmflow_graph_last_error` `lmflow_packet_debug_string` |
 
 **接口设计要点**

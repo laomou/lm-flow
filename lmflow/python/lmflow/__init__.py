@@ -97,7 +97,6 @@ __all__ = [
     "DotView",
     "Timeout",
     "KernelError",
-    "registered_kernels",
     "has_cv_test_kernels",
     "register_cv_test_kernels",
     "type_name",
@@ -222,11 +221,6 @@ def kernel(name: str) -> Callable[[type], type]:
         return cls
 
     return decorator
-
-
-def registered_kernels() -> Sequence[str]:
-    """Names of registered kernels (including the C++ builtins)."""
-    return _native.registered_kernels()
 
 
 def has_cv_test_kernels() -> bool:
