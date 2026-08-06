@@ -12,6 +12,9 @@ to each GitHub Release.
 
 ### Added
 
+- Optional OpenCV interop now provides `lmflow::AdoptMat` for zero-copy ownership of normal
+  `cv::Mat` allocations and non-contiguous ROIs, while preserving copy-on-write isolation.
+
 - Python `Packet.from_numpy()` and `send(ndarray)` now adopt NumPy storage without copying. The
   array remains alive and read-only while retained by the graph; final release safely reacquires
   the GIL, restores its original writeability, and copy-on-write protects Python-owned input.

@@ -1,6 +1,6 @@
 # lmflow 设计方案
 
-> 状态:**成品**。Rust 引擎、C ABI、C++ 糖层(含 OpenCV 互转)、18 个内置算子、
+> 状态:**成品**。Rust 引擎、C ABI、C++ 糖层、可选 OpenCV adapter、18 个内置算子、
 > Python 绑定(pybind11)、原生 SDK 发布(各平台头文件+库)、三端文档站全部就位;
 > **326 个测试**(Rust 282 + soak 2 + doctest 3 + Python 39)全绿,TSan 硬门禁 0 竞态。Rust / C++ / Python 三种宿主的
 > hello_world 都输出正确;支持线程池绑核 + 实时优先级(Linux/Android),可交叉编到
@@ -64,7 +64,7 @@
 | 11 | **只有图输入口限流,内部边不对生产者背压** | 内部边设硬上界会让「扇出后汇合」的合法 DAG 死锁(详见 §7.5) |
 | 12 | **手写 `flow.h` 为权威 + 布局一致性测试**(不用 cbindgen) | header 是给用户看的文档,可读性优先;用 `static_assert` + Rust 测试钉死布局,拿到等价安全性 |
 | 13 | **`flow.hpp` 糖层保留**,但不属于 ABI | 让 C++ 算子写法自然;模板便利全部在用户 TU 内 monomorphize,不过界 |
-| 14 | **OpenCV 不进 core**,隔离到可选头 `flow_cv.hpp` | 引擎与 `flow.h`/`flow.hpp` 零图像库依赖,没装 OpenCV 也能编译全部 core |
+| 14 | **OpenCV 不进 core/默认 SDK**,隔离成 `adapters/opencv` 可选组件 | 引擎与 `flow.h`/`flow.hpp` 零图像库依赖；默认配置不查找、不链接、不安装 OpenCV。显式开启 `LMFLOW_BUILD_OPENCV_ADAPTER` 后才提供 `<lmflow/opencv.hpp>` 与 `lmflow::opencv` |
 | 15 | **`LMFlowBuffer` 预留 `flags`/`device`/`reserved`** | 一次性预留,未来加字段(最可能是 GPU 内存空间)不破 ABI |
 | 16 | **节点默认跑在默认线程池(按 CPU 核数)**;宿主线程执行改为显式 `DelegatingExecutor` | 默认不必宿主进入引擎就能推进(旧默认下「只 `send` 不 `wait` 就不动」是常见困惑);要零并发/顺序确定/Python 免 GIL 争抢,自己声明一个具名 `DelegatingExecutor`、把节点指过去 |
 | 17 | **端口扁平序号 = YAML 声明顺序** | 常见做法是按 tag 字典序分组,混用「有标签/无标签」端口时 `Index(0)` 拿到的不是写的第一个 —— 真实陷阱,故分道 |
@@ -1337,12 +1337,15 @@ lm-flow/                          仓库根
 │   │   └── lmflow/
 │   │       ├── flow.h            C ABI —— 唯一稳定接口(权威定义)
 │   │       ├── flow.hpp          C++ 算子糖层(header-only,非 ABI)
-│   │       ├── flow_cv.hpp       可选:LMFlowBuffer ↔ cv::Mat(仅需 OpenCV 者 include)
 │   │       └── flow_platform_log.hpp  可选:引擎日志接平台日志(logcat/os_log/HiLog)
+│   ├── adapters/
+│   │   └── opencv/               可选 OpenCV adapter(CMake target `lmflow::opencv`)
+│   │       ├── include/lmflow/opencv.hpp
+│   │       └── tests/opencv_test.cc
 │   ├── cpp/                      C++ 侧(**非引擎**,且在 crate 之外 → 不随发布的 crate 分发)
 │   │   ├── kernels/              18 个内置 C++ 算子(一文件一算子、自注册)
 │   │   ├── abi_assert.cc         跨界结构体布局的编译期校验
-│   │   └── tests/                flow_hpp_test.cc / flow_cv_test.cc + CMakeLists
+│   │   └── tests/                flow_hpp_test.cc / buffer_util_test.cc + CMakeLists
 │   ├── python/                   src/bindings.cc(pybind11)+ lmflow 包 + CMakeLists
 │   └── examples/                 examples/<lang>/<name>/:cpp · python · rust · android · ios · harmonyos
 ├── third_party/pybind11/         vendored 子模块(仅构建 Python wheel 用)
@@ -1423,7 +1426,7 @@ lm-flow/                          仓库根
 | `tests/type_contracts.rs` | 5 | 类型契约两级校验:具体类型静态拒绝、ANY 两向兼容、运行期动态检查、算子输出兑现契约 |
 | `tests/memory.rs` | 7 | 所有权守恒记账(正常/积压/失败/取消路径)、**CoW 零拷贝不变量**(三级管线)、扇出复制不污染兄弟分支 |
 | `tests/buffer_ops.rs` | 11 | 张量前处理组端到端:Cast / Affine / Clamp / Reduce、真实前处理链、**F16 输入与输出**(含 u8→f32→归一化→f16 的移动端链路)、非连续缓冲与未知 dtype 被拒 |
-| `cpp/tests/` (C++) | 3 | `flow_hpp_test`(异常不穿越 FFI + 构造失败安全)· `buffer_util_test`(**F16 软件转换**:65536 个位模式往返 + 平局取偶 + 上下溢临界,`-O0`/`-O2` 双档)· `flow_cv_test`(装了 OpenCV 才编) |
+| C++ / adapters tests | 3 | `flow_hpp_test`(异常不穿越 FFI + 构造失败安全)· `buffer_util_test`(**F16 软件转换**:65536 个位模式往返 + 平局取偶 + 上下溢临界,`-O0`/`-O2` 双档)· `lmflow_opencv_test`(仅显式启用 adapter 时编) |
 
 ### 13.1 原始策略与补充
 

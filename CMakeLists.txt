@@ -32,15 +32,23 @@ option(LMFLOW_BUILD_BENCHMARKS "Build native performance benchmarks" OFF)
 option(LMFLOW_BUILD_PYTHON "Build the pybind11 Python extension"      OFF)
 option(LMFLOW_WITH_CV_TEST "Compile the CV test kernel into _lmflow"  OFF)
 option(LMFLOW_BUILD_KERNELS "Build and link the bundled C++ kernels"   ON)
+option(LMFLOW_BUILD_OPENCV_ADAPTER "Build/install the optional OpenCV adapter" OFF)
 set(LMFLOW_RUST_TARGET "" CACHE STRING "Optional Rust target triple for cross-compiling the core")
 
 include("${LMFLOW_ROOT}/cmake/engine.cmake")     # → lmflow::core(cargo 驱动)
+
+if(LMFLOW_BUILD_TESTS AND CMAKE_SOURCE_DIR STREQUAL LMFLOW_ROOT)
+  enable_testing()
+endif()
+
+if(LMFLOW_BUILD_OPENCV_ADAPTER OR LMFLOW_WITH_CV_TEST)
+  add_subdirectory(lmflow/adapters/opencv)
+endif()
 
 if(LMFLOW_BUILD_PYTHON)
   add_subdirectory(lmflow/python)                 # 只编 + 装 pybind11 扩展(供 wheel)
 elseif(CMAKE_SOURCE_DIR STREQUAL LMFLOW_ROOT)     # 作为顶层工程时:C++ 测试 + 装 C/C++ SDK
   if(LMFLOW_BUILD_TESTS)
-    enable_testing()
     add_subdirectory(lmflow/cpp/tests)
   endif()
   if(LMFLOW_BUILD_BENCHMARKS)

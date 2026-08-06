@@ -7,7 +7,7 @@ on: [push, pull_request]
 #   safety         — TSan (required gate), ASan/Miri (advisory)
 #   bindings       — the Python extension really builds and runs
 #   cross-platform — Windows / Android / macOS / iOS, guarding platform-specific code
-#   integration    — optional OpenCV (flow_cv.hpp + Python→C++ CV-kernel proof)
+#   integration    — optional OpenCV adapter + Python→C++ CV-kernel proof
 #
 # 布局:源码在 lmflow/(引擎 lmflow/core 是独立 crate),构建文件 + third_party 在仓库根。
 # 各 job 用 working-directory 或显式路径落到对应目录。
@@ -167,9 +167,13 @@ jobs:
             -DLMFLOW_BUILD_BENCHMARKS=ON
           cmake --build build -j
           ctest --test-dir build --output-on-failure
+          test ! -e build/lmflow/adapters/opencv \
+            || { echo "default build unexpectedly configured OpenCV adapter"; exit 1; }
       - name: install SDK + 最小外部工程消费(find_package)
         run: |
           cmake --install build --prefix /tmp/sdk
+          test ! -e /tmp/sdk/include/lmflow/opencv.hpp \
+            || { echo "default SDK unexpectedly installed OpenCV adapter"; exit 1; }
           mkdir -p /tmp/lmflow-sdk-consumer
           cat >/tmp/lmflow-sdk-consumer/CMakeLists.txt <<'EOF'
           cmake_minimum_required(VERSION 3.18)
@@ -478,25 +482,46 @@ jobs:
 
   # ================================ integration (OpenCV) ================================
 
-  # OpenCV 互转(flow_cv.hpp)是可选头,不进 core,但要保证它真能编、转换真对;
+  # OpenCV adapter 是可选组件,不进 core/默认 SDK,但要保证构建、安装、消费与转换都正确;
   # 并直证「Python numpy 图 → C++ OpenCV 算子 → 读回」是同一块内存。
   opencv:
-    name: integration · opencv (flow_cv + py→c++ cv)
+    name: integration · opencv adapter + py→c++ cv
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
         with: { submodules: recursive }   # 下面 python 部分要编 pybind11 扩展
       - uses: dtolnay/rust-toolchain@stable
       - run: sudo apt-get update && sudo apt-get install -y libopencv-dev
-      - run: cmake -S . -B build-opencv -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DLMFLOW_BUILD_KERNELS=ON -DLMFLOW_BUILD_TESTS=OFF
-      - run: cmake --build build-opencv --target flow_engine lmflow_kernels_archive --parallel
-      - name: 编译并运行 flow_cv.hpp 测试(含非连续 ROI 拷贝)
+      - name: 构建并测试 OpenCV adapter
         run: |
-          g++ -std=c++17 -Wall -Wextra -Werror -Ilmflow/include lmflow/cpp/tests/flow_cv_test.cc \
-              build-opencv/liblmflow_kernels.a lmflow/core/target/release/liblmflow.a \
-              $(pkg-config --cflags --libs opencv4) \
-              -lpthread -ldl -lm -o /tmp/flow_cv_test
-          /tmp/flow_cv_test
+          cmake -S . -B build-opencv -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_SHARED_LIBS=OFF -DLMFLOW_BUILD_KERNELS=ON \
+            -DLMFLOW_BUILD_TESTS=ON -DLMFLOW_BUILD_OPENCV_ADAPTER=ON
+          cmake --build build-opencv --parallel
+          ctest --test-dir build-opencv -R lmflow_opencv_test --output-on-failure
+          cmake --install build-opencv --prefix /tmp/lmflow-opencv-sdk
+      - name: 已安装 OpenCV component 可消费
+        run: |
+          mkdir -p /tmp/lmflow-opencv-consumer
+          cat >/tmp/lmflow-opencv-consumer/CMakeLists.txt <<'EOF'
+          cmake_minimum_required(VERSION 3.18)
+          project(lmflow_opencv_consumer LANGUAGES CXX)
+          find_package(lmflow REQUIRED COMPONENTS opencv)
+          add_executable(smoke main.cc)
+          target_link_libraries(smoke PRIVATE lmflow::opencv)
+          EOF
+          cat >/tmp/lmflow-opencv-consumer/main.cc <<'EOF'
+          #include <lmflow/opencv.hpp>
+          int main() {
+            cv::Mat image(2, 2, CV_8UC1);
+            lmflow::Packet packet = lmflow::AdoptMat(std::move(image));
+            return packet.IsEmpty() ? 1 : 0;
+          }
+          EOF
+          cmake -S /tmp/lmflow-opencv-consumer -B /tmp/lmflow-opencv-consumer-build \
+            -Dlmflow_DIR=/tmp/lmflow-opencv-sdk/lib/cmake/lmflow
+          cmake --build /tmp/lmflow-opencv-consumer-build
+          /tmp/lmflow-opencv-consumer-build/smoke
       # 直接证明「Python numpy 图 → C++ OpenCV 算子 → 读回」是同一块内存:开 LMFLOW_WITH_CV_TEST
       # 把 CvInvertTest 编进扩展(仅测试构建链 OpenCV;生产扩展仍零 CV),再从 Python 调用。
       - uses: actions/setup-python@v7

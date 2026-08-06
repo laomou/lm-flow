@@ -1,15 +1,15 @@
 // cv_test_kernels.hpp —— CV 操作**测试专用**算子(链 OpenCV;引擎本身一行 CV 都不含,ADR #14)。
 //
-// 用 flow_cv.hpp 把 LMFlowBuffer 当 cv::Mat 处理,演示「一个真正的 OpenCV C++ 算子」。
+// 用 OpenCV adapter 把 LMFlowBuffer 当 cv::Mat 处理,演示「一个真正的 OpenCV C++ 算子」。
 // 注册名一律带 `Test` 后缀,表明是测试专用、不与内置算子/用户算子混淆。
 //
-// 只依赖 flow.hpp(C++ 糖层)+ flow_cv.hpp(可选转换头)+ OpenCV。header-only,便于
+// 只依赖 flow.hpp(C++ 糖层)+ lmflow/opencv.hpp(可选 adapter)+ OpenCV。header-only,便于
 // 被 C++ 图测试直接 include;将来若要从 Python 以插件方式加载,同一头也可复用。
 #ifndef LMFLOW_CPP_TESTS_CV_TEST_KERNELS_HPP_
 #define LMFLOW_CPP_TESTS_CV_TEST_KERNELS_HPP_
 
 #include "lmflow/flow.hpp"
-#include "lmflow/flow_cv.hpp"
+#include "lmflow/opencv.hpp"
 
 namespace lmflow_test {
 

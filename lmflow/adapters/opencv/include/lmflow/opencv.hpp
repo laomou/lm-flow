@@ -1,5 +1,5 @@
 /*
- * flow_cv.hpp —— 可选头:LMFlowBuffer <-> cv::Mat 零拷贝互转。
+ * opencv.hpp —— 可选 OpenCV adapter:LMFlowBuffer <-> cv::Mat 零拷贝互转。
  *
  * **不属于 ABI,也不是 core 的依赖。** 只有需要 OpenCV 的算子才 include 本文件;
  * 引擎与 flow.h / flow.hpp 均不依赖 OpenCV,所以没装 OpenCV 也能编译整个 core。
@@ -18,13 +18,15 @@
  *     return lmflow::Status::Ok();
  *   }
  */
-#ifndef LMFLOW_CV_HPP_
-#define LMFLOW_CV_HPP_
+#ifndef LMFLOW_OPENCV_HPP_
+#define LMFLOW_OPENCV_HPP_
 
 #include <opencv2/core.hpp>
+#include <memory>
 #include <stdexcept>
+#include <string>
 
-#include "flow.hpp"
+#include <lmflow/flow.hpp>
 
 namespace lmflow {
 
@@ -109,6 +111,58 @@ inline Packet PacketFromMat(const cv::Mat& m) {
   return Packet::Adopt(lmflow_packet_from_buffer(&src, LMFLOW_TS_UNSET));
 }
 
+namespace detail {
+
+inline LMFlowBuffer BufferFromMat(const cv::Mat& m, uint32_t flags) {
+  if (m.dims != 2) {
+    throw std::invalid_argument("flow: only 2-D cv::Mat images can be adopted");
+  }
+  LMFlowBuffer buffer{};
+  buffer.data = m.data;
+  buffer.ndim = 3;
+  buffer.dtype = DtypeFromCv(m.depth());
+  buffer.shape[0] = m.rows;
+  buffer.shape[1] = m.cols;
+  buffer.shape[2] = m.channels();
+  buffer.strides[0] = static_cast<int64_t>(m.step[0]);
+  buffer.strides[1] = static_cast<int64_t>(m.elemSize());
+  buffer.strides[2] = static_cast<int64_t>(m.elemSize1());
+  buffer.flags = flags;
+  return buffer;
+}
+
+inline void ReleaseAdoptedMat(void* user_data) {
+  delete static_cast<cv::Mat*>(user_data);
+}
+
+}  // namespace detail
+
+/// 零拷贝接管一个由 OpenCV 引用计数管理的 Mat header。
+///
+/// 必须显式传 `std::move(mat)`。底层 allocation 可由 ROI/base Mat 共享；
+/// Packet 保存自己的 Mat header 引用，最后一个 Packet 引用释放时才减少 OpenCV 引用计数。
+/// 引擎把它视为 READONLY，因此 `CvMutable` 会复制后再写，不修改调用方可能仍持有的 alias。
+///
+/// 用外部裸指针构造且无 OpenCV owner 的 Mat (`mat.u == nullptr`) 无法安全推导释放方式，
+/// 请改用 `PacketFromMat` 复制，或直接 `Packet::AdoptBuffer` 并提供真实 owner 回调。
+inline Packet AdoptMat(cv::Mat&& mat) {
+  if (mat.data && mat.u == nullptr) {
+    throw std::invalid_argument(
+        "flow: cannot adopt a cv::Mat without an OpenCV-owned allocation; "
+        "use PacketFromMat to copy or Packet::AdoptBuffer with an explicit owner");
+  }
+  auto owner = std::make_unique<cv::Mat>(std::move(mat));
+  const LMFlowBuffer buffer = detail::BufferFromMat(*owner, LMFLOW_BUF_FLAG_READONLY);
+  Packet packet = Packet::AdoptBuffer(buffer, &detail::ReleaseAdoptedMat, owner.get());
+  if (packet.IsEmpty()) {
+    const char* detail = lmflow_last_error();
+    throw std::runtime_error(std::string("flow: AdoptMat failed") +
+                             (detail && *detail ? ": " + std::string(detail) : ""));
+  }
+  owner.release();
+  return packet;
+}
+
 }  // namespace lmflow
 
-#endif  // LMFLOW_CV_HPP_
+#endif  // LMFLOW_OPENCV_HPP_

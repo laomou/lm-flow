@@ -84,4 +84,23 @@ else()
   endif()
 endif()
 
+set(lmflow_opencv_FOUND FALSE)
+if("opencv" IN_LIST lmflow_FIND_COMPONENTS)
+  if(@LMFLOW_BUILD_OPENCV_ADAPTER@)
+    find_dependency(OpenCV REQUIRED COMPONENTS core)
+    if(NOT TARGET lmflow::opencv)
+      add_library(lmflow::opencv INTERFACE IMPORTED)
+      set_target_properties(lmflow::opencv PROPERTIES
+        INTERFACE_INCLUDE_DIRECTORIES
+          "${PACKAGE_PREFIX_DIR}/include;${OpenCV_INCLUDE_DIRS}"
+        INTERFACE_LINK_LIBRARIES
+          "lmflow::lmflow;${OpenCV_LIBS}")
+    endif()
+    set(lmflow_opencv_FOUND TRUE)
+  else()
+    set(lmflow_opencv_NOT_FOUND_MESSAGE
+      "This lmflow SDK was built without the optional OpenCV adapter")
+  endif()
+endif()
+
 check_required_components(lmflow)

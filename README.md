@@ -33,7 +33,8 @@ lm-flow/
 │   │   ├── build.rs           Repository-only Rust test path for bundled C++ kernels
 │   │   ├── Cargo.toml · Cargo.lock
 │   │   └── src/ · tests/ · benches/
-│   ├── include/lmflow/        Public headers — flow.h (C ABI, only stable interface) · flow.hpp (C++ kernel sugar) · flow_cv.hpp · flow_platform_log.hpp
+│   ├── include/lmflow/        Public core headers — flow.h · flow.hpp · flow_platform_log.hpp
+│   ├── adapters/opencv/       Optional OpenCV adapter — <lmflow/opencv.hpp> · lmflow::opencv
 │   ├── cpp/                   C++ side (not the engine) — kernels/ (18 built-ins) · abi_assert.cc · tests/
 │   ├── python/                pybind11 bindings (src/) + the lmflow package + CMakeLists
 │   └── examples/              each example is self-contained: examples/<lang>/<name>/
@@ -174,7 +175,7 @@ C/C++ and mobile hosts don't use pip — they use the **headers + library** dire
 
 ```text
 lmflow-v0.3.0-linux-x86_64/
-├── include/lmflow/   flow.h · flow.hpp · flow_cv.hpp · flow_platform_log.hpp
+├── include/lmflow/   flow.h · flow.hpp · flow_platform_log.hpp
 └── lib/       liblmflow_core.a · liblmflow_kernels.a · liblmflow.so
 ```
 
@@ -232,7 +233,10 @@ target_link_libraries(my_app PRIVATE lmflow::lmflow)     # core + optional bundl
 
 > Rust developers use `cargo` in `lmflow/core`; Python users just `pip install lm-lmflow` (prebuilt wheels). The wheel is built by **scikit-build-core driving this same root CMake** (`-DLMFLOW_BUILD_PYTHON=ON`), so there is one build definition, not three.
 
-The C ABI is the only stable interface (`lmflow/flow.h`); `flow.hpp` is the optional C++ kernel sugar, `flow_cv.hpp` is OpenCV interop, and `flow_platform_log.hpp` bridges engine logs to the platform logger (logcat / os_log / HiLog) in one call — `lmflow::InstallPlatformLogSink()`.
+The C ABI is the only stable interface (`lmflow/flow.h`); `flow.hpp` is the optional C++ kernel
+sugar, and `flow_platform_log.hpp` bridges engine logs to the platform logger (logcat / os_log /
+HiLog). OpenCV interop is a separate opt-in component under `adapters/opencv`, exposed as
+`<lmflow/opencv.hpp>` and the CMake target `lmflow::opencv`.
 
 Mobile integration examples: [`lmflow/examples/android/hello_world`](lmflow/examples/android/hello_world) (JNI), [`lmflow/examples/ios/hello_world`](lmflow/examples/ios/hello_world) (Swift), [`lmflow/examples/harmonyos/hello_world`](lmflow/examples/harmonyos/hello_world) (NAPI).
 

@@ -8,7 +8,7 @@ else is optional convenience layered on top of it:
 |---|---|---|
 | [`flow.h`](https://github.com/laomou/lm-flow/blob/main/lmflow/include/lmflow/flow.h) | The C ABI — graphs, packets, kernels, contexts. Pure C, includable from C and C++. | **Yes — the only stable interface** |
 | [`flow.hpp`](https://github.com/laomou/lm-flow/blob/main/lmflow/include/lmflow/flow.hpp) | Header-only C++ sugar for writing kernels: `lmflow::Kernel`, `Packet`, `Context`, `Contract`. Zero runtime overhead — it is built entirely on `flow.h`. | No |
-| [`flow_cv.hpp`](https://github.com/laomou/lm-flow/blob/main/lmflow/include/lmflow/flow_cv.hpp) | `LMFlowBuffer` ↔ `cv::Mat` interop. Include it only if you use OpenCV. | No |
+| [`opencv.hpp`](https://github.com/laomou/lm-flow/blob/main/lmflow/adapters/opencv/include/lmflow/opencv.hpp) | Optional OpenCV adapter: `LMFlowBuffer` ↔ `cv::Mat` interop. | No |
 | [`flow_platform_log.hpp`](https://github.com/laomou/lm-flow/blob/main/lmflow/include/lmflow/flow_platform_log.hpp) | Bridge engine logs to logcat / os_log / HiLog in one call. | No |
 
 You can write both hosts and kernels against raw `flow.h` if you prefer; `flow.hpp` exists so you
@@ -21,7 +21,7 @@ iOS arm64, Android arm64:
 
 ```text
 lmflow-v0.3.0-linux-x86_64/
-├── include/lmflow/   flow.h · flow.hpp · flow_cv.hpp · flow_platform_log.hpp
+├── include/lmflow/   flow.h · flow.hpp · flow_platform_log.hpp
 └── lib/              liblmflow_core.a · liblmflow_kernels.a · liblmflow.so
 ```
 
@@ -1039,10 +1039,27 @@ The rules that actually bite, in one place:
    Sentinels: `UNSET` < `UNSTARTED` < `PRE_STREAM` < `MIN` … `MAX` < `POST_STREAM` <
    `ONE_OVER_POST_STREAM` < `DONE`.
 
-## OpenCV interop
+## OpenCV adapter
 
-`flow_cv.hpp` is optional, outside the ABI, and imposes no OpenCV dependency on the engine — the
-core and both main headers build with no image library present.
+OpenCV integration is a separate optional adapter under `lmflow/adapters/opencv`; it is not part of
+the core headers or the default installed SDK. Enable it explicitly when building/installing:
+
+```bash
+cmake -B build -DLMFLOW_BUILD_OPENCV_ADAPTER=ON
+cmake --build build
+cmake --install build --prefix /opt/lmflow
+```
+
+Consumers request the component and link its interface target:
+
+```cmake
+find_package(lmflow REQUIRED COMPONENTS opencv)
+target_link_libraries(my_cv_host PRIVATE lmflow::opencv)
+```
+
+```cpp
+#include <lmflow/opencv.hpp>
+```
 
 ```cpp
 namespace lmflow {
@@ -1053,11 +1070,20 @@ const cv::Mat CvView(const Packet& pkt);                // read-only zero-copy v
 LMFlowStatus  CvMutable(Packet& pkt, cv::Mat* out);     // writable; copies only if shared
 Packet   NewMatPacket(int rows, int cols, int channels, int32_t dtype, cv::Mat* out);
 Packet   PacketFromMat(const cv::Mat& m);               // copies m into a new packet
+Packet   AdoptMat(cv::Mat&& m);                         // zero-copy, OpenCV-owned storage
 }
 ```
 
 `ndim == 2` is treated as single-channel `[H, W]`; `ndim == 3` as `[H, W, C]`. A returned `cv::Mat`
 is valid only while the underlying `Packet` lives.
+
+Use `AdoptMat(std::move(mat))` when an existing OpenCV allocation should enter the graph without
+copying. It retains a `cv::Mat` header, so normal Mats and non-contiguous ROIs remain alive through
+OpenCV's reference count even when the original headers are released. The engine treats adopted
+Mats as read-only; `CvMutable` copies before writing and therefore cannot corrupt another Mat alias.
+Mats constructed around an unmanaged external pointer are rejected because a Mat header alone does
+not describe how to release that allocation; use `PacketFromMat` or `Packet::AdoptBuffer` with an
+explicit owner callback instead.
 
 In-place processing follows the take-then-mutate rule:
 
