@@ -35,7 +35,8 @@ lm-flow/
 │   │   ├── build.rs           仓库内 Rust 测试专用的 C++ kernels 构建路径
 │   │   ├── Cargo.toml · Cargo.lock
 │   │   └── src/ · tests/ · benches/
-│   ├── include/lmflow/        公共头 —— flow.h(C ABI,唯一稳定接口)· flow.hpp(C++ 算子糖层)· flow_cv.hpp · flow_platform_log.hpp
+│   ├── include/lmflow/        核心公共头 —— flow.h · flow.hpp · flow_platform_log.hpp
+│   ├── adapters/opencv/       可选 OpenCV adapter —— <lmflow/opencv.hpp> · lmflow::opencv
 │   ├── cpp/                   C++ 侧(非引擎)—— kernels/(18 个内置算子)· abi_assert.cc · tests/
 │   ├── python/                pybind11 绑定(src/)+ lmflow 包 + CMakeLists
 │   └── examples/              每个示例是独立工程:examples/<lang>/<name>/
@@ -177,7 +178,7 @@ C/C++ 或移动端宿主不走 pip —— 直接用**头文件 + 库**。每个 
 
 ```text
 lmflow-v0.3.0-linux-x86_64/
-├── include/lmflow/   flow.h · flow.hpp · flow_cv.hpp · flow_platform_log.hpp
+├── include/lmflow/   flow.h · flow.hpp · flow_platform_log.hpp
 └── lib/       liblmflow_core.a · liblmflow_kernels.a · liblmflow.so
 ```
 
@@ -236,7 +237,9 @@ target_link_libraries(my_app PRIVATE lmflow::lmflow)     # core + 可选官方 k
 > Rust 开发者在 `lmflow/core` 里用 `cargo`;Python 用户直接 `pip install lm-lmflow`(预编 wheel)。
 > wheel 由 **scikit-build-core 驱动这同一份根 CMake**(`-DLMFLOW_BUILD_PYTHON=ON`)构建 —— 一份构建定义,而非三份。
 
-C ABI 是唯一稳定接口(`lmflow/flow.h`);`flow.hpp` 是可选的 C++ 算子糖层,`flow_cv.hpp` 是 OpenCV 互转,`flow_platform_log.hpp` 一行把引擎日志接到平台日志系统(logcat / os_log / HiLog)—— `lmflow::InstallPlatformLogSink()`。
+C ABI 是唯一稳定接口(`lmflow/flow.h`)；`flow.hpp` 是可选的 C++ 算子糖层，
+`flow_platform_log.hpp` 一行把引擎日志接到平台日志系统。OpenCV 互转独立放在
+`adapters/opencv`，显式启用后使用 `<lmflow/opencv.hpp>` 与 `lmflow::opencv`。
 
 移动端集成示例:[`lmflow/examples/android/hello_world`](lmflow/examples/android/hello_world)(JNI)、[`lmflow/examples/ios/hello_world`](lmflow/examples/ios/hello_world)(Swift)、[`lmflow/examples/harmonyos/hello_world`](lmflow/examples/harmonyos/hello_world)(NAPI)。
 

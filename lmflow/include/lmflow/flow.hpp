@@ -180,7 +180,7 @@ class Packet {
   bool AsF64(double* o) const { return lmflow_packet_as_f64(&raw_, o); }
   bool AsBool(bool* o) const { return lmflow_packet_as_bool(&raw_, o); }
   bool AsStr(const char** o) const { return lmflow_packet_as_str(&raw_, o); }
-  /// N 维缓冲的**只读**视图(零拷贝)。cv::Mat 互转见可选头 flow_cv.hpp。
+  /// N 维缓冲的**只读**视图(零拷贝)。cv::Mat 互转见可选 adapter `lmflow/opencv.hpp`。
   bool AsBuffer(LMFlowBuffer* o) const { return lmflow_packet_as_buffer(&raw_, o); }
 
   /* ---- 引用与写时复制 ---- */

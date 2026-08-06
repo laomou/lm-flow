@@ -4,7 +4,6 @@
 install(FILES
     "${LMFLOW_SRC}/include/lmflow/flow.h"
     "${LMFLOW_SRC}/include/lmflow/flow.hpp"
-    "${LMFLOW_SRC}/include/lmflow/flow_cv.hpp"
     "${LMFLOW_SRC}/include/lmflow/flow_platform_log.hpp"
     DESTINATION include/lmflow)
 

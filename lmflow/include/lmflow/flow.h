@@ -203,7 +203,8 @@ bool lmflow_packet_as_str(const LMFlowPacket* pkt, const char** out);
  *     音频       ndim=2  shape=[帧数,声道]
  * 语义与 numpy buffer protocol 一致:strides 以**字节**计,行优先无需连续,
  * 第 (i,j,…) 个元素地址 = data + i*strides[0] + j*strides[1] + …
- * 本结构体是**纯 C**,不引入任何图像/张量库依赖(cv::Mat 转换见可选头 flow_cv.hpp)。 */
+ * 本结构体是**纯 C**,不引入任何图像/张量库依赖(cv::Mat 转换见可选 OpenCV adapter
+ * `<lmflow/opencv.hpp>`)。 */
 #define LMFLOW_MAX_DIMS 8
 
 #define LMFLOW_DTYPE_U8 0

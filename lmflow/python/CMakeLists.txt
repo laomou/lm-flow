@@ -35,10 +35,9 @@ endif()
 add_dependencies(_lmflow flow_engine)  # cargo 先出库再链
 
 if(LMFLOW_WITH_CV_TEST)
-  find_package(OpenCV REQUIRED)
   target_compile_definitions(_lmflow PRIVATE LMFLOW_WITH_CV_TEST)
-  target_include_directories(_lmflow PRIVATE "${LMFLOW_SRC}/cpp/tests" ${OpenCV_INCLUDE_DIRS})
-  target_link_libraries(_lmflow PRIVATE ${OpenCV_LIBS})
+  target_include_directories(_lmflow PRIVATE "${LMFLOW_SRC}/cpp/tests")
+  target_link_libraries(_lmflow PRIVATE lmflow_opencv_support)
 endif()
 
 # 装进 wheel 的 lmflow 包:scikit-build-core 把 install 产物打进 wheel 的 lmflow/。
