@@ -115,7 +115,7 @@ input_ports: [in]
 fn abi_version_and_handshake() {
     assert_eq!(
         lmflow_abi_version(),
-        2,
+        3,
         "matches LMFLOW_ABI_VERSION in include/flow.h"
     );
 }

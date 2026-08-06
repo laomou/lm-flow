@@ -28,7 +28,7 @@ extern "C" {
  * 动态链接时 header 与 .so 版本不一致会导致结构体布局错乱。
  * 宿主启动时应校验 lmflow_abi_version() == LMFLOW_ABI_VERSION;
  * lmflow_graph_new 内部亦会校验,不匹配返回 NULL 并置错误。 */
-#define LMFLOW_ABI_VERSION 2u
+#define LMFLOW_ABI_VERSION 3u
 uint32_t lmflow_abi_version(void);
 
 /* ---------- 状态码 ---------- */

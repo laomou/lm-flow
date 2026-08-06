@@ -1282,7 +1282,8 @@ cc.emit(0, packet)
 - **布局一致性**:`cpp/abi_assert.cc` 的 `static_assert` 与 `core/tests/abi_layout.rs`
   钉在同一组常量上,任一侧改字段而忘同步 → **构建失败**(已实测能拦住)。
 - **ABI 演进**:`LMFlowBuffer` 留了 `reserved` 供未来加字段(最可能是 GPU 内存空间);
-  一旦改变既有布局,必须提升 `LMFLOW_ABI_VERSION`,所有既有二进制都要重编。
+  一旦改变既有布局或删除/改变既有导出符号,必须提升 `LMFLOW_ABI_VERSION`,所有既有
+  二进制都要重编。
 
 ---
 

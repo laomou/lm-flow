@@ -25,10 +25,30 @@ lmflow-v0.3.0-linux-x86_64/
 └── lib/              liblmflow_core.a · liblmflow_kernels.a · liblmflow.so
 ```
 
-The static library is self-contained and is the right choice for mobile embedding:
+Prefer the installed CMake target. It carries the core archive, bundled kernels, system libraries,
+and the platform-specific option that preserves every static kernel registrar:
+
+```cmake
+find_package(lmflow REQUIRED)
+target_link_libraries(my_host PRIVATE lmflow::lmflow)
+```
+
+When invoking the linker directly, retain the entire kernels archive explicitly:
 
 ```bash
-g++ -std=c++17 -Iinclude my_host.cc lib/liblmflow.a -lpthread -ldl -lm -o my_host
+# Linux / ELF
+g++ -std=c++17 -Iinclude my_host.cc \
+  -Wl,--whole-archive lib/liblmflow_kernels.a -Wl,--no-whole-archive \
+  lib/liblmflow_core.a -lpthread -ldl -lm -o my_host
+
+# macOS / iOS
+clang++ -std=c++17 -Iinclude my_host.cc \
+  -Wl,-force_load,lib/liblmflow_kernels.a lib/liblmflow_core.a \
+  -lpthread -o my_host
+
+# MSVC
+cl /std:c++17 /Iinclude my_host.cc lib\lmflow_kernels.lib \
+  lib\lmflow_core_static.lib /link /WHOLEARCHIVE:lib\lmflow_kernels.lib
 ```
 
 ### With CMake
@@ -69,7 +89,7 @@ set it to `OFF` for a pure-Rust native library. The core Cargo crate never compi
 
 ```c
 #if 0 /* illustrative */
-#define LMFLOW_ABI_VERSION 2u
+#define LMFLOW_ABI_VERSION 3u
 #endif
 uint32_t lmflow_abi_version(void);
 ```

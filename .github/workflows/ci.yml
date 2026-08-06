@@ -67,6 +67,11 @@ jobs:
       - name: Rust 测试(含 Graphviz SVG 渲染)
         env: { LMFLOW_REQUIRE_GRAPHVIZ: '1' }
         run: timeout 300 cargo test
+      - name: Benchmark 冒烟(实际执行,捕获运行期算子注册错误)
+        run: |
+          timeout 300 cargo bench --bench dispatch -- --test
+          timeout 300 cargo bench --bench throughput -- --test
+          timeout 300 cargo bench --bench packet -- --test
       - name: 默认构建必须真的零 C++
         run: |
           A=target/debug/liblmflow.a
