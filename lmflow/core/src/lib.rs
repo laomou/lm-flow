@@ -93,6 +93,7 @@
 
 pub mod config;
 pub mod context;
+mod diagnostic;
 pub mod executor;
 mod expand;
 pub mod ffi;

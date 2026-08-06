@@ -50,7 +50,8 @@ fn merge_include(
     }
     let text = std::fs::read_to_string(&canon)
         .map_err(|e| Error::InvalidArg(format!("include `{rel}`: {e}")))?;
-    let inc_cfg = GraphConfig::parse(&text)?;
+    let inc_cfg = GraphConfig::parse(&text)
+        .map_err(|error| error.context(format!("include file `{}`", canon.display())))?;
 
     // 被引文件自己的 include:相对它所在目录再解析。
     let inc_base = canon.parent().unwrap_or_else(|| Path::new("."));
@@ -77,6 +78,7 @@ pub(crate) fn expand(mut cfg: GraphConfig) -> Result<GraphConfig> {
     let mut stack: Vec<String> = Vec::new();
     inline(
         &nodes,
+        "nodes",
         "",
         &BTreeMap::new(),
         &subgraphs,
@@ -94,21 +96,25 @@ pub(crate) fn expand(mut cfg: GraphConfig) -> Result<GraphConfig> {
 /// - `rename`:边界口名 → 外部边名(把子图边界接到实例节点连的那条边)。
 fn inline(
     nodes: &[NodeConfig],
+    source_path: &str,
     prefix: &str,
     rename: &BTreeMap<String, String>,
     subgraphs: &BTreeMap<String, SubgraphConfig>,
     out: &mut Vec<NodeConfig>,
     stack: &mut Vec<String>,
 ) -> Result<()> {
-    for n in nodes {
-        let inputs = remap_ports(&n.input_ports, prefix, rename)?;
-        let outputs = remap_ports(&n.output_ports, prefix, rename)?;
+    for (node_index, n) in nodes.iter().enumerate() {
+        let node_path = format!("{source_path}[{node_index}]");
+        let inputs = remap_ports(&n.input_ports, prefix, rename)
+            .map_err(|error| error.context(format!("{node_path}.input_ports")))?;
+        let outputs = remap_ports(&n.output_ports, prefix, rename)
+            .map_err(|error| error.context(format!("{node_path}.output_ports")))?;
 
         if n.r#type.is_empty() {
             // 算子节点:必须有 kernel。拷贝一份、换名字 + 端口名。
             if n.kernel.is_empty() {
                 return Err(Error::InvalidArg(format!(
-                    "node `{}` has neither `kernel` nor `type` -- one is required",
+                    "{node_path}: node `{}` has neither `kernel` nor `type` -- one is required",
                     node_who(n, prefix)
                 )));
             }
@@ -131,36 +137,62 @@ fn inline(
             // 子图实例节点:递归内联。
             if !n.kernel.is_empty() {
                 return Err(Error::InvalidArg(format!(
-                    "node `{}` has both `kernel` and `type` -- only one is allowed",
+                    "{node_path}: node `{}` has both `kernel` and `type` -- only one is allowed",
                     node_who(n, prefix)
                 )));
             }
             let sg = subgraphs.get(&n.r#type).ok_or_else(|| {
                 Error::InvalidArg(format!(
-                    "node `{}`: unknown subgraph `{}`",
+                    "{node_path}.type (node `{}`): unknown subgraph `{}`{}",
                     node_who(n, prefix),
-                    n.r#type
+                    n.r#type,
+                    crate::diagnostic::did_you_mean(
+                        &n.r#type,
+                        subgraphs.keys().map(String::as_str)
+                    )
                 ))
             })?;
             if stack.iter().any(|s| s == &n.r#type) {
                 return Err(Error::InvalidArg(format!(
-                    "subgraph `{}` is recursive (expansion cycle: {} -> {})",
+                    "{node_path}.type: subgraph `{}` is recursive (expansion cycle: {} -> {})",
                     n.r#type,
                     stack.join(" -> "),
                     n.r#type
                 )));
             }
-            check_arity(&n.r#type, "input", sg.input_ports.len(), inputs.len())?;
-            check_arity(&n.r#type, "output", sg.output_ports.len(), outputs.len())?;
+            check_arity(
+                &format!("{node_path}.input_ports"),
+                &n.r#type,
+                "input",
+                sg.input_ports.len(),
+                inputs.len(),
+            )?;
+            check_arity(
+                &format!("{node_path}.output_ports"),
+                &n.r#type,
+                "output",
+                sg.output_ports.len(),
+                outputs.len(),
+            )?;
 
             // 子图边界口(名字分量)→ 实例节点连的外部边名(名字分量)。
             let mut child = BTreeMap::new();
-            bind_boundary(&mut child, &sg.input_ports, &inputs)?;
-            bind_boundary(&mut child, &sg.output_ports, &outputs)?;
+            bind_boundary(&mut child, &sg.input_ports, &inputs)
+                .map_err(|error| error.context(format!("subgraphs.{}.input_ports", n.r#type)))?;
+            bind_boundary(&mut child, &sg.output_ports, &outputs)
+                .map_err(|error| error.context(format!("subgraphs.{}.output_ports", n.r#type)))?;
 
             let child_prefix = format!("{prefix}{}/", node_label(n));
             stack.push(n.r#type.clone());
-            inline(&sg.nodes, &child_prefix, &child, subgraphs, out, stack)?;
+            inline(
+                &sg.nodes,
+                &format!("subgraphs.{}.nodes", n.r#type),
+                &child_prefix,
+                &child,
+                subgraphs,
+                out,
+                stack,
+            )?;
             stack.pop();
         }
     }
@@ -209,10 +241,10 @@ fn bind_boundary(
     Ok(())
 }
 
-fn check_arity(sg: &str, which: &str, want: usize, got: usize) -> Result<()> {
+fn check_arity(path: &str, sg: &str, which: &str, want: usize, got: usize) -> Result<()> {
     if want != got {
         return Err(Error::InvalidArg(format!(
-            "subgraph `{sg}`: instance provides {got} {which} port(s) but the subgraph declares {want}"
+            "{path}: subgraph `{sg}` instance provides {got} {which} port(s) but the subgraph declares {want}"
         )));
     }
     Ok(())
