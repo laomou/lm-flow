@@ -99,6 +99,7 @@ __all__ = [
     "KernelError",
     "has_cv_test_kernels",
     "register_cv_test_kernels",
+    "type_id",
     "type_name",
     "set_log_callback",
     "TS_UNSET",
@@ -252,6 +253,11 @@ def set_log_callback(fn: Callable[[int, str], Any] | None) -> None:
 def type_name(type_id: int) -> str:
     """Human-readable name of a type_id (for diagnostics)."""
     return _native.type_name(type_id)
+
+
+def type_id(stable_name: str) -> int:
+    """Return the canonical custom type id for ``stable_name``."""
+    return _native.type_id(stable_name)
 
 
 # ---------------------------------------------------------------- 图

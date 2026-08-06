@@ -871,6 +871,14 @@ PYBIND11_MODULE(_lmflow, m) {
         }
       },
       py::arg("cb"), "Set the log callback fn(level, msg); pass None to go silent");
+  m.def(
+      "type_id",
+      [](const std::string& stable_name) {
+        const uint64_t id = lmflow_type_id(stable_name.c_str());
+        if (id == 0) check(LMFLOW_ERR_INVALID_ARG, "type_id");
+        return id;
+      },
+      py::arg("stable_name"), "Compute the canonical id for a stable custom type name.");
   m.def("type_name", [](uint64_t id) { return std::string(lmflow_type_name(id)); });
 
   py::class_<Packet>(

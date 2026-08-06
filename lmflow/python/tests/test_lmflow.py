@@ -987,6 +987,12 @@ output_ports: [out]
 
 
 class TestIntrospection(unittest.TestCase):
+    def test_stable_type_id_matches_native_registry_rule(self):
+        self.assertEqual(lmflow.type_id("lmflow.test.Stable"), 0xBFB531B283179309)
+        self.assertEqual(lmflow.type_name(lmflow.type_id("lmflow.test.Unknown")), "type#2386862953124328900")
+        with self.assertRaises(ValueError):
+            lmflow.type_id("")
+
     def test_counters_and_diagnostics_dot(self):
         with graph(
             """

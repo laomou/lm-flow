@@ -28,7 +28,7 @@ extern "C" {
  * 动态链接时 header 与 .so 版本不一致会导致结构体布局错乱。
  * 宿主启动时应校验 lmflow_abi_version() == LMFLOW_ABI_VERSION;
  * lmflow_graph_new 内部亦会校验,不匹配返回 NULL 并置错误。 */
-#define LMFLOW_ABI_VERSION 3u
+#define LMFLOW_ABI_VERSION 4u
 uint32_t lmflow_abi_version(void);
 
 /* ---------- 状态码 ---------- */
@@ -125,9 +125,9 @@ const char* lmflow_packet_debug_string(const LMFlowPacket* pkt);
  *  后者是实现定义的、不保证跨动态库一致。修饰名跨编译器仍可能不同(GCC/Clang 一致,
  *  MSVC 不同),需要跨工具链互通时用 LMFLOW_DECLARE_TYPE_NAME 显式指定稳定名。
  *
- *  为让错误信息可读(「期望 Buffer 得到 I64」而不是两个数字),可为 type_id 注册名字。
- *  二期类型系统可进一步注册稳定名 + size + align；同一 id/name 的冲突声明会失败。 */
-LMFlowStatus lmflow_register_type_name(uint64_t type_id, const char* name);
+ *  自定义类型必须注册完整描述符。type_id 必须等于稳定名经 lmflow_type_id() 计算的值；
+ *  同一 id/name 的冲突声明会失败。 */
+uint64_t lmflow_type_id(const char* stable_name); /* 失败返回 0，并设置 lmflow_last_error */
 LMFlowStatus lmflow_register_type_descriptor(
     uint64_t type_id, const char* name, size_t size, size_t align);
 const char* lmflow_type_name(uint64_t type_id); /* 未注册则返回 "type#<id>" 形式 */

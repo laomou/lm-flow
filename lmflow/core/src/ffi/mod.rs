@@ -27,7 +27,7 @@ use crate::kernel::Contract;
 use crate::runtime::last_error;
 use crate::status::{code, Error};
 
-pub const ABI_VERSION: u32 = 3;
+pub const ABI_VERSION: u32 = 4;
 
 pub const INVALID_ID: usize = usize::MAX;
 pub const LMFLOW_POLLER_BLOCK: i32 = 0;

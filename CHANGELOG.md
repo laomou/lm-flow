@@ -12,6 +12,12 @@ to each GitHub Release.
 
 ### Changed
 
+- **BREAKING — custom types now require one canonical descriptor.** The name-only
+  `lmflow_register_type_name` C API is removed. Custom `type_id` values must equal
+  `lmflow_type_id(stable_name)`, and registration always supplies the stable name, size, and
+  alignment through `lmflow_register_type_descriptor`. C++, Rust, C, and Python now use the same
+  stable-name hash entry point. Removing the old C ABI symbol bumps `LMFLOW_ABI_VERSION` from 3 to
+  4.
 - **BREAKING — kernel registration is now link-driven.** Bundled C++ kernels self-register when
   `lmflow::lmflow` / `lmflow::kernels` is linked. The manual
   `lmflow_register_builtin_kernels` entry point and the name-only

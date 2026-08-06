@@ -115,7 +115,7 @@ input_ports: [in]
 fn abi_version_and_handshake() {
     assert_eq!(
         lmflow_abi_version(),
-        3,
+        4,
         "matches LMFLOW_ABI_VERSION in include/flow.h"
     );
 }
@@ -124,9 +124,10 @@ fn abi_version_and_handshake() {
 fn custom_type_descriptor_registration_is_strict_and_queryable() {
     let name = cs("lmflow.test.CAbiDescriptor");
     let conflicting_name = cs("lmflow.test.CAbiDescriptorConflict");
-    let type_id = 0xA1B2_C3D4_E5F6_1701;
+    let type_id = unsafe { lmflow_type_id(name.as_ptr()) };
 
     unsafe {
+        assert_ne!(type_id, 0, "{}", last_error());
         assert_eq!(
             lmflow_register_type_descriptor(type_id, name.as_ptr(), 24, 8),
             0,
@@ -157,8 +158,23 @@ fn custom_type_descriptor_registration_is_strict_and_queryable() {
             0,
             "same id with a different name must fail"
         );
-        assert!(last_error().contains("already registered"));
+        assert!(last_error().contains("stable-name id"));
     }
+}
+
+#[test]
+fn custom_type_descriptor_rejects_noncanonical_id() {
+    let name = cs("lmflow.test.CAbiNonCanonical");
+    let type_id = unsafe { lmflow_type_id(name.as_ptr()) };
+    unsafe {
+        assert_ne!(
+            lmflow_register_type_descriptor(type_id + 1, name.as_ptr(), 16, 8),
+            0
+        );
+    }
+    let message = unsafe { last_error() };
+    assert!(message.contains("stable-name id"), "{message}");
+    assert!(message.contains(&type_id.to_string()), "{message}");
 }
 
 #[test]

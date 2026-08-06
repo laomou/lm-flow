@@ -84,7 +84,7 @@
 | 40 | **F16 用自写的软件转换**,不用 `_Float16`、不用 F16C / NEON 内建 | F16 是移动端推理的标准张量 dtype,而张量前处理组此前遇 F16 直接报错 —— 在最相关的场景里用不了。选软件转换的理由:`_Float16` 不是所有目标编译器都有(**MSVC 没有可移植的 half 类型**),内建指令要按架构分派 + 运行期探测;而前处理不在最内层推理热路径上,这点成本换来「任意编译器 / 架构上逐位一致」是值得的 —— 且正因不依赖编译器,舍入行为才**能被测试钉死**。舍入取 IEEE 默认(就近、平局取偶);`double → half` **直接从 double 位模式做、不经 float 中转**,否则会双重舍入(极少数入参偏 1 ulp)。见 §5.3 |
 | 41 | **`batch` 多输入口 = `capacity` 个「对齐元组」**,而非「各口各自数够 `capacity` 个」 | 后者实现最省事,但会把 0 号口的第 k 个与 1 号口的第 k 个配成一对,而它们未必是同一帧 —— 图像批与掩码批就此错位,**且不报任何错**。静默的错误配对是本项目明确拒绝的失败模式,故一批 = 把 `sync` 的对齐连续跑 `capacity` 轮,**各口取数允许不同**(`input_count(i)` 本就按口计数,算子侧零改动)。不足一批只在**所有正向口都关闭**后才刷(否则是过早切批)。实现上就绪期快照时间戳前缀 + 算好每口取数,认领期照计划弹出 —— **每口仍只拿一次队列锁**,ADR #36 未破。见 §7.10 |
 | 42 | **类型契约做两级校验:静态可证的建图期拒绝,ANY 边保留运行期检查;算子输出也必须兑现契约** | producer output 与 consumer input 都声明具体类型且不同,无需等首包即可判错,故建图失败;任一侧为 ANY 时真实类型仍由包决定,继续逐包检查。输出契约不能只拿来推导下游:否则直接连 graph output 的错误包无人检查,故 process / close 的 staging 在 dispatch 前统一验证。Rust 自定义跨语言类型用 unsafe trait `InteropType` 把 ABI 承诺集中到实现处;任意 id 的 `new_interop` 降为 unsafe 且禁止伪装成内建类型 |
-| 43 | **自定义类型身份从裸 `type_id` 收紧为 `(稳定名,size,align)` 描述符** | 仅比较 64 位哈希无法发现碰撞,也无法发现两侧用同一稳定名却声明了不同布局。`lmflow_register_type_descriptor` 对完全相同的重复注册幂等,但同 id 异名、同名异 id、同名同 id 异布局都立即失败。C++ `Packet::Make<T>` / `Contract::InputSet<T>` / `OutputSet<T>` 自动注册,Rust `InteropType` 自动注册。已注册固定布局的 Foreign payload 会按 `size` 纳入字节水位;这是对象本体的浅尺寸,不包含 `std::vector` 等对象内部另行分配的堆内存 |
+| 43 | **自定义类型身份从裸 `type_id` 收紧为 `(稳定名,size,align)` 描述符** | 仅比较 64 位哈希无法发现碰撞,也无法发现两侧用同一稳定名却声明了不同布局。`lmflow_register_type_descriptor` 对完全相同的重复注册幂等,但同 id 异名、同名异 id、同名同 id 异布局都立即失败；三期进一步删除 name-only 注册，并强制 `id == lmflow_type_id(稳定名)`，不再允许名字与数值身份各自声明。C++ `Packet::Make<T>` / `Contract::InputSet<T>` / `OutputSet<T>` 自动注册,Rust `InteropType` 自动注册。已注册固定布局的 Foreign payload 会按 `size` 纳入字节水位;这是对象本体的浅尺寸,不包含 `std::vector` 等对象内部另行分配的堆内存 |
 | 22 | **`type_id` = FNV-1a(修饰名)**,而非 `typeid().hash_code()` | 后者实现定义、不保证跨动态库一致;而本项目 C++ 算子在 core、Python 绑定在另一 `.so`,天然跨产物。事后再改需全量重编,故一开始就用稳定方案 + `LMFLOW_DECLARE_TYPE_NAME` 逃生口。**注意修饰名跨编译器不保证相同**(GCC/Clang 走 Itanium ABI 一致,MSVC 不同),故跨工具链混用算子**必须**用逃生口显式声明稳定名。哈希算法在 C++ 与 Rust 各有一份独立实现,已用同一个字面量在两侧钉死(见 §13.5) |
 | 23 | **时间戳单调性:图输入口强制校验,内部边仅 debug 构建校验** | 外部数据进入的唯一门校验一次即可挡住绝大多数乱序;内部边逐包校验是热路径开销,且算子产出乱序属算子 bug,用 `debug_assertions` 捕获即可 |
 | 24 | **不做 stream header**,用 side packet 覆盖 | header 会引入「流上的第二种数据」及其生命周期问题;side packet 已能表达「整条流不变的属性」。少一个概念优于多一个 |
@@ -300,7 +300,7 @@ bool       lmflow_ctx_has_side_packet(const LMFlowContext*, const char* name);
 | 输出 | `lmflow_graph_add_poller(_ex)` → `lmflow_poller_next/try_next/next_timeout`;`lmflow_graph_observe(_ex)` |
 | 终止 | `lmflow_graph_cancel` `…_close_input` `…_close_all_inputs` `…_wait_done` `…_wait_done_timeout` |
 | Side packet | `lmflow_graph_set_side_packet` `lmflow_ctx_side_packet` `lmflow_ctx_has_side_packet` |
-| 类型描述符 | `lmflow_register_type_descriptor` `lmflow_type_name` `lmflow_type_size` `lmflow_type_align`;旧 `lmflow_register_type_name` 仅作诊断兼容 |
+| 类型描述符 | `lmflow_type_id` `lmflow_register_type_descriptor` `lmflow_type_name` `lmflow_type_size` `lmflow_type_align` |
 | 空闲 / 暂停 | `lmflow_graph_wait_until_idle` `…_timeout` `lmflow_graph_pause` `lmflow_graph_resume` |
 | 算子自我信息 | `lmflow_ctx_node_name` `…_kernel_name` `lmflow_ctx_log` `lmflow_ctx_set_error` `lmflow_ctx_close_reason` `lmflow_ctx_counter_add` |
 | 参数(增强) | 点号路径嵌套、`lmflow_ctx_require_option_*`(必需参数)、`lmflow_ctx_option_*_array`(数组) |

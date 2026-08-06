@@ -144,39 +144,6 @@ struct TypeRegistry {
 static TYPE_REGISTRY: std::sync::LazyLock<std::sync::Mutex<TypeRegistry>> =
     std::sync::LazyLock::new(|| std::sync::Mutex::new(TypeRegistry::default()));
 
-/// 为某个 `type_id` 登记可读名字。保留一期 API；只登记诊断名，不声明布局。
-///
-/// 已存在严格描述符时不会降级或改名。新代码应优先使用
-/// [`register_type_descriptor`]。
-pub fn register_type_name(id: u64, name: &str) {
-    let mut registry = TYPE_REGISTRY.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(existing_id) = registry.by_name.get(name).copied() {
-        if existing_id != id
-            && registry
-                .by_id
-                .get(&existing_id)
-                .is_some_and(|descriptor| descriptor.size != 0 || descriptor.align != 0)
-        {
-            return;
-        }
-    }
-    if let Some(existing) = registry.by_id.get(&id).cloned() {
-        if existing.size != 0 || existing.align != 0 {
-            return;
-        }
-        registry.by_name.remove(&existing.name);
-    }
-    registry.by_name.insert(name.to_string(), id);
-    registry.by_id.insert(
-        id,
-        TypeDescriptor {
-            name: name.to_string(),
-            size: 0,
-            align: 0,
-        },
-    );
-}
-
 /// Strictly register a custom type's stable name and ABI layout.
 ///
 /// Re-registering the exact same descriptor is idempotent. Reusing an id or name for a different
@@ -198,6 +165,12 @@ pub fn register_type_descriptor(id: u64, name: &str, size: usize, align: usize) 
             "custom type `{name}` has invalid layout: size={size}, align={align}"
         )));
     }
+    let expected_id = fnv1a_type_id(name);
+    if id != expected_id {
+        return Err(Error::InvalidArg(format!(
+            "custom type `{name}` must use its stable-name id {expected_id}, got {id}"
+        )));
+    }
 
     let descriptor = TypeDescriptor {
         name: name.to_string(),
@@ -215,10 +188,6 @@ pub fn register_type_descriptor(id: u64, name: &str, size: usize, align: usize) 
     }
     if let Some(existing) = registry.by_id.get(&id) {
         if existing == &descriptor {
-            return Ok(());
-        }
-        if existing.name == name && existing.size == 0 && existing.align == 0 {
-            registry.by_id.insert(id, descriptor);
             return Ok(());
         }
         return Err(Error::InvalidArg(format!(
@@ -953,33 +922,17 @@ mod tests {
 
         let name_error =
             register_type_descriptor(id, "lmflow.test.OtherRegistration", 8, 4).unwrap_err();
-        assert!(name_error.to_string().contains("already registered"));
+        assert!(name_error.to_string().contains("stable-name id"));
     }
 
     #[test]
-    fn name_only_registration_can_upgrade_to_strict_descriptor() {
-        let name = "lmflow.test.RegistryUpgrade";
-        let id = fnv1a_type_id(name);
-        register_type_name(id, name);
-        register_type_descriptor(id, name, 24, 8).unwrap();
-        assert_eq!(
-            type_descriptor(id),
-            Some(TypeDescriptor {
-                name: name.to_string(),
-                size: 24,
-                align: 8,
-            })
-        );
-    }
-
-    #[test]
-    fn strict_descriptor_cannot_be_shadowed_by_legacy_name_registration() {
-        let name = "lmflow.test.ProtectedDescriptor";
-        let id = fnv1a_type_id(name);
-        register_type_descriptor(id, name, 8, 8).unwrap();
-        register_type_name(id + 1, name);
-        assert!(register_type_descriptor(id + 1, name, 8, 8).is_err());
-        assert_eq!(type_descriptor(id).unwrap().name, name);
+    fn strict_type_registration_rejects_noncanonical_id() {
+        let name = "lmflow.test.NonCanonical";
+        let expected = fnv1a_type_id(name);
+        let error = register_type_descriptor(expected + 1, name, 8, 8).unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains(name), "{message}");
+        assert!(message.contains(&expected.to_string()), "{message}");
     }
 
     #[test]
