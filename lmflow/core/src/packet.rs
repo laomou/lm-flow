@@ -6,8 +6,9 @@
 //!   * `Builtin` —— 引擎分配的内建类型,跨语言约定布局(标量/字节/字符串/N 维缓冲)
 //!   * `Foreign` —— 外部(C/C++)构造:裸指针 + `drop_fn`
 //!
-//! 只有 `Builtin` 支持写时复制(CoW):引擎知道怎么复制它。
-//! `Foreign` 只有 `drop_fn`、无从复制;`Native` 是类型擦除的 `Box<dyn Any>`,同理。
+//! 内建 payload 支持写时复制(CoW)。显式 adopt 的外部 `BUFFER` 也支持：
+//! 独占且可写时原地返回，READONLY 或共享时按描述符复制成引擎缓冲。
+//! 普通 `Foreign` 只有 `drop_fn`、无从复制;`Native` 是类型擦除的 `Box<dyn Any>`,同理。
 
 use std::any::Any;
 use std::cell::RefCell;
@@ -299,6 +300,109 @@ impl BufferData {
     }
 }
 
+pub(crate) type BufferReleaseFn = unsafe extern "C" fn(*mut c_void);
+
+/// 外部所有权的 CPU buffer。描述符由引擎按值保存，最后一个 Packet 引用释放时回调宿主。
+pub(crate) struct ExternalBuffer {
+    pub(crate) data: *mut c_void,
+    pub(crate) shape: [i64; MAX_DIMS],
+    pub(crate) strides: [i64; MAX_DIMS],
+    pub(crate) ndim: i32,
+    pub(crate) dtype: i32,
+    pub(crate) readonly: bool,
+    pub(crate) element_count: usize,
+    pub(crate) byte_size: u64,
+    pub(crate) release_fn: BufferReleaseFn,
+    pub(crate) user_data: *mut c_void,
+}
+
+impl ExternalBuffer {
+    pub fn byte_size(&self) -> u64 {
+        self.byte_size
+    }
+
+    fn packet_payload_ptr(&self) -> *mut c_void {
+        if self.data.is_null() {
+            std::ptr::NonNull::<u8>::dangling().as_ptr() as *mut c_void
+        } else {
+            self.data
+        }
+    }
+
+    fn copy_to_owned(&self) -> Result<BufferData> {
+        let dims = &self.shape[..self.ndim as usize];
+        let mut owned = BufferData::new(dims, self.dtype)?;
+        if self.element_count == 0 {
+            return Ok(owned);
+        }
+
+        let element_size = dtype_size(self.dtype);
+        let ndim = dims.len();
+        let mut index = vec![0i64; ndim];
+        for element in 0..self.element_count {
+            let offset = index
+                .iter()
+                .zip(self.strides)
+                .take(ndim)
+                .try_fold(0i128, |offset, (&coordinate, stride)| {
+                    i128::from(coordinate)
+                        .checked_mul(i128::from(stride))
+                        .and_then(|term| offset.checked_add(term))
+                })
+                .ok_or_else(|| Error::InvalidArg("buffer element offset overflow".into()))?;
+            let offset = isize::try_from(offset)
+                .map_err(|_| Error::InvalidArg("buffer element offset overflow".into()))?;
+            let source = unsafe { (self.data as *const u8).offset(offset) };
+            let destination = unsafe { owned.bytes.as_mut_ptr().add(element * element_size) };
+            unsafe { std::ptr::copy_nonoverlapping(source, destination, element_size) };
+
+            for axis in (0..ndim).rev() {
+                index[axis] += 1;
+                if index[axis] < dims[axis] {
+                    break;
+                }
+                index[axis] = 0;
+            }
+        }
+        Ok(owned)
+    }
+}
+
+impl Drop for ExternalBuffer {
+    fn drop(&mut self) {
+        unsafe { (self.release_fn)(self.user_data) };
+        self.user_data = std::ptr::null_mut();
+        self.data = std::ptr::null_mut();
+    }
+}
+
+impl std::fmt::Debug for ExternalBuffer {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ExternalBuffer")
+            .field("data", &self.data)
+            .field("shape", &&self.shape[..self.ndim as usize])
+            .field("strides", &&self.strides[..self.ndim as usize])
+            .field("dtype", &self.dtype)
+            .field("readonly", &self.readonly)
+            .finish()
+    }
+}
+
+// 安全性:外部宿主把 buffer 所有权移交给数据流时，承诺其内存和 release 回调可跨线程。
+unsafe impl Send for ExternalBuffer {}
+unsafe impl Sync for ExternalBuffer {}
+
+#[derive(Clone, Copy)]
+pub(crate) struct BufferView {
+    pub data: *mut c_void,
+    pub shape: [i64; MAX_DIMS],
+    pub strides: [i64; MAX_DIMS],
+    pub ndim: i32,
+    pub dtype: i32,
+    pub readonly: bool,
+}
+
 #[derive(Clone, Debug)]
 pub enum Builtin {
     Bytes(Vec<u8>),
@@ -387,7 +491,13 @@ impl Payload {
     pub fn type_id(&self) -> u64 {
         match self {
             // Rust 原生 payload 不参与跨语言类型校验(见 Packet::new 文档)
-            Payload::Native(_) => type_id::NONE,
+            Payload::Native(value) => {
+                if value.is::<ExternalBuffer>() {
+                    type_id::BUFFER
+                } else {
+                    type_id::NONE
+                }
+            }
             Payload::Builtin(b) => b.type_id(),
             Payload::Foreign(f) => f.type_id,
         }
@@ -395,7 +505,9 @@ impl Payload {
 
     pub fn byte_size(&self) -> u64 {
         match self {
-            Payload::Native(_) => 0,
+            Payload::Native(value) => value
+                .downcast_ref::<ExternalBuffer>()
+                .map_or(0, ExternalBuffer::byte_size),
             Payload::Foreign(f) => f.byte_size,
             Payload::Builtin(b) => b.byte_size(),
         }
@@ -405,6 +517,9 @@ impl Payload {
     pub fn data_ptr(&self) -> *mut c_void {
         match self {
             Payload::Native(b) => {
+                if let Some(buffer) = b.downcast_ref::<ExternalBuffer>() {
+                    return buffer.packet_payload_ptr();
+                }
                 // 取具体值的地址(瘦指针)。type_id 为 NONE,故 C 侧读取由用户自负。
                 let p: *const dyn Any = &**b;
                 p as *const () as *mut c_void
@@ -413,12 +528,41 @@ impl Payload {
             Payload::Foreign(f) => f.ptr,
         }
     }
+
+    pub(crate) fn buffer_view(&self) -> Option<BufferView> {
+        match self {
+            Payload::Builtin(Builtin::Buffer(buffer)) => Some(BufferView {
+                data: buffer.bytes.as_ptr() as *mut c_void,
+                shape: buffer.shape,
+                strides: buffer.strides,
+                ndim: buffer.ndim,
+                dtype: buffer.dtype,
+                readonly: true,
+            }),
+            Payload::Native(value) => {
+                value
+                    .downcast_ref::<ExternalBuffer>()
+                    .map(|buffer| BufferView {
+                        data: buffer.data,
+                        shape: buffer.shape,
+                        strides: buffer.strides,
+                        ndim: buffer.ndim,
+                        dtype: buffer.dtype,
+                        readonly: true,
+                    })
+            }
+            _ => None,
+        }
+    }
 }
 
 impl std::fmt::Debug for Payload {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Payload::Native(_) => f.write_str("Native"),
+            Payload::Native(value) => match value.downcast_ref::<ExternalBuffer>() {
+                Some(buffer) => write!(f, "{buffer:?}"),
+                None => f.write_str("Native"),
+            },
             Payload::Builtin(b) => write!(f, "{b:?}"),
             Payload::Foreign(x) => write!(f, "{x:?}"),
         }
@@ -566,6 +710,17 @@ impl Packet {
         }
     }
 
+    /// 接管一个经过边界校验的外部 CPU buffer。
+    ///
+    /// # Safety
+    /// 描述的全部地址在 Packet 生命周期内必须有效，且 release_fn 可跨线程调用一次。
+    pub(crate) unsafe fn from_external_buffer(buffer: ExternalBuffer) -> Self {
+        Self {
+            data: Some(Arc::new(Payload::Native(Box::new(buffer)))),
+            ts: Timestamp::unset(),
+        }
+    }
+
     /// 接管外部构造的 payload(C ABI 的 `owner==NULL` 形态)。
     ///
     /// # Safety
@@ -658,10 +813,70 @@ impl Packet {
         }
     }
 
+    pub(crate) fn make_mutable_buffer(&mut self) -> Result<BufferView> {
+        let arc = self.data.as_mut().ok_or_else(|| {
+            Error::InvalidArg("cannot get a writable view of an empty packet".into())
+        })?;
+        let external = match &**arc {
+            Payload::Native(value) => value.downcast_ref::<ExternalBuffer>(),
+            _ => None,
+        };
+        let must_copy =
+            Arc::strong_count(arc) > 1 || external.is_some_and(|buffer| buffer.readonly);
+        if must_copy {
+            let owned = match &**arc {
+                Payload::Builtin(Builtin::Buffer(buffer)) => {
+                    record_cow_copy(buffer.bytes.len() as u64);
+                    buffer.clone()
+                }
+                Payload::Native(value) if value.is::<ExternalBuffer>() => {
+                    let buffer = value
+                        .downcast_ref::<ExternalBuffer>()
+                        .expect("type checked above");
+                    record_cow_copy(buffer.byte_size());
+                    buffer.copy_to_owned()?
+                }
+                _ => {
+                    return Err(Error::InvalidArg(
+                        "this packet is not an LMFlowBuffer".into(),
+                    ))
+                }
+            };
+            *arc = Arc::new(Payload::Builtin(Builtin::Buffer(owned)));
+        }
+
+        match Arc::get_mut(arc).expect("buffer payload is exclusive after CoW") {
+            Payload::Builtin(Builtin::Buffer(buffer)) => Ok(BufferView {
+                data: buffer.bytes.as_mut_ptr() as *mut c_void,
+                shape: buffer.shape,
+                strides: buffer.strides,
+                ndim: buffer.ndim,
+                dtype: buffer.dtype,
+                readonly: false,
+            }),
+            Payload::Native(value) if value.is::<ExternalBuffer>() => {
+                let buffer = value
+                    .downcast_mut::<ExternalBuffer>()
+                    .expect("type checked above");
+                Ok(BufferView {
+                    data: buffer.data,
+                    shape: buffer.shape,
+                    strides: buffer.strides,
+                    ndim: buffer.ndim,
+                    dtype: buffer.dtype,
+                    readonly: false,
+                })
+            }
+            _ => Err(Error::InvalidArg(
+                "this packet is not an LMFlowBuffer".into(),
+            )),
+        }
+    }
+
     /// 写时复制:取得独占可写的内建 payload。
     ///
     /// 独占(引用数 1)→ 原地返回,**零拷贝**;被共享 → 复制一份后返回副本的可写引用。
-    /// 仅支持内建 payload:`Native`/`Foreign` 引擎无从复制。
+    /// 仅支持 `Builtin` payload；adopt 的外部 Buffer 走专用 `make_mutable_buffer`。
     pub fn make_mutable_builtin(&mut self) -> Result<&mut Builtin> {
         let arc = self.data.as_mut().ok_or_else(|| {
             Error::InvalidArg("cannot get a writable view of an empty packet".into())
@@ -695,7 +910,21 @@ impl Packet {
     pub fn debug_string(&self) -> String {
         let ty = match self.data.as_deref() {
             None => "Empty".to_string(),
-            Some(Payload::Native(_)) => "Native".to_string(),
+            Some(Payload::Native(value)) => {
+                if let Some(buffer) = value.downcast_ref::<ExternalBuffer>() {
+                    format!(
+                        "Buffer[{}] dtype={} external",
+                        buffer.shape[..buffer.ndim as usize]
+                            .iter()
+                            .map(|dimension| dimension.to_string())
+                            .collect::<Vec<_>>()
+                            .join("x"),
+                        buffer.dtype
+                    )
+                } else {
+                    "Native".to_string()
+                }
+            }
             Some(Payload::Foreign(f)) => format!("Foreign(type#{})", f.type_id),
             Some(Payload::Builtin(b)) => match b {
                 Builtin::Bytes(v) => format!("Bytes[{}]", v.len()),

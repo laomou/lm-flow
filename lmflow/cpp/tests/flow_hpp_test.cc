@@ -85,6 +85,9 @@ struct RegisteredType {
   size_t align;
 };
 std::map<uint64_t, RegisteredType> g_registered_types;
+LMFlowBufferReleaseFn g_buffer_release = nullptr;
+void* g_buffer_release_user = nullptr;
+bool g_adopt_should_fail = false;
 }  // namespace
 
 extern "C" void lmflow_ctx_set_error(const LMFlowContext*, const char* msg) {
@@ -96,6 +99,30 @@ extern "C" void lmflow_contract_set_error(LMFlowContract*, const char* msg) {
 }
 
 extern "C" const char* lmflow_last_error() { return g_last_error; }
+
+extern "C" LMFlowPacket lmflow_packet_adopt_buffer(const LMFlowBuffer* buffer, int64_t timestamp,
+                                                     LMFlowBufferReleaseFn release_fn,
+                                                     void* user_data) {
+  if (g_adopt_should_fail || !buffer || !release_fn) {
+    std::snprintf(g_last_error, sizeof(g_last_error), "adopt buffer failed");
+    return LMFlowPacket{nullptr, 0, timestamp, nullptr, nullptr};
+  }
+  g_buffer_release = release_fn;
+  g_buffer_release_user = user_data;
+  return LMFlowPacket{buffer->data, LMFLOW_TYPE_BUFFER, timestamp,
+                      reinterpret_cast<void*>(1), nullptr};
+}
+
+extern "C" void lmflow_packet_drop(LMFlowPacket* packet) {
+  if (packet && packet->owner && g_buffer_release) {
+    auto release = g_buffer_release;
+    void* user = g_buffer_release_user;
+    g_buffer_release = nullptr;
+    g_buffer_release_user = nullptr;
+    release(user);
+  }
+  if (packet) *packet = LMFlowPacket{nullptr, 0, LMFLOW_TS_UNSET, nullptr, nullptr};
+}
 
 extern "C" LMFlowStatus lmflow_register_type_descriptor(
     uint64_t type_id, const char* name, size_t size, size_t align) {
@@ -116,6 +143,41 @@ LMFLOW_DECLARE_TYPE_NAME(StableType, "lmflow.test.Stable")
 LMFLOW_DECLARE_TYPE_NAME(AlsoStable, "lmflow.test.Stable")
 
 namespace {
+void release_count(void* user_data) {
+  auto* count = static_cast<int*>(user_data);
+  ++*count;
+}
+
+void test_adopt_buffer_raii() {
+  unsigned char bytes[4] = {1, 2, 3, 4};
+  LMFlowBuffer buffer{};
+  buffer.data = bytes;
+  buffer.shape[0] = 4;
+  buffer.strides[0] = 1;
+  buffer.ndim = 1;
+  buffer.dtype = LMFLOW_DTYPE_U8;
+
+  int releases = 0;
+  {
+    lmflow::Packet packet = lmflow::Packet::AdoptBuffer(buffer, release_count, &releases);
+    assert(!packet.IsEmpty());
+    assert(packet.type_id() == LMFLOW_TYPE_BUFFER);
+    lmflow::Packet moved = std::move(packet);
+    assert(packet.IsEmpty());
+    assert(!moved.IsEmpty());
+    assert(releases == 0);
+  }
+  assert(releases == 1);
+
+  g_adopt_should_fail = true;
+  {
+    lmflow::Packet packet = lmflow::Packet::AdoptBuffer(buffer, release_count, &releases);
+    assert(packet.IsEmpty());
+  }
+  g_adopt_should_fail = false;
+  assert(releases == 1 && "failed adoption must not release caller ownership");
+}
+
 void test_type_id() {
   // 1) 声明了稳定名 → id 由**该字符串**决定,与修饰名无关。
   //    常量与 cpp/abi_assert.cc 的 static_assert、tests/abi_layout.rs 的断言同一个数。
@@ -216,6 +278,7 @@ int main() {
   }
 
   test_type_id();
+  test_adopt_buffer_raii();
 
   std::printf("all flow.hpp unit tests passed\n");
   return 0;

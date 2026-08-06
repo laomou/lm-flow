@@ -252,6 +252,20 @@ LMFlowPacket lmflow_packet_new_buffer(int32_t ndim, const int64_t* shape, int32_
  * lmflow_last_error。READONLY 只描述源视图，拷贝后的引擎缓冲仍由引擎正常管理。 */
 LMFlowPacket lmflow_packet_from_buffer(const LMFlowBuffer* src, int64_t ts);
 
+typedef void (*LMFlowBufferReleaseFn)(void* user_data);
+
+/* 零拷贝接管外部 CPU 缓冲。引擎按值保存 src 描述符，不复制 data：
+ *   - 成功后，data 描述的内存与 user_data 所代表的所有权一并移交给 Packet；
+ *   - Packet 的最后一个共享引用释放时，release_fn(user_data) 恰好调用一次；
+ *   - 失败时不调用 release_fn，所有权仍归调用方。
+ *
+ * release_fn 必须非 NULL，且允许在任意引擎工作线程调用。src 本身可在返回后失效，
+ * 但其描述的内存须保持有效直到 release_fn 被调用。描述符校验规则与
+ * lmflow_packet_from_buffer 相同。READONLY 表示底层内存不可写：请求可写视图时会复制；
+ * 可写且 Packet 独占时，make_mutable_buffer 直接返回原始 data/strides，不复制。 */
+LMFlowPacket lmflow_packet_adopt_buffer(const LMFlowBuffer* src, int64_t ts,
+                                        LMFlowBufferReleaseFn release_fn, void* user_data);
+
 /* 取只读视图;非 BUFFER 包返回 false。视图在包存活期间有效。
  * **只读契约**:payload 是引用计数共享的(扇出时多个下游持同一份),
  * 经本函数拿到的 data 不得写入 —— 要就地改写请走 lmflow_packet_make_mutable_buffer。 */
@@ -277,8 +291,9 @@ LMFlowPacket lmflow_packet_clone(const LMFlowPacket* pkt);
  *  - 引用数 == 1 → 原地返回可写视图,**零拷贝**;
  *  - 引用数 > 1  → 复制一份,*pkt 改为指向副本,再返回其可写视图。
  * 前置条件:pkt 必须为调用方所拥有(owner 非空或自建包),不能是借用的输入包。
- * 仅支持**引擎持有的内建 payload**(BUFFER / BYTES / 标量);对自定义 C++ payload
- * 引擎只有 drop_fn、无从复制,返回 LMFLOW_ERR_INVALID_ARG(该情形请自行拷贝)。 */
+ * 支持引擎分配或 adopt 的 BUFFER，以及其它引擎内建 payload。adopt 的可写 BUFFER
+ * 在独占时保持原始 strides 并原地修改；READONLY 或共享时复制成连续引擎缓冲。
+ * 对自定义 C++ payload 引擎只有 drop_fn、无从复制,返回 LMFLOW_ERR_INVALID_ARG。 */
 LMFlowStatus lmflow_packet_make_mutable_buffer(LMFlowPacket* pkt, LMFlowBuffer* out);
 LMFlowStatus lmflow_packet_make_mutable_bytes(LMFlowPacket* pkt, void** data, size_t* len);
 
