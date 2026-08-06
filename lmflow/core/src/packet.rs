@@ -16,6 +16,7 @@ use std::collections::BTreeMap;
 use std::ffi::{c_void, CString};
 use std::sync::Arc;
 
+use crate::metadata::{Metadata, MetadataValue};
 use crate::status::{Error, Result};
 use crate::timestamp::Timestamp;
 
@@ -575,9 +576,17 @@ impl std::fmt::Debug for Payload {
 /// data**. Mutation goes through copy-on-write, which is only actually copy-free while this is the
 /// sole reference — which is why a kernel should
 /// [`take_input`](crate::KernelCtx::take_input) rather than borrow when it intends to modify.
+#[derive(Clone)]
+pub(crate) struct PacketBody {
+    pub payload: Arc<Payload>,
+    pub metadata: Arc<Metadata>,
+}
+
+static EMPTY_METADATA: std::sync::LazyLock<Metadata> = std::sync::LazyLock::new(Metadata::new);
+
 #[derive(Clone, Default)]
 pub struct Packet {
-    data: Option<Arc<Payload>>,
+    data: Option<Arc<PacketBody>>,
     ts: Timestamp,
 }
 
@@ -610,7 +619,10 @@ impl Packet {
     /// mismatch, which is strictly worse than the current loud one.
     pub fn new<T: Any + Send + Sync>(value: T) -> Self {
         Self {
-            data: Some(Arc::new(Payload::Native(Box::new(value)))),
+            data: Some(Arc::new(PacketBody {
+                payload: Arc::new(Payload::Native(Box::new(value))),
+                metadata: Arc::new(Metadata::new()),
+            })),
             ts: Timestamp::unset(),
         }
     }
@@ -655,12 +667,16 @@ impl Packet {
             drop(unsafe { Box::from_raw(p as *mut T) });
         }
         Self {
-            data: Some(Arc::new(Payload::Foreign(Foreign {
-                ptr,
-                drop_fn: Some(drop_boxed::<T>),
-                type_id,
-                byte_size: type_descriptor(type_id).map_or(0, |descriptor| descriptor.size as u64),
-            }))),
+            data: Some(Arc::new(PacketBody {
+                payload: Arc::new(Payload::Foreign(Foreign {
+                    ptr,
+                    drop_fn: Some(drop_boxed::<T>),
+                    type_id,
+                    byte_size: type_descriptor(type_id)
+                        .map_or(0, |descriptor| descriptor.size as u64),
+                })),
+                metadata: Arc::new(Metadata::new()),
+            })),
             ts: Timestamp::unset(),
         }
     }
@@ -705,7 +721,10 @@ impl Packet {
 
     pub fn from_builtin(b: Builtin) -> Self {
         Self {
-            data: Some(Arc::new(Payload::Builtin(b))),
+            data: Some(Arc::new(PacketBody {
+                payload: Arc::new(Payload::Builtin(b)),
+                metadata: Arc::new(Metadata::new()),
+            })),
             ts: Timestamp::unset(),
         }
     }
@@ -716,7 +735,10 @@ impl Packet {
     /// 描述的全部地址在 Packet 生命周期内必须有效，且 release_fn 可跨线程调用一次。
     pub(crate) unsafe fn from_external_buffer(buffer: ExternalBuffer) -> Self {
         Self {
-            data: Some(Arc::new(Payload::Native(Box::new(buffer)))),
+            data: Some(Arc::new(PacketBody {
+                payload: Arc::new(Payload::Native(Box::new(buffer))),
+                metadata: Arc::new(Metadata::new()),
+            })),
             ts: Timestamp::unset(),
         }
     }
@@ -731,12 +753,16 @@ impl Packet {
         drop_fn: Option<unsafe extern "C" fn(*mut c_void)>,
     ) -> Self {
         Self {
-            data: Some(Arc::new(Payload::Foreign(Foreign {
-                ptr,
-                drop_fn,
-                type_id,
-                byte_size: type_descriptor(type_id).map_or(0, |descriptor| descriptor.size as u64),
-            }))),
+            data: Some(Arc::new(PacketBody {
+                payload: Arc::new(Payload::Foreign(Foreign {
+                    ptr,
+                    drop_fn,
+                    type_id,
+                    byte_size: type_descriptor(type_id)
+                        .map_or(0, |descriptor| descriptor.size as u64),
+                })),
+                metadata: Arc::new(Metadata::new()),
+            })),
             ts: Timestamp::unset(),
         }
     }
@@ -755,13 +781,17 @@ impl Packet {
         self.data.is_none()
     }
     pub fn type_id(&self) -> u64 {
-        self.data.as_deref().map_or(type_id::NONE, Payload::type_id)
+        self.data.as_deref().map_or(type_id::NONE, |body| {
+            Payload::type_id(body.payload.as_ref())
+        })
     }
     pub fn byte_size(&self) -> u64 {
-        self.data.as_deref().map_or(0, Payload::byte_size)
+        self.data
+            .as_deref()
+            .map_or(0, |body| body.payload.byte_size())
     }
     pub fn payload(&self) -> Option<&Payload> {
-        self.data.as_deref()
+        self.data.as_deref().map(|body| body.payload.as_ref())
     }
 
     /// 当前引用数(CoW 判定与测试用)。
@@ -770,17 +800,17 @@ impl Packet {
     }
 
     /// 底层 Arc 的借用 —— ffi 层构造「借用形态」的跨界包时用。
-    pub fn arc_ref(&self) -> Option<&Arc<Payload>> {
+    pub(crate) fn arc_ref(&self) -> Option<&Arc<PacketBody>> {
         self.data.as_ref()
     }
 
     /// 交出底层 Arc(消耗自身)—— ffi 层构造「移交形态」时用。
-    pub fn into_arc(self) -> Option<Arc<Payload>> {
+    pub(crate) fn into_arc(self) -> Option<Arc<PacketBody>> {
         self.data
     }
 
     /// 由 Arc 与时间戳重建 —— ffi 层接管跨界包时用。
-    pub fn from_arc(arc: Arc<Payload>, ts: Timestamp) -> Self {
+    pub(crate) fn from_arc(arc: Arc<PacketBody>, ts: Timestamp) -> Self {
         Self {
             data: Some(arc),
             ts,
@@ -789,7 +819,7 @@ impl Packet {
 
     /// 取 Rust 原生值的引用;类型不符或非 Native 返回 None。
     pub fn get<T: Any>(&self) -> Option<&T> {
-        match self.data.as_deref()? {
+        match self.data.as_deref()?.payload.as_ref() {
             Payload::Native(b) => b.downcast_ref::<T>(),
             _ => None,
         }
@@ -800,31 +830,60 @@ impl Packet {
     /// 调用方须自行确认类型(比对 [`Packet::type_id`] 与 [`fnv1a_type_id`]),
     /// 并保证读取期间本 `Packet` 存活。
     pub fn foreign_ptr(&self) -> Option<*const c_void> {
-        match self.data.as_deref()? {
+        match self.data.as_deref()?.payload.as_ref() {
             Payload::Foreign(f) => Some(f.ptr as *const c_void),
             _ => None,
         }
     }
 
     pub fn as_builtin(&self) -> Option<&Builtin> {
-        match self.data.as_deref()? {
+        match self.data.as_deref()?.payload.as_ref() {
             Payload::Builtin(b) => Some(b),
             _ => None,
         }
     }
 
+    pub fn metadata(&self) -> &Metadata {
+        self.data
+            .as_deref()
+            .map_or(&EMPTY_METADATA, |body| body.metadata.as_ref())
+    }
+
+    pub fn metadata_value(&self, key: &str) -> Option<&MetadataValue> {
+        self.metadata().get(key)
+    }
+
+    pub fn with_metadata<V: Into<MetadataValue>>(
+        mut self,
+        key: impl Into<String>,
+        value: V,
+    ) -> Self {
+        self.set_metadata(key, value);
+        self
+    }
+
+    pub fn set_metadata<V: Into<MetadataValue>>(&mut self, key: impl Into<String>, value: V) {
+        let Some(body) = self.data.as_mut() else {
+            return;
+        };
+        let body = Arc::make_mut(body);
+        let metadata = Arc::make_mut(&mut body.metadata);
+        metadata.insert(key.into(), value.into());
+    }
+
     pub(crate) fn make_mutable_buffer(&mut self) -> Result<BufferView> {
-        let arc = self.data.as_mut().ok_or_else(|| {
+        let body = Arc::make_mut(self.data.as_mut().ok_or_else(|| {
             Error::InvalidArg("cannot get a writable view of an empty packet".into())
-        })?;
-        let external = match &**arc {
+        })?);
+        let arc = &mut body.payload;
+        let external = match arc.as_ref() {
             Payload::Native(value) => value.downcast_ref::<ExternalBuffer>(),
             _ => None,
         };
         let must_copy =
             Arc::strong_count(arc) > 1 || external.is_some_and(|buffer| buffer.readonly);
         if must_copy {
-            let owned = match &**arc {
+            let owned = match arc.as_ref() {
                 Payload::Builtin(Builtin::Buffer(buffer)) => {
                     record_cow_copy(buffer.bytes.len() as u64);
                     buffer.clone()
@@ -878,13 +937,14 @@ impl Packet {
     /// 独占(引用数 1)→ 原地返回,**零拷贝**;被共享 → 复制一份后返回副本的可写引用。
     /// 仅支持 `Builtin` payload；adopt 的外部 Buffer 走专用 `make_mutable_buffer`。
     pub fn make_mutable_builtin(&mut self) -> Result<&mut Builtin> {
-        let arc = self.data.as_mut().ok_or_else(|| {
+        let body = Arc::make_mut(self.data.as_mut().ok_or_else(|| {
             Error::InvalidArg("cannot get a writable view of an empty packet".into())
-        })?;
+        })?);
+        let arc = &mut body.payload;
 
         if Arc::get_mut(arc).is_none() {
             // 被共享:只有内建 payload 能复制
-            let copy = match &**arc {
+            let copy = match arc.as_ref() {
                 Payload::Builtin(b) => {
                     record_cow_copy(b.byte_size());
                     Payload::Builtin(b.clone())
@@ -908,7 +968,7 @@ impl Packet {
 
     /// 供诊断日志使用的可读描述。
     pub fn debug_string(&self) -> String {
-        let ty = match self.data.as_deref() {
+        let ty = match self.data.as_deref().map(|body| body.payload.as_ref()) {
             None => "Empty".to_string(),
             Some(Payload::Native(value)) => {
                 if let Some(buffer) = value.downcast_ref::<ExternalBuffer>() {

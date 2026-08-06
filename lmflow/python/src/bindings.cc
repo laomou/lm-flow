@@ -216,6 +216,35 @@ class Packet {
     return py::bytes(static_cast<const char*>(d), n);
   }
 
+  void set_metadata(const std::string& key, const py::object& value) {
+    LMFlowStatus status = LMFLOW_ERR_INVALID_ARG;
+    if (py::isinstance<py::bool_>(value)) {
+      status = lmflow_packet_set_metadata_bool(&raw_, key.c_str(), value.cast<bool>());
+    } else if (py::isinstance<py::int_>(value)) {
+      status = lmflow_packet_set_metadata_i64(&raw_, key.c_str(), value.cast<int64_t>());
+    } else if (py::isinstance<py::float_>(value)) {
+      status = lmflow_packet_set_metadata_f64(&raw_, key.c_str(), value.cast<double>());
+    } else if (py::isinstance<py::str>(value)) {
+      std::string text = value.cast<std::string>();
+      status = lmflow_packet_set_metadata_str(&raw_, key.c_str(), text.c_str());
+    } else {
+      throw py::type_error("metadata value must be bool, int, float, or str");
+    }
+    if (status != LMFLOW_OK) throw std::runtime_error(lmflow_last_error());
+  }
+
+  py::object metadata(const std::string& key) const {
+    bool boolean = false;
+    if (lmflow_packet_metadata_bool(&raw_, key.c_str(), &boolean)) return py::bool_(boolean);
+    int64_t integer = 0;
+    if (lmflow_packet_metadata_i64(&raw_, key.c_str(), &integer)) return py::int_(integer);
+    double floating = 0;
+    if (lmflow_packet_metadata_f64(&raw_, key.c_str(), &floating)) return py::float_(floating);
+    const char* text = nullptr;
+    if (lmflow_packet_metadata_str(&raw_, key.c_str(), &text)) return py::str(text);
+    return py::none();
+  }
+
   /// 只读 numpy 视图(零拷贝)。**仅在本包存活期间有效** ——
   /// 算子输入包是借用的,回调返回后不得再用。
   py::array as_numpy(const py::object& self) const {
@@ -961,6 +990,8 @@ PYBIND11_MODULE(_lmflow, m) {
       .def_property_readonly("type_id", &Packet::type_id, "Payload type id.")
       .def_property_readonly("type_name", &Packet::type_name, "Human-readable payload type name.")
       .def("as_int", &Packet::as_int, "Read the int payload; None on type mismatch.")
+      .def("set_metadata", &Packet::set_metadata, py::arg("key"), py::arg("value"))
+      .def("metadata", &Packet::metadata, py::arg("key"))
       .def("as_float", &Packet::as_float, "Read the float payload; None on type mismatch.")
       .def("as_bool", &Packet::as_bool, "Read the bool payload; None on type mismatch.")
       .def("as_str", &Packet::as_str, "Read the str payload; None on type mismatch.")

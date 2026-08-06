@@ -7,7 +7,10 @@
 use std::ffi::{c_char, c_void};
 use std::sync::Arc;
 
-use crate::packet::{self, BufferData, BufferView, Builtin, ExternalBuffer, Packet, Payload};
+use crate::metadata::MetadataValue;
+use crate::packet::{
+    self, BufferData, BufferView, Builtin, ExternalBuffer, Packet, PacketBody, Payload,
+};
 use crate::runtime::{self, last_error};
 use crate::status::{code, Error};
 use crate::timestamp::Timestamp;
@@ -42,8 +45,8 @@ impl Default for LMFlowPacket {
 pub fn borrow_packet(p: &Packet) -> LMFlowPacket {
     match p.arc_ref() {
         Some(arc) => LMFlowPacket {
-            payload: arc.data_ptr(),
-            type_id: arc.type_id(),
+            payload: arc.payload.data_ptr(),
+            type_id: arc.payload.type_id(),
             timestamp: p.timestamp().0,
             owner: Arc::as_ptr(arc) as *mut c_void,
             drop_fn: None,
@@ -60,8 +63,8 @@ pub fn own_packet(p: Packet) -> LMFlowPacket {
     let ts = p.timestamp().0;
     match p.into_arc() {
         Some(arc) => {
-            let payload = arc.data_ptr();
-            let type_id = arc.type_id();
+            let payload = arc.payload.data_ptr();
+            let type_id = arc.payload.type_id();
             LMFlowPacket {
                 payload,
                 type_id,
@@ -84,7 +87,7 @@ pub fn own_packet(p: Packet) -> LMFlowPacket {
 pub unsafe fn take_packet(fp: LMFlowPacket) -> Packet {
     let ts = Timestamp(fp.timestamp);
     if !fp.owner.is_null() {
-        let arc = Arc::from_raw(fp.owner as *const Payload);
+        let arc = Arc::from_raw(fp.owner as *const PacketBody);
         Packet::from_arc(arc, ts)
     } else if !fp.payload.is_null() {
         Packet::from_foreign(fp.payload, fp.type_id, fp.drop_fn).at(ts)
@@ -119,7 +122,7 @@ pub unsafe extern "C" fn lmflow_packet_drop(pkt: *mut LMFlowPacket) {
         }
         let p = &mut *pkt;
         if !p.owner.is_null() {
-            drop(Arc::from_raw(p.owner as *const Payload));
+            drop(Arc::from_raw(p.owner as *const PacketBody));
         } else if !p.payload.is_null() {
             if let Some(f) = p.drop_fn {
                 f(p.payload);
@@ -143,17 +146,141 @@ pub unsafe extern "C" fn lmflow_packet_clone(pkt: *const LMFlowPacket) -> LMFlow
             );
             return LMFlowPacket::default();
         }
-        let arc = Arc::from_raw(src.owner as *const Payload);
+        let arc = Arc::from_raw(src.owner as *const PacketBody);
         let cloned = arc.clone();
         // 原来的那份引用仍属调用方,不能在此释放
         let _ = Arc::into_raw(arc);
         LMFlowPacket {
-            payload: cloned.data_ptr(),
-            type_id: cloned.type_id(),
+            payload: cloned.payload.data_ptr(),
+            type_id: cloned.payload.type_id(),
             timestamp: src.timestamp,
             owner: Arc::into_raw(cloned) as *mut c_void,
             drop_fn: None,
         }
+    })
+}
+
+unsafe fn packet_body<'a>(pkt: *const LMFlowPacket) -> Option<&'a PacketBody> {
+    let packet = pkt.as_ref()?;
+    (!packet.owner.is_null()).then(|| &*(packet.owner as *const PacketBody))
+}
+
+unsafe fn set_metadata(pkt: *mut LMFlowPacket, key: *const c_char, value: MetadataValue) -> i32 {
+    let Some(packet) = pkt.as_mut() else {
+        return fail(Error::InvalidArg("packet must not be null".into()));
+    };
+    let Some(key) = cstr(key).filter(|key| !key.is_empty()) else {
+        return fail(Error::InvalidArg("metadata key must not be empty".into()));
+    };
+    if packet.owner.is_null() {
+        return fail(Error::InvalidArg(
+            "metadata can only be set on an owned engine packet".into(),
+        ));
+    }
+    let old = std::mem::take(packet);
+    let mut owned = take_packet(old);
+    owned.set_metadata(key, value);
+    *packet = own_packet(owned);
+    code::OK
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lmflow_packet_set_metadata_i64(
+    pkt: *mut LMFlowPacket,
+    key: *const c_char,
+    value: i64,
+) -> i32 {
+    guard(|| set_metadata(pkt, key, MetadataValue::I64(value)))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lmflow_packet_set_metadata_f64(
+    pkt: *mut LMFlowPacket,
+    key: *const c_char,
+    value: f64,
+) -> i32 {
+    guard(|| set_metadata(pkt, key, MetadataValue::F64(value)))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lmflow_packet_set_metadata_bool(
+    pkt: *mut LMFlowPacket,
+    key: *const c_char,
+    value: bool,
+) -> i32 {
+    guard(|| set_metadata(pkt, key, MetadataValue::Bool(value)))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lmflow_packet_set_metadata_str(
+    pkt: *mut LMFlowPacket,
+    key: *const c_char,
+    value: *const c_char,
+) -> i32 {
+    guard(|| {
+        let Some(value) = cstr(value) else {
+            return fail(Error::InvalidArg(
+                "metadata string must be valid UTF-8".into(),
+            ));
+        };
+        set_metadata(pkt, key, MetadataValue::String(value.to_string()))
+    })
+}
+
+macro_rules! metadata_scalar {
+    ($name:ident, $variant:ident, $ty:ty) => {
+        #[no_mangle]
+        pub unsafe extern "C" fn $name(
+            pkt: *const LMFlowPacket,
+            key: *const c_char,
+            out: *mut $ty,
+        ) -> bool {
+            guard_val(false, || {
+                let Some(key) = cstr(key) else { return false };
+                let Some(body) = packet_body(pkt) else {
+                    return false;
+                };
+                let Some(MetadataValue::$variant(value)) = body.metadata.get(key) else {
+                    return false;
+                };
+                if !out.is_null() {
+                    *out = *value;
+                }
+                true
+            })
+        }
+    };
+}
+
+metadata_scalar!(lmflow_packet_metadata_i64, I64, i64);
+metadata_scalar!(lmflow_packet_metadata_f64, F64, f64);
+metadata_scalar!(lmflow_packet_metadata_bool, Bool, bool);
+
+#[no_mangle]
+pub unsafe extern "C" fn lmflow_packet_metadata_str(
+    pkt: *const LMFlowPacket,
+    key: *const c_char,
+    out: *mut *const c_char,
+) -> bool {
+    guard_val(false, || {
+        let Some(key) = cstr(key) else { return false };
+        let Some(body) = packet_body(pkt) else {
+            return false;
+        };
+        let Some(MetadataValue::String(value)) = body.metadata.get(key) else {
+            return false;
+        };
+        thread_local! {
+            static METADATA_STRING: std::cell::RefCell<std::ffi::CString> =
+                std::cell::RefCell::new(std::ffi::CString::default());
+        }
+        METADATA_STRING.with(|buffer| {
+            *buffer.borrow_mut() = std::ffi::CString::new(value.as_str()).unwrap_or_default();
+            if !out.is_null() {
+                *out = buffer.borrow().as_ptr();
+            }
+        });
+        true
     })
 }
 
@@ -301,7 +428,7 @@ unsafe fn peek_builtin<'a>(pkt: *const LMFlowPacket) -> Option<&'a Builtin> {
     if p.owner.is_null() {
         return None;
     }
-    match &*(p.owner as *const Payload) {
+    match (*(p.owner as *const PacketBody)).payload.as_ref() {
         Payload::Builtin(b) => Some(b),
         _ => None,
     }
@@ -588,7 +715,9 @@ pub unsafe extern "C" fn lmflow_packet_new_buffer(
                 let pkt = Packet::from_builtin(Builtin::Buffer(b)).at(Timestamp(ts));
                 let fp = own_packet(pkt);
                 // 填可写视图:此时引擎持有的那份就是调用方拿到的那份(独占)
-                if let Payload::Builtin(Builtin::Buffer(b)) = &*(fp.owner as *const Payload) {
+                if let Payload::Builtin(Builtin::Buffer(b)) =
+                    (*(fp.owner as *const PacketBody)).payload.as_ref()
+                {
                     fill_buffer(out, b, false, b.bytes.as_ptr() as *mut c_void);
                 }
                 fp
@@ -773,7 +902,7 @@ pub unsafe extern "C" fn lmflow_packet_as_buffer(
         if packet.owner.is_null() {
             return false;
         }
-        let payload = &*(packet.owner as *const Payload);
+        let payload = (*(packet.owner as *const PacketBody)).payload.as_ref();
         let Some(view) = payload.buffer_view() else {
             return false;
         };

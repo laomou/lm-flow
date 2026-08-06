@@ -8,10 +8,50 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use crate::kernel::PortTable;
+use crate::metadata::MetadataPredicate;
 use crate::status::{Error, Result};
 
 fn default_max_queue_size() -> usize {
     100
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RouteMode {
+    #[default]
+    First,
+    All,
+}
+
+impl RouteConfig {
+    fn is_implicit_default(&self) -> bool {
+        self.mode == RouteMode::First && self.unmatched == "drop" && self.routes.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RouteRule {
+    pub to: String,
+    #[serde(default)]
+    pub when: Option<MetadataPredicate>,
+    #[serde(default)]
+    pub default: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RouteConfig {
+    #[serde(default)]
+    pub mode: RouteMode,
+    #[serde(default = "default_route_unmatched")]
+    pub unmatched: String,
+    #[serde(default)]
+    pub routes: Vec<RouteRule>,
+}
+
+fn default_route_unmatched() -> String {
+    "drop".to_string()
 }
 
 /// 运行时统计级别。它只控制诊断记账，不改变调度与终止语义。
@@ -157,6 +197,10 @@ pub struct NodeConfig {
     /// 实现:本次调用完成后进入执行器延迟队列，不占用等待中的 worker。
     #[serde(default)]
     pub rate: f64,
+    /// Conditional output routing configuration. Route fields are flattened so
+    /// YAML can declare `type: route`, `mode`, `routes`, and `unmatched` directly.
+    #[serde(flatten)]
+    pub route: Option<RouteConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -239,6 +283,7 @@ impl Default for NodeConfig {
             back_edges: Vec::new(),
             on_error: String::new(),
             rate: 0.0,
+            route: None,
         }
     }
 }
@@ -341,6 +386,86 @@ impl GraphConfig {
             } else {
                 n.name.clone()
             };
+            if n.r#type == "route" {
+                let route = n.route.as_ref().ok_or_else(|| {
+                    Error::InvalidArg(format!(
+                        "{node_path}: route node `{who}` requires route fields (`routes` or `unmatched`)"
+                    ))
+                })?;
+                if !n.kernel.is_empty() {
+                    return Err(Error::InvalidArg(format!(
+                        "{node_path}: route node `{who}` must not declare `kernel`"
+                    )));
+                }
+                if n.input_ports.len() != 1 {
+                    return Err(Error::InvalidArg(format!(
+                        "{node_path}.input_ports (node `{who}`): route nodes require exactly one input port"
+                    )));
+                }
+                if n.output_ports.is_empty() {
+                    return Err(Error::InvalidArg(format!(
+                        "{node_path}.output_ports (node `{who}`): route nodes require at least one output port"
+                    )));
+                }
+                let output_names: BTreeSet<String> = n
+                    .output_ports
+                    .iter()
+                    .map(|decl| parse_port_spec(decl).map(|spec| spec.name))
+                    .collect::<Result<_>>()?;
+                let mut defaults = 0usize;
+                for (rule_index, rule) in route.routes.iter().enumerate() {
+                    if !output_names.contains(&rule.to) {
+                        return Err(Error::InvalidArg(format!(
+                            "{node_path}.routes[{rule_index}].to (node `{who}`): unknown output port `{}`",
+                            rule.to
+                        )));
+                    }
+                    if rule.default {
+                        defaults += 1;
+                        if rule.when.is_some() {
+                            return Err(Error::InvalidArg(format!(
+                                "{node_path}.routes[{rule_index}] (node `{who}`): default route must not declare `when`"
+                            )));
+                        }
+                    } else {
+                        let predicate = rule.when.as_ref().ok_or_else(|| {
+                            Error::InvalidArg(format!(
+                                "{node_path}.routes[{rule_index}] (node `{who}`): non-default route requires `when`"
+                            ))
+                        })?;
+                        predicate.validate().map_err(|error| {
+                            error.context(format!("{node_path}.routes[{rule_index}].when"))
+                        })?;
+                    }
+                }
+                if defaults > 1 {
+                    return Err(Error::InvalidArg(format!(
+                        "{node_path}.routes (node `{who}`): at most one default route is allowed"
+                    )));
+                }
+                match route.unmatched.as_str() {
+                    "drop" | "error" => {}
+                    target if output_names.contains(target) => {}
+                    other => {
+                        return Err(Error::InvalidArg(format!(
+                            "{node_path}.unmatched (node `{who}`): expected `drop`, `error`, or an output port, got `{other}`"
+                        )));
+                    }
+                }
+                if route.routes.is_empty() && route.unmatched == "drop" {
+                    return Err(Error::InvalidArg(format!(
+                        "{node_path}.routes (node `{who}`): at least one route rule is required"
+                    )));
+                }
+            } else if n
+                .route
+                .as_ref()
+                .is_some_and(|route| !route.is_implicit_default())
+            {
+                return Err(Error::InvalidArg(format!(
+                    "{node_path} (node `{who}`): route fields are only valid when `type: route`"
+                )));
+            }
             // `max_in_flight` 与「源节点该挂什么执行器」都要看解析出的执行器长什么样
             // (是池还是委托、几个线程),光看 YAML 里的名字答不上来 ——
             // 那两条校验在 Graph::build 的 check_node_executor_fit 里。
@@ -531,6 +656,7 @@ pub struct GraphPlanNode {
     pub executor: String,
     pub inputs: Vec<String>,
     pub outputs: Vec<String>,
+    pub route: Option<RouteConfig>,
     pub(crate) input_ports: Arc<PortTable>,
     pub(crate) output_ports: Arc<PortTable>,
     pub(crate) input_edges: Vec<usize>,
@@ -684,7 +810,12 @@ impl GraphPlan {
             nodes.push(GraphPlanNode {
                 index,
                 name: if node.name.is_empty() {
-                    format!("{}#{index}", node.kernel)
+                    let kind = if node.r#type == "route" {
+                        "route"
+                    } else {
+                        node.kernel.as_str()
+                    };
+                    format!("{kind}#{index}")
                 } else {
                     node.name.clone()
                 },
@@ -692,6 +823,9 @@ impl GraphPlan {
                 executor: executor.into(),
                 inputs,
                 outputs,
+                route: (node.r#type == "route")
+                    .then(|| node.route.clone())
+                    .flatten(),
                 input_ports,
                 output_ports,
                 input_edges,
@@ -1046,6 +1180,128 @@ output_ports: ["b"]
         assert_eq!(cfg.input_ports, vec!["a"]);
         assert_eq!(cfg.max_queue_size, 100, "default queue limit");
         assert_eq!(cfg.effective_stats_level(), StatsLevel::Basic);
+    }
+
+    #[test]
+    fn parses_and_plans_conditional_route() {
+        let cfg = GraphConfig::from_yaml(
+            r#"
+input_ports: [detections]
+output_ports: [high, medium, low]
+nodes:
+  - name: confidence_route
+    type: route
+    input_ports: [detections]
+    output_ports: [high, medium, low]
+    mode: first
+    unmatched: error
+    routes:
+      - to: high
+        when: { metadata: confidence, op: gte, value: 0.8 }
+      - to: medium
+        when:
+          all:
+            - { metadata: confidence, op: gte, value: 0.5 }
+            - not: { metadata: suppressed, op: eq, value: true }
+      - to: low
+        default: true
+"#,
+        )
+        .unwrap();
+        let plan = GraphPlan::build(cfg).unwrap();
+        let route = plan.nodes[0].route.as_ref().unwrap();
+        assert_eq!(route.mode, RouteMode::First);
+        assert_eq!(route.unmatched, "error");
+        assert_eq!(route.routes.len(), 3);
+        assert!(route.routes[2].default);
+    }
+
+    #[test]
+    fn parses_route_all_mode_and_timestamp_condition() {
+        let cfg = GraphConfig::from_yaml(
+            r#"
+input_ports: [input]
+output_ports: [recent]
+nodes:
+  - type: route
+    input_ports: [input]
+    output_ports: [recent]
+    mode: all
+    unmatched: drop
+    routes:
+      - to: recent
+        when: { timestamp: { op: gte, value: 1000 } }
+"#,
+        )
+        .unwrap();
+        let route = GraphPlan::build(cfg).unwrap().nodes[0]
+            .route
+            .clone()
+            .unwrap();
+        assert_eq!(route.mode, RouteMode::All);
+    }
+
+    #[test]
+    fn rejects_invalid_route_configuration() {
+        for (yaml, needle) in [
+            (
+                r#"
+nodes:
+  - type: route
+    input_ports: [a, b]
+    output_ports: [out]
+    routes: [{ to: out, default: true }]
+"#,
+                "exactly one input",
+            ),
+            (
+                r#"
+nodes:
+  - type: route
+    input_ports: [in]
+    output_ports: [out]
+    routes: [{ to: typo, default: true }]
+"#,
+                "unknown output port",
+            ),
+            (
+                r#"
+nodes:
+  - type: route
+    input_ports: [in]
+    output_ports: [out]
+    routes:
+      - { to: out, default: true }
+      - { to: out, default: true }
+"#,
+                "at most one default",
+            ),
+            (
+                r#"
+nodes:
+  - type: route
+    input_ports: [in]
+    output_ports: [out]
+    routes: [{ to: out }]
+"#,
+                "requires `when`",
+            ),
+            (
+                r#"
+nodes:
+  - kernel: K
+    input_ports: [in]
+    output_ports: [out]
+    routes: [{ to: out, default: true }]
+"#,
+                "only valid when `type: route`",
+            ),
+        ] {
+            let error = GraphConfig::from_yaml(yaml)
+                .and_then(GraphPlan::build)
+                .unwrap_err();
+            assert!(error.to_string().contains(needle), "{error}");
+        }
     }
 
     #[test]

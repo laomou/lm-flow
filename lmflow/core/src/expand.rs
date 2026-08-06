@@ -133,6 +133,33 @@ fn inline(
                 .map(|b| remap_name(b, prefix, rename))
                 .collect();
             out.push(nn);
+        } else if n.r#type == "route" {
+            if !n.kernel.is_empty() {
+                return Err(Error::InvalidArg(format!(
+                    "{node_path}: route node `{}` must not declare `kernel`",
+                    node_who(n, prefix)
+                )));
+            }
+            let mut nn = n.clone();
+            if !prefix.is_empty() {
+                nn.name = format!("{prefix}{}", node_label(n));
+            }
+            nn.input_ports = inputs;
+            nn.output_ports = outputs;
+            if let Some(route) = &mut nn.route {
+                for rule in &mut route.routes {
+                    rule.to = remap_name(&rule.to, prefix, rename);
+                }
+                if route.unmatched != "drop" && route.unmatched != "error" {
+                    route.unmatched = remap_name(&route.unmatched, prefix, rename);
+                }
+            }
+            nn.back_edges = n
+                .back_edges
+                .iter()
+                .map(|b| remap_name(b, prefix, rename))
+                .collect();
+            out.push(nn);
         } else {
             // 子图实例节点:递归内联。
             if !n.kernel.is_empty() {

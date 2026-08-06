@@ -117,6 +117,17 @@ void lmflow_packet_drop(LMFlowPacket* pkt);
  * 返回**线程局部**缓冲,生命周期至本线程下次调用本函数。仅用于日志/排障。 */
 const char* lmflow_packet_debug_string(const LMFlowPacket* pkt);
 
+/* Packet metadata is immutable-shared with the payload. Setters require an owned engine packet
+ * and use copy-on-write for metadata only; the payload remains zero-copy. */
+LMFlowStatus lmflow_packet_set_metadata_i64(LMFlowPacket* pkt, const char* key, int64_t value);
+LMFlowStatus lmflow_packet_set_metadata_f64(LMFlowPacket* pkt, const char* key, double value);
+LMFlowStatus lmflow_packet_set_metadata_bool(LMFlowPacket* pkt, const char* key, bool value);
+LMFlowStatus lmflow_packet_set_metadata_str(LMFlowPacket* pkt, const char* key, const char* value);
+bool lmflow_packet_metadata_i64(const LMFlowPacket* pkt, const char* key, int64_t* out);
+bool lmflow_packet_metadata_f64(const LMFlowPacket* pkt, const char* key, double* out);
+bool lmflow_packet_metadata_bool(const LMFlowPacket* pkt, const char* key, bool* out);
+bool lmflow_packet_metadata_str(const LMFlowPacket* pkt, const char* key, const char** out);
+
 /* type_id 说明:
  *  引擎只做「相等性」比对,不解释其含义。0..15 为内建类型保留;0 表示「不声明类型」,
  *  引擎跳过校验。
