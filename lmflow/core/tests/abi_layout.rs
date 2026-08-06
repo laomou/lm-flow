@@ -55,8 +55,8 @@ fn input_queue_stats_uses_struct_size_for_forward_compat() {
 
 #[test]
 fn abi_version_matches_header() {
-    // include/flow.h: #define LMFLOW_ABI_VERSION 3u
-    assert_eq!(lmflow::ffi::lmflow_abi_version(), 3);
+    // include/flow.h: #define LMFLOW_ABI_VERSION 4u
+    assert_eq!(lmflow::ffi::lmflow_abi_version(), 4);
 }
 
 #[test]
@@ -150,6 +150,15 @@ fn type_id_hash_matches_cpp_side() {
             "自定义 type_id 不得落入内建区 0..15"
         );
     }
+}
+
+#[test]
+fn c_type_id_entry_point_matches_rust_hash() {
+    use std::ffi::CString;
+
+    let name = CString::new("lmflow.test.Stable").unwrap();
+    let id = unsafe { lmflow::ffi::lmflow_type_id(name.as_ptr()) };
+    assert_eq!(id, lmflow::packet::fnv1a_type_id("lmflow.test.Stable"));
 }
 
 #[test]

@@ -533,7 +533,8 @@ fn validate_contract(name: &str, contract: &Contract) -> Result<()> {
             if type_id >= 16 && crate::packet::type_descriptor(type_id).is_none() {
                 return Err(Error::InvalidArg(format!(
                     "node `{name}`: {which} port {i} declares unregistered custom type id \
-                     {type_id}; register its stable name or descriptor before building the graph"
+                     {type_id}; register its stable name, size, and alignment with \
+                     lmflow_register_type_descriptor before building the graph"
                 )));
             }
         }

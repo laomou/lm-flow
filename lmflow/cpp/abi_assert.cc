@@ -66,6 +66,7 @@ static_assert(LMFLOW_TS_MIN < LMFLOW_TS_MAX, "timestamp sentinel ordering is wro
 static_assert(LMFLOW_TS_MAX < LMFLOW_TS_POST_STREAM, "timestamp sentinel ordering is wrong");
 static_assert(LMFLOW_TS_POST_STREAM < LMFLOW_TS_ONE_OVER_POST_STREAM, "timestamp sentinel ordering is wrong");
 static_assert(LMFLOW_TS_ONE_OVER_POST_STREAM < LMFLOW_TS_DONE, "timestamp sentinel ordering is wrong");
+static_assert(LMFLOW_ABI_VERSION == 4, "C ABI version must track removed type-name registration");
 
 /* ---- type_id 的哈希算法:C++ 与 Rust 各有一份独立实现,必须同结果 ----
  *

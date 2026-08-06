@@ -183,17 +183,6 @@ pub unsafe extern "C" fn lmflow_packet_debug_string(pkt: *const LMFlowPacket) ->
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn lmflow_register_type_name(type_id: u64, name: *const c_char) -> i32 {
-    guard(|| {
-        let Some(n) = cstr(name) else {
-            return fail(Error::InvalidArg("type name is empty or not UTF-8".into()));
-        };
-        packet::register_type_name(type_id, n);
-        code::OK
-    })
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn lmflow_register_type_descriptor(
     type_id: u64,
     name: *const c_char,
@@ -208,6 +197,21 @@ pub unsafe extern "C" fn lmflow_register_type_descriptor(
             Ok(()) => code::OK,
             Err(error) => fail(error),
         }
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lmflow_type_id(name: *const c_char) -> u64 {
+    guard_val(0, || {
+        let Some(name) = cstr(name) else {
+            last_error::set("type name is empty or not UTF-8");
+            return 0;
+        };
+        if name.is_empty() {
+            last_error::set("type name must not be empty");
+            return 0;
+        }
+        packet::fnv1a_type_id(name)
     })
 }
 

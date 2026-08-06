@@ -89,7 +89,7 @@ set it to `OFF` for a pure-Rust native library. The core Cargo crate never compi
 
 ```c
 #if 0 /* illustrative */
-#define LMFLOW_ABI_VERSION 3u
+#define LMFLOW_ABI_VERSION 4u
 #endif
 uint32_t lmflow_abi_version(void);
 ```
@@ -720,6 +720,23 @@ built by different toolchains must interoperate, pin the identity explicitly:
 ```cpp
 LMFLOW_DECLARE_TYPE_NAME(MyDetection, "myproj.MyDetection");
 ```
+
+Every custom type is registered as one complete descriptor: stable name, size, and alignment.
+The numeric id is not an independent choice; it must equal `lmflow_type_id(stable_name)`.
+`Packet::Make<T>`, `Contract::InputSet<T>`, and `Contract::OutputSet<T>` perform this registration
+automatically. Plain C hosts register explicitly:
+
+```c
+const char* name = "myproj.MyDetection";
+uint64_t id = lmflow_type_id(name);
+LMFlowStatus status =
+    lmflow_register_type_descriptor(id, name, sizeof(MyDetection), _Alignof(MyDetection));
+```
+
+Exact duplicate registration is idempotent. Reusing a stable name with another layout, or passing
+an id that was not derived from that name, fails immediately. The former name-only
+`lmflow_register_type_name` API was removed in ABI version 4 because it allowed contracts to appear
+typed without declaring a cross-language layout.
 
 The honest limitation: a custom type only travels within a same-language part of the graph. To cross
 into Python or Rust, use `LMFLOW_TYPE_BUFFER`, or `LMFLOW_TYPE_STR` carrying JSON.
