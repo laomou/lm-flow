@@ -1241,9 +1241,15 @@ with lmflow.Graph.from_yaml(CONFIG) as graph:        # with 是硬要求,见 8.3
 
 ### 8.5 零拷贝的正确写法
 
-直觉写法 `send(cv2.imread(...))` 是错的 —— 要么整帧拷贝,要么引擎持有 PyObject 引用,
-而引用归零可能发生在工作线程上,那里 `Py_DECREF` 需抢 GIL(死锁隐患)。
-正确姿势是**让引擎分配缓冲**,拿零拷贝 numpy view 就地写入:
+`send(cv2.imread(...))` 通过 external buffer adoption 零拷贝进入图。绑定层持有 ndarray
+引用并把传入数组临时标成只读；最后一个 Packet 引用归零时，释放回调先获取 GIL，再恢复
+原 writeable 标志并 `Py_DECREF`。所有可能等待引擎线程的 Python API 都必须释放 GIL，
+否则工作线程最终释放 ndarray 时会与宿主互等。
+
+调用方不得通过另一个共享同一 allocation 的 numpy alias 并发修改数据。Python-owned
+buffer 以 READONLY 进入引擎，因此算子请求可写视图时会 CoW，不会改坏原数组。
+
+如果数据本来就要由宿主生成，仍可**让引擎分配缓冲**并拿 numpy view 就地写入:
 
 ```python
 def process(self, cc):

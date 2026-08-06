@@ -65,6 +65,12 @@ into the dataflow — such a packet can only travel within a pure-Python subgrap
 reaching a C++ kernel it becomes an unreadable pointer. For structured data use:
 numeric collections → an N×K numpy buffer (zero-copy, readable directly by C++);
 arbitrary metadata → a JSON string; config parameters → node ``options``.
+
+Passing an ndarray to ``send`` or ``Packet.from_numpy`` is zero-copy. The supplied
+array is marked read-only while any Packet reference retains it, then its original
+writeability is restored. Do not mutate the same allocation through another alias
+while the graph owns it. Kernels that request a writable packet view use copy-on-write,
+so Python-owned input storage is never modified by the engine.
 """
 
 from __future__ import annotations
@@ -363,9 +369,8 @@ class Graph:
     def new_buffer(self, shape: Sequence[int], dtype: Any) -> tuple[Packet, Any]:
         """Have the **engine** allocate a buffer; returns ``(packet, writable numpy view)``.
 
-        This is the recommended zero-copy entry point: write results straight into
-        engine memory, avoiding the whole-frame copy of ``send(ndarray)`` and avoiding
-        the engine holding a PyObject (see the module docstring's GIL note).
+        Use this when producing data directly into engine-owned memory. Existing
+        ndarrays can instead be passed directly to ``send`` without copying.
         """
         return self._g.new_buffer(list(shape), dtype)
 
