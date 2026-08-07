@@ -62,6 +62,17 @@ fields (`name`, `iterations`, `payload_bytes`, `packets_per_second`,
 easy to archive or compare without scraping human-formatted text. Rust
 Criterion remains the source of truth for statistical confidence intervals.
 
+To compare two archived host reports, use the standard-library helper:
+
+```sh
+python lmflow/benchmarks/compare_reports.py baseline.json candidate.json
+```
+
+Results are matched by benchmark `name`; the output reports added, removed, or
+changed cases and percentage deltas for throughput, latency, and (when present)
+payload bandwidth. A zero baseline is reported as `null` rather than silently
+inventing a percentage.
+
 Benchmarks are intentionally not CI pass/fail gates: hosted-runner timing is too
 noisy for reliable regression thresholds. CI compiles the benchmark targets; use
 repeatable dedicated hardware for performance comparisons.
