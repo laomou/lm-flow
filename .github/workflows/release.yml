@@ -103,6 +103,7 @@ jobs:
       - name: 打包 SDK
         run: |
           VER="${{ github.ref_name }}"
+          VER="${VER//\//-}"
           PKG="lmflow-${VER}-${{ matrix.name }}"
           mv sdk "$PKG"
           cp LICENSE README.md "$PKG/"
