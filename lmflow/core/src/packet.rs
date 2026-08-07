@@ -652,6 +652,18 @@ impl Packet {
         }
     }
 
+    pub(crate) fn rebase_ingress_us(&mut self, now_us: i64) {
+        let Some(body) = self.data.as_deref() else {
+            return;
+        };
+        self.data = Some(Arc::new(PacketBody {
+            payload: body.payload.clone(),
+            metadata: body.metadata.clone(),
+            ingress_us: AtomicI64::new(now_us.max(1)),
+            e2e_observed: AtomicBool::new(false),
+        }));
+    }
+
     pub(crate) fn ingress_us(&self) -> i64 {
         self.data
             .as_deref()

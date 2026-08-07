@@ -13,7 +13,7 @@ impl GraphInner {
         }
     }
 
-    pub(super) fn send(&self, edge: EdgeId, pkt: Packet, blocking: bool) -> Result<()> {
+    pub(super) fn send(&self, edge: EdgeId, mut pkt: Packet, blocking: bool) -> Result<()> {
         match self.state() {
             State::Running => {}
             State::Draining | State::Terminated => return Err(Error::Closed),
@@ -79,7 +79,7 @@ impl GraphInner {
         // 时间戳单调性:图输入口强制校验(ADR #23)
         self.check_input_monotonic(edge, &pkt)?;
         if self.full_stats() {
-            pkt.mark_ingress_us(self.epoch_us());
+            pkt.rebase_ingress_us(self.epoch_us());
         }
 
         // 分发给该边的所有消费者(各自一份引用)与 poller/observer

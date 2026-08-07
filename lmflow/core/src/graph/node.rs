@@ -36,10 +36,10 @@ impl Default for E2eStats {
 
 impl E2eStats {
     pub(super) fn record(&self, us: u64) {
-        self.frames.fetch_add(1, Ordering::Relaxed);
         self.total_us.fetch_add(us, Ordering::Relaxed);
         self.max_us.fetch_max(us, Ordering::Relaxed);
         self.buckets[latency_bucket(us)].fetch_add(1, Ordering::Relaxed);
+        self.frames.fetch_add(1, Ordering::Release);
     }
 
     pub(super) fn reset(&self) {

@@ -138,7 +138,7 @@ impl GraphInner {
             })
             .collect();
         let e2e = DotE2eCounters {
-            frames: self.e2e_stats.frames.load(Ordering::Relaxed),
+            frames: self.e2e_stats.frames.load(Ordering::Acquire),
             total_us: self.e2e_stats.total_us.load(Ordering::Relaxed),
             max_us: self.e2e_stats.max_us.load(Ordering::Relaxed),
             latency_buckets: std::array::from_fn(|bucket| {
