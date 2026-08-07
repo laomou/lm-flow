@@ -92,7 +92,15 @@ pub(crate) fn render_plan(plan: &crate::config::GraphPlan) -> String {
                         if rule.default {
                             format!("\\n{}: default → {}", index + 1, rule.to)
                         } else {
-                            format!("\\n{}: condition → {}", index + 1, rule.to)
+                            format!(
+                                "\\n{}: {} → {}",
+                                index + 1,
+                                rule.when.as_ref().map_or_else(
+                                    || "condition".to_string(),
+                                    |predicate| predicate.summary()
+                                ),
+                                rule.to
+                            )
                         }
                     })
                     .collect::<String>()

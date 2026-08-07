@@ -23,6 +23,15 @@ pub enum RouteMode {
     All,
 }
 
+impl RouteMode {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::First => "first",
+            Self::All => "all",
+        }
+    }
+}
+
 impl RouteConfig {
     fn is_implicit_default(&self) -> bool {
         self.mode == RouteMode::First && self.unmatched == "drop" && self.routes.is_empty()
@@ -912,6 +921,59 @@ impl GraphPlan {
                 ),
             });
         }
+        for node in &self.nodes {
+            let Some(route) = &node.route else { continue };
+            if route.routes.iter().any(|rule| rule.default) && route.unmatched != "drop" {
+                diagnostics.push(GraphPlanDiagnostic {
+                    code: "route_unreachable_unmatched".into(),
+                    message: format!(
+                        "route node `{}` has a default rule, so unmatched policy `{}` is unreachable",
+                        node.name, route.unmatched
+                    ),
+                });
+            }
+            if route.mode == RouteMode::First {
+                for (index, rule) in route.routes.iter().enumerate() {
+                    if rule.default {
+                        continue;
+                    }
+                    if let Some(previous) = route.routes[..index]
+                        .iter()
+                        .position(|candidate| !candidate.default && candidate.when == rule.when)
+                    {
+                        diagnostics.push(GraphPlanDiagnostic {
+                            code: "route_shadowed_rule".into(),
+                            message: format!(
+                                "route node `{}` rule {} duplicates earlier rule {}; first mode makes it unreachable",
+                                node.name,
+                                index + 1,
+                                previous + 1
+                            ),
+                        });
+                    }
+                }
+            }
+            if route.mode == RouteMode::All {
+                for (index, rule) in route.routes.iter().enumerate() {
+                    if route.routes[..index].iter().any(|previous| {
+                        !rule.default
+                            && !previous.default
+                            && previous.to == rule.to
+                            && previous.when == rule.when
+                    }) {
+                        diagnostics.push(GraphPlanDiagnostic {
+                            code: "route_duplicate_emit".into(),
+                            message: format!(
+                                "route node `{}` rule {} duplicates an earlier rule and may emit the same packet twice to `{}`",
+                                node.name,
+                                index + 1,
+                                rule.to
+                            ),
+                        });
+                    }
+                }
+            }
+        }
         diagnostics
     }
 }
@@ -1302,6 +1364,58 @@ nodes:
                 .unwrap_err();
             assert!(error.to_string().contains(needle), "{error}");
         }
+    }
+
+    #[test]
+    fn diagnoses_shadowed_and_duplicate_route_rules() {
+        let first = GraphConfig::from_yaml(
+            r#"
+nodes:
+  - name: router
+    type: route
+    input_ports: [in]
+    output_ports: [a, b]
+    mode: first
+    unmatched: error
+    routes:
+      - { to: a, when: { metadata: score, op: gte, value: 0.5 } }
+      - { to: b, when: { metadata: score, op: gte, value: 0.5 } }
+      - { to: b, default: true }
+input_ports: [in]
+output_ports: [a, b]
+"#,
+        )
+        .and_then(GraphPlan::build)
+        .unwrap();
+        let codes: Vec<_> = first
+            .diagnostics()
+            .into_iter()
+            .map(|diagnostic| diagnostic.code)
+            .collect();
+        assert!(codes.contains(&"route_shadowed_rule".to_string()));
+        assert!(codes.contains(&"route_unreachable_unmatched".to_string()));
+
+        let all = GraphConfig::from_yaml(
+            r#"
+nodes:
+  - name: router
+    type: route
+    input_ports: [in]
+    output_ports: [out]
+    mode: all
+    routes:
+      - { to: out, when: { metadata: score, op: gte, value: 0.5 } }
+      - { to: out, when: { metadata: score, op: gte, value: 0.5 } }
+input_ports: [in]
+output_ports: [out]
+"#,
+        )
+        .and_then(GraphPlan::build)
+        .unwrap();
+        assert!(all
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.code == "route_duplicate_emit"));
     }
 
     #[test]

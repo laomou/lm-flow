@@ -291,6 +291,7 @@ impl GraphInner {
                 sc.opened = opened;
             }
             node.stats.reset();
+            node.kernel.reset_stats();
             for q in &node.input_queues {
                 q.lock().expect("queue lock poisoned").clear();
             }

@@ -845,6 +845,33 @@ impl GraphInner {
             } else {
                 format!("\\ncap {}", capacities.join(", "))
             };
+            if let Some(route) = n.kernel.route_stats() {
+                extra.push_str(&format!(
+                    "\\nroute {} · default {} · unmatched {} · drop {} · err {} · missing {} · evalerr {}",
+                    route.config.mode.as_str(),
+                    route.default_emitted,
+                    route.unmatched,
+                    route.dropped,
+                    route.errors,
+                    route.missing_metadata,
+                    route.evaluation_errors
+                ));
+                for (index, rule) in route.config.routes.iter().enumerate() {
+                    let (_, matched, emitted) = route.rules[index];
+                    let condition = rule
+                        .when
+                        .as_ref()
+                        .map_or_else(|| "default".to_string(), |predicate| predicate.summary());
+                    extra.push_str(&format!(
+                        "\\nrule {} [{}] → {}: match {} / emit {}",
+                        index + 1,
+                        condition,
+                        truncate_label(&rule.to, PORT_LABEL_CHARS),
+                        matched,
+                        emitted
+                    ));
+                }
+            }
             if with_stats {
                 let st = &n.stats;
                 let processed = st.processed.load(Ordering::Relaxed);
