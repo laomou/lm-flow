@@ -212,6 +212,32 @@ pub fn type_descriptor(id: u64) -> Option<TypeDescriptor> {
         .cloned()
 }
 
+/// Validate that a packet/contract type id belongs to the enabled type system.
+///
+/// `NONE` remains valid for dynamically typed ports and Rust-native packets. Built-in ids
+/// `1..=6` are always available. `HOST_OBJECT` and the remaining reserved ids are rejected, and
+/// custom ids must have a registered stable name and ABI layout.
+pub(crate) fn validate_type_id(id: u64) -> Result<()> {
+    match id {
+        type_id::NONE..=type_id::BUFFER => Ok(()),
+        type_id::HOST_OBJECT => Err(Error::InvalidArg(
+            "LMFLOW_TYPE_HOST_OBJECT is reserved and not enabled (see ADR #26); use \
+             LMFLOW_TYPE_BUFFER for numeric collections, or LMFLOW_TYPE_STR carrying JSON for \
+             arbitrary metadata"
+                .into(),
+        )),
+        8..=15 => Err(Error::InvalidArg(format!(
+            "type id {id} is reserved; built-in ids currently end at LMFLOW_TYPE_HOST_OBJECT \
+             (7), and custom type ids must be >= 16"
+        ))),
+        _ if type_descriptor(id).is_none() => Err(Error::InvalidArg(format!(
+            "unregistered custom type id {id}; register its stable name, size, and alignment \
+             with lmflow_register_type_descriptor before using it in a graph"
+        ))),
+        _ => Ok(()),
+    }
+}
+
 /// 类型标识的可读名字 —— 让「类型不符」的报错能指出是什么类型,而不是两个数字。
 pub fn type_name(id: u64) -> String {
     match id {
@@ -660,6 +686,28 @@ impl Packet {
             type_id >= 16,
             "custom interop type_id must be >= 16; built-in ids 0..=15 are reserved"
         );
+        let descriptor = type_descriptor(type_id).unwrap_or_else(|| {
+            panic!(
+                "custom interop type_id {type_id} is not registered; register its stable name, \
+                 size, and alignment before constructing a packet"
+            )
+        });
+        assert_eq!(
+            descriptor.size,
+            std::mem::size_of::<T>(),
+            "custom interop type `{}` size mismatch: registered {}, Rust value {}",
+            descriptor.name,
+            descriptor.size,
+            std::mem::size_of::<T>(),
+        );
+        assert_eq!(
+            descriptor.align,
+            std::mem::align_of::<T>(),
+            "custom interop type `{}` alignment mismatch: registered {}, Rust value {}",
+            descriptor.name,
+            descriptor.align,
+            std::mem::align_of::<T>(),
+        );
         let boxed = Box::new(value);
         let ptr = Box::into_raw(boxed) as *mut c_void;
         unsafe extern "C" fn drop_boxed<T>(p: *mut c_void) {
@@ -672,8 +720,7 @@ impl Packet {
                     ptr,
                     drop_fn: Some(drop_boxed::<T>),
                     type_id,
-                    byte_size: type_descriptor(type_id)
-                        .map_or(0, |descriptor| descriptor.size as u64),
+                    byte_size: descriptor.size as u64,
                 })),
                 metadata: Arc::new(Metadata::new()),
             })),
@@ -1188,7 +1235,9 @@ mod tests {
 
     #[test]
     fn interop_packet_carries_explicit_type_id() {
-        let tid = fnv1a_type_id("i");
+        let name = "lmflow.test.ExplicitI32";
+        let tid = fnv1a_type_id(name);
+        register_type_descriptor(tid, name, 4, 4).unwrap();
         let p = unsafe { Packet::new_interop(7i32, tid) };
         assert_eq!(p.type_id(), tid);
         // 以 Foreign 形态承载,故指针可读、C 布局兼容
@@ -1200,6 +1249,22 @@ mod tests {
     #[should_panic(expected = "built-in ids 0..=15 are reserved")]
     fn interop_packet_rejects_builtin_type_ids() {
         let _ = unsafe { Packet::new_interop(7i32, type_id::I64) };
+    }
+
+    #[test]
+    #[should_panic(expected = "is not registered")]
+    fn interop_packet_rejects_unregistered_custom_type() {
+        let id = fnv1a_type_id("lmflow.test.UnregisteredInterop");
+        let _ = unsafe { Packet::new_interop(7i32, id) };
+    }
+
+    #[test]
+    #[should_panic(expected = "size mismatch")]
+    fn interop_packet_rejects_registered_layout_mismatch() {
+        let name = "lmflow.test.LayoutMismatch";
+        let id = fnv1a_type_id(name);
+        register_type_descriptor(id, name, 16, 8).unwrap();
+        let _ = unsafe { Packet::new_interop(7u64, id) };
     }
 
     #[test]

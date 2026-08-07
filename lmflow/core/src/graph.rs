@@ -170,13 +170,11 @@ impl Graph {
                 "side packets must be injected before start".into(),
             ));
         }
-        if pkt.type_id() == crate::packet::type_id::HOST_OBJECT {
-            return Err(Error::InvalidArg(format!(
-                "side packet `{name}` carries LMFLOW_TYPE_HOST_OBJECT, which is reserved and \
-                 not enabled (see ADR #26); use LMFLOW_TYPE_BUFFER for numeric collections, \
-                 or LMFLOW_TYPE_STR carrying JSON for arbitrary metadata"
-            )));
-        }
+        crate::packet::validate_type_id(pkt.type_id()).map_err(|error| {
+            Error::InvalidArg(format!(
+                "side packet `{name}` carries an invalid type: {error}"
+            ))
+        })?;
         self.inner
             .side_packets
             .lock()

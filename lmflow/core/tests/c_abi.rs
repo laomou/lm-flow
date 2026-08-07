@@ -1565,7 +1565,18 @@ output_ports: ["out"]
         let input = lmflow_graph_input(g, pin.as_ptr());
         // type_id 与契约声明的 int 不符 → 引擎记录错误
         let mut bad = make_int_packet(1, 0);
-        bad.type_id = 999;
+        let custom_name = c"lmflow.test.LogMismatch";
+        let custom_type = lmflow_type_id(custom_name.as_ptr());
+        assert_eq!(
+            lmflow_register_type_descriptor(
+                custom_type,
+                custom_name.as_ptr(),
+                std::mem::size_of::<i32>(),
+                std::mem::align_of::<i32>(),
+            ),
+            0
+        );
+        bad.type_id = custom_type;
         let _ = lmflow_input_send(input, bad);
         let _ = lmflow_graph_wait_until_idle(g);
         assert!(

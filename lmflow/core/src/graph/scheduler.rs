@@ -863,19 +863,13 @@ impl GraphInner {
             }
             let got = pkt.type_id();
 
-            // `HOST_OBJECT` 预留未启用(ADR #26)。契约声明它已在建图期拒掉,但包**自己**
-            // 带 7 是另一条路(C 侧手填 type_id,或 Rust unsafe `from_foreign`)。这一条必须在
-            // `want == 0` 的短路**之前**判 —— 否则声明 `any` 的端口(最常见的情形)恰好
-            // 就是漏网的那种,而那正是要堵的洞。
-            if got == crate::packet::type_id::HOST_OBJECT {
-                return Err(Error::Kernel(format!(
-                    "[{}] input port `{}` carries LMFLOW_TYPE_HOST_OBJECT, which is reserved \
-                     and not enabled (see ADR #26); use LMFLOW_TYPE_BUFFER for numeric \
-                     collections, or LMFLOW_TYPE_STR carrying JSON for arbitrary metadata",
+            crate::packet::validate_type_id(got).map_err(|error| {
+                Error::Kernel(format!(
+                    "[{}] input port `{}` carries an invalid type: {error}",
                     node.name,
                     node.in_ports.name(port).unwrap_or("?"),
-                )));
-            }
+                ))
+            })?;
 
             if want == 0 {
                 continue; // 未声明类型 = 接受任意
@@ -932,15 +926,13 @@ impl GraphInner {
                     continue;
                 }
                 let got = pkt.type_id();
-                if got == crate::packet::type_id::HOST_OBJECT {
-                    return Err(Error::Kernel(format!(
-                        "[{}] output port `{}` carries LMFLOW_TYPE_HOST_OBJECT, which is reserved \
-                         and not enabled (see ADR #26); use LMFLOW_TYPE_BUFFER for numeric \
-                         collections, or LMFLOW_TYPE_STR carrying JSON for arbitrary metadata",
+                crate::packet::validate_type_id(got).map_err(|error| {
+                    Error::Kernel(format!(
+                        "[{}] output port `{}` carries an invalid type: {error}",
                         node.name,
                         node.out_ports.name(port).unwrap_or("?"),
-                    )));
-                }
+                    ))
+                })?;
                 if want != crate::packet::type_id::NONE && got != want {
                     return Err(Error::Kernel(format!(
                         "[{}] output port `{}` type mismatch: contract declares {}, actual {}",
