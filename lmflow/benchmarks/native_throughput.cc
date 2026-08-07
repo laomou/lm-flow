@@ -7,6 +7,7 @@
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 namespace {
 
@@ -73,9 +74,17 @@ struct OwnedPacket {
   ~OwnedPacket() { lmflow_packet_drop(&packet); }
 };
 
+struct Result {
+  std::string name;
+  std::size_t iterations;
+  std::size_t payload_bytes;
+  double packets_per_second;
+  double nanoseconds_per_packet;
+};
+
 template <typename MakePacket>
-void RunBenchmark(const char* name, std::size_t iterations, std::size_t payload_bytes,
-                  MakePacket make_packet, const char* kernel) {
+Result RunBenchmark(const char* name, std::size_t iterations, std::size_t payload_bytes,
+                    MakePacket make_packet, const char* kernel) {
   GraphRun run(kernel);
   const std::size_t warmup = iterations / 10 + 1;
   int64_t timestamp = 0;
@@ -93,61 +102,93 @@ void RunBenchmark(const char* name, std::size_t iterations, std::size_t payload_
   const double packets_per_second = static_cast<double>(iterations) / seconds;
   const double nanoseconds_per_packet = seconds * 1e9 / static_cast<double>(iterations);
 
-  std::cout << std::left << std::setw(34) << name << std::right << std::fixed
-            << std::setprecision(1) << std::setw(14) << packets_per_second << " pkt/s"
-            << std::setw(14) << nanoseconds_per_packet << " ns/pkt";
-  if (payload_bytes != 0) {
-    const double mib_per_second =
-        packets_per_second * static_cast<double>(payload_bytes) / (1024.0 * 1024.0);
-    std::cout << std::setw(12) << mib_per_second << " MiB/s";
-  }
-  std::cout << '\n';
+  return {name, iterations, payload_bytes, packets_per_second, nanoseconds_per_packet};
 }
 
 }  // namespace
 
 int main(int argc, char** argv) {
   try {
-    const std::size_t iterations =
-        argc > 1 ? static_cast<std::size_t>(std::stoull(argv[1])) : 10000;
-    RunBenchmark(
+    std::size_t iterations = 10000;
+    bool json = false;
+    for (int index = 1; index < argc; ++index) {
+      const std::string argument = argv[index];
+      if (argument == "--json") {
+        json = true;
+      } else {
+        iterations = static_cast<std::size_t>(std::stoull(argument));
+      }
+    }
+    std::vector<Result> results;
+    results.push_back(RunBenchmark(
         "c_api/pass_through/i64", iterations, sizeof(int64_t),
         [](int64_t timestamp) { return lmflow_packet_from_i64(0, timestamp); },
-        "PassThroughKernel");
+        "PassThroughKernel"));
 
     constexpr int64_t kLargeShape[] = {512, 512, 3};
     LMFlowBuffer large_view{};
     OwnedPacket large(lmflow_packet_new_buffer(3, kLargeShape, LMFLOW_DTYPE_U8, 0, &large_view));
-    RunBenchmark(
+    results.push_back(RunBenchmark(
         "c_api/pass_through/buffer_768k", iterations, 512 * 512 * 3,
         [&large](int64_t timestamp) {
           LMFlowPacket packet = lmflow_packet_clone(&large.packet);
           packet.timestamp = timestamp;
           return packet;
         },
-        "PassThroughKernel");
+        "PassThroughKernel"));
 
     constexpr int64_t kSmallShape[] = {16, 16};
     LMFlowBuffer small_view{};
     OwnedPacket small(lmflow_packet_new_buffer(2, kSmallShape, LMFLOW_DTYPE_U8, 0, &small_view));
-    RunBenchmark(
+    results.push_back(RunBenchmark(
         "c_api/invert/buffer_256b", iterations, 16 * 16,
         [&small](int64_t timestamp) {
           LMFlowPacket packet = lmflow_packet_clone(&small.packet);
           packet.timestamp = timestamp;
           return packet;
         },
-        "InvertKernel");
+        "InvertKernel"));
 
     const std::size_t large_iterations = iterations > 100 ? iterations / 100 : 1;
-    RunBenchmark(
+    results.push_back(RunBenchmark(
         "c_api/invert/buffer_768k", large_iterations, 512 * 512 * 3,
         [&large](int64_t timestamp) {
           LMFlowPacket packet = lmflow_packet_clone(&large.packet);
           packet.timestamp = timestamp;
           return packet;
         },
-        "InvertKernel");
+        "InvertKernel"));
+    if (json) {
+      std::cout << "{\"language\":\"cpp\",\"results\":[";
+      for (std::size_t index = 0; index < results.size(); ++index) {
+        if (index != 0) std::cout << ',';
+        const auto& result = results[index];
+        std::cout << "{\"name\":\"" << result.name << "\",\"iterations\":"
+                  << result.iterations << ",\"payload_bytes\":" << result.payload_bytes
+                  << ",\"packets_per_second\":" << result.packets_per_second
+                  << ",\"nanoseconds_per_packet\":" << result.nanoseconds_per_packet;
+        if (result.payload_bytes != 0) {
+          std::cout << ",\"mib_per_second\":"
+                    << result.packets_per_second * static_cast<double>(result.payload_bytes) /
+                           (1024.0 * 1024.0);
+        }
+        std::cout << '}';
+      }
+      std::cout << "]}\n";
+    } else {
+      for (const auto& result : results) {
+        std::cout << std::left << std::setw(34) << result.name << std::right << std::fixed
+                  << std::setprecision(1) << std::setw(14) << result.packets_per_second
+                  << " pkt/s" << std::setw(14) << result.nanoseconds_per_packet << " ns/pkt";
+        if (result.payload_bytes != 0) {
+          std::cout << std::setw(12)
+                    << result.packets_per_second * static_cast<double>(result.payload_bytes) /
+                           (1024.0 * 1024.0)
+                    << " MiB/s";
+        }
+        std::cout << '\n';
+      }
+    }
   } catch (const std::exception& error) {
     std::cerr << "benchmark failed: " << error.what() << '\n';
     return EXIT_FAILURE;
