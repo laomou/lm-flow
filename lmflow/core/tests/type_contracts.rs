@@ -150,6 +150,36 @@ fn get_contract_unregistered_custom_type_is_rejected() {
 }
 
 #[test]
+fn any_input_rejects_unregistered_custom_packet_at_runtime() {
+    register_test_kernels();
+    unsafe extern "C" fn drop_i64(pointer: *mut std::ffi::c_void) {
+        drop(unsafe { Box::from_raw(pointer as *mut i64) });
+    }
+    let graph = Graph::from_yaml(
+        r#"
+nodes:
+  - { name: dynamic, kernel: TypeTestAnyIdentity, input_ports: [in], output_ports: [out] }
+input_ports: [in]
+output_ports: [out]
+"#,
+    )
+    .unwrap();
+    graph.start().unwrap();
+    let pointer = Box::into_raw(Box::new(7i64)) as *mut std::ffi::c_void;
+    let packet =
+        unsafe { Packet::from_foreign(pointer, 0xdead_beef, Some(drop_i64)) }.at(Timestamp(0));
+    graph.input("in").unwrap().send(packet).unwrap();
+    graph.close_all_inputs();
+
+    let message = graph.wait_done().unwrap_err().to_string();
+    assert!(message.contains("unregistered custom type id"), "{message}");
+    assert!(
+        message.contains("dynamic") && message.contains("in"),
+        "{message}"
+    );
+}
+
+#[test]
 fn get_contract_duplicate_side_packet_is_rejected() {
     register_test_kernels();
     let error =
