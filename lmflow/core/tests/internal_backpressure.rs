@@ -255,6 +255,32 @@ input_ports: [in]
 }
 
 #[test]
+fn wait_done_reports_open_inputs_before_backpressure_stall() {
+    register_test_kernels();
+    let graph = Graph::from_yaml(
+        r#"
+nodes:
+  - { name: producer, kernel: PassThrough, input_ports: [in], output_ports: [mid] }
+  - { name: waiting_join, kernel: InternalBpJoinCount, input_ports: [mid, gate], output_ports: [], input_queues: { packets: 1 } }
+input_ports: [in, gate]
+"#,
+    )
+    .unwrap();
+    graph.start().unwrap();
+    let input = graph.input("in").unwrap();
+    input.send(Packet::from_i64(0).at(Timestamp(0))).unwrap();
+    input.send(Packet::from_i64(1).at(Timestamp(1))).unwrap();
+    let error = graph.wait_done().unwrap_err();
+    let message = error.to_string();
+    assert!(
+        message.contains("input ports [in, gate] still open"),
+        "{message}"
+    );
+    assert!(!message.contains("cannot make progress"), "{message}");
+    graph.cancel();
+}
+
+#[test]
 fn capacity_smaller_than_one_emitted_batch_fails_loudly() {
     register_test_kernels();
     let graph = Graph::from_yaml(

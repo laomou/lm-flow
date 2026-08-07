@@ -366,6 +366,22 @@ impl GraphInner {
             let before = self.activity_gen();
             if self.workers_idle() {
                 self.resume_blocked_flushes();
+                // An open graph input is the primary reason `wait_done` cannot finish. Report it
+                // before any blocked-flush diagnostic so callers do not mistake a normal producer
+                // pause for an impossible downstream deadlock.
+                let inputs_open: Vec<&str> = self
+                    .graph_inputs
+                    .iter()
+                    .filter(|&&e| !self.edges[e].is_closed())
+                    .map(|&e| self.edges[e].name.as_str())
+                    .collect();
+                if !inputs_open.is_empty() {
+                    return Err(Error::State(format!(
+                        "wait_done: graph input ports [{}] still open, the graph won't finish on its own -- \
+                         call close_input/close_all_inputs first",
+                        inputs_open.join(", ")
+                    )));
+                }
                 let blocked: Vec<NodeId> = self
                     .blocked_flush_nodes
                     .lock()
@@ -400,19 +416,6 @@ impl GraphInner {
                 }
                 // 推不动了。这时**不能返回 Ok** —— 图并没有跑完。
                 // 区分两种成因,给出可操作的报错而不是静默成功或永久挂住:
-                let inputs_open: Vec<&str> = self
-                    .graph_inputs
-                    .iter()
-                    .filter(|&&e| !self.edges[e].is_closed())
-                    .map(|&e| self.edges[e].name.as_str())
-                    .collect();
-                if !inputs_open.is_empty() {
-                    return Err(Error::State(format!(
-                        "wait_done: graph input ports [{}] still open, the graph won't finish on its own -- \
-                         call close_input/close_all_inputs first",
-                        inputs_open.join(", ")
-                    )));
-                }
                 match self.remaining(deadline) {
                     Some(duration) => self.wait_activity_since(before, duration),
                     None => return Err(Error::Timeout),
