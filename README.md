@@ -40,7 +40,7 @@ lm-flow/
 │   └── examples/              each example is self-contained: examples/<lang>/<name>/
 │       ├── cpp/               hello_world/, custom_type/  (find_package or build-from-source)
 │       ├── rust/              hello_world/  (a standalone cargo project)
-│       ├── python/            hello_world/, realtime_pipeline/, opencv_pipeline/
+│       ├── python/            hello_world/, async_pipeline/, realtime_pipeline/, opencv_pipeline/
 │       └── {android,ios,harmonyos}/hello_world/   mobile integration examples
 ├── third_party/pybind11/      vendored git submodule (only used to build the Python wheel)
 ├── cmake/                     engine.cmake · install-sdk.cmake · find_package config
@@ -271,6 +271,8 @@ HiLog). OpenCV interop is a separate opt-in component under `adapters/opencv`, e
 `<lmflow/opencv.hpp>` and the CMake target `lmflow::opencv`.
 
 Mobile integration examples: [`lmflow/examples/android/hello_world`](lmflow/examples/android/hello_world) (JNI), [`lmflow/examples/ios/hello_world`](lmflow/examples/ios/hello_world) (Swift), [`lmflow/examples/harmonyos/hello_world`](lmflow/examples/harmonyos/hello_world) (NAPI).
+
+The asyncio production host example is [`lmflow/examples/python/async_pipeline`](lmflow/examples/python/async_pipeline). It demonstrates event-loop wakeups, typed output events, timeout cancellation, and graceful cleanup.
 
 ## Performance benchmarks
 
