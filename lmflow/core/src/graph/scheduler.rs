@@ -13,7 +13,7 @@ impl GraphInner {
         }
     }
 
-    pub(super) fn send(&self, edge: EdgeId, pkt: Packet, blocking: bool) -> Result<()> {
+    pub(super) fn send(&self, edge: EdgeId, mut pkt: Packet, blocking: bool) -> Result<()> {
         match self.state() {
             State::Running => {}
             State::Draining | State::Terminated => return Err(Error::Closed),
@@ -78,6 +78,9 @@ impl GraphInner {
 
         // 时间戳单调性:图输入口强制校验(ADR #23)
         self.check_input_monotonic(edge, &pkt)?;
+        if self.full_stats() {
+            pkt.rebase_ingress_us(self.epoch_us());
+        }
 
         // 分发给该边的所有消费者(各自一份引用)与 poller/observer
         self.dispatch(edge, std::slice::from_ref(&pkt)); // 单包不必为它分配 Vec
@@ -109,6 +112,11 @@ impl GraphInner {
     /// 故取切片而非 `Vec` —— 让调用方保留缓冲的所有权与容量。
     pub(super) fn dispatch(&self, edge_id: EdgeId, packets: &[Packet]) {
         let edge = &self.edges[edge_id];
+        if edge.is_graph_output && self.full_stats() {
+            for pkt in packets {
+                self.record_e2e(pkt);
+            }
+        }
 
         // 订阅者(poller / observer)各自独立一份
         {
@@ -769,6 +777,9 @@ impl GraphInner {
 
     pub(super) fn complete_invocation(&self, n: NodeId, slot: usize, seq: u64, ok: bool) {
         let node = &self.nodes[n];
+        if self.full_stats() {
+            self.propagate_output_ingress(n, slot);
+        }
         // 算子回调已经返回，后续刷新只依赖 staging / next_bounds / input_ts。
         // 立即释放本次输入引用；否则本调用若因顺序刷新或内部背压暂存，已经投递到
         // 下游的同一 payload 仍会被上游 Context 持有，使下游 CoW 静默复制。
@@ -804,6 +815,38 @@ impl GraphInner {
             self.drive_invocation_flushes(n, first);
         }
         self.finish(n);
+    }
+
+    pub(super) fn propagate_output_ingress(&self, n: NodeId, slot: usize) {
+        let node = &self.nodes[n];
+        let ctx = unsafe { node.ctx_slot(slot) };
+        let mut ingress = ctx
+            .inputs
+            .iter()
+            .filter_map(|pkt| pkt.as_ref().map(Packet::ingress_us))
+            .filter(|value| *value != 0)
+            .min()
+            .unwrap_or(0);
+        if ingress == 0 {
+            ingress = self.epoch_us();
+        }
+        for batch in &ctx.input_batches {
+            for pkt in batch {
+                let value = pkt.ingress_us();
+                if value != 0 {
+                    ingress = if ingress == 0 {
+                        value
+                    } else {
+                        ingress.min(value)
+                    };
+                }
+            }
+        }
+        for packets in &ctx.staging {
+            for pkt in packets {
+                pkt.mark_ingress_us(ingress);
+            }
+        }
     }
 
     /// Source 的输出必须先按序刷新并释放槽，之后才能安排下一次延迟唤醒。

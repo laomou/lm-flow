@@ -307,6 +307,9 @@ fn dot_with_stats_annotates_and_keeps_structure() {
         stats.contains("in 3 (+3) / out 3 (+3)"),
         "应标出累计与区间收发包数"
     );
+    assert!(stats.contains("e2e p50 "), "应标出端到端延迟");
+    assert!(stats.contains("frames 3"), "端到端帧数应与输出一致");
+    assert!(!plain.contains("e2e p50 "), "拓扑图不应记录端到端延迟");
     assert!(stats.contains("ports:"), "节点内应包含端口摘要");
     assert!(stats.contains("snapshot +"), "标题应标出本轮快照时长");
     assert!(

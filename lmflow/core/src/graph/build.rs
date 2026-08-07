@@ -273,6 +273,7 @@ impl GraphInner {
             run_started_us: AtomicI64::new(0),
             dot_intervals: Mutex::new(super::dot::DotIntervalBaselines::default()),
             stats_level,
+            e2e_stats: super::node::E2eStats::default(),
         })
     }
 }

@@ -352,8 +352,13 @@ impl GraphInner {
                     }
                 },
             );
+            let e2e_label = if diagnostics && self.stats_level == StatsLevel::Full {
+                format_e2e_label(interval.as_ref().expect("statistics interval exists").e2e())
+            } else {
+                String::new()
+            };
             out.push_str(&format!(
-                "  graph [labelloc=t, label=\"state {:?} · stats {} · {} · {} · queued {}/{} packets\\n{}\\n{}\"];\n",
+                "  graph [labelloc=t, label=\"state {:?} · stats {} · {} · {} · queued {}/{} packets\\n{}\\n{}{}\"];\n",
                 self.state(),
                 self.stats_level.as_str(),
                 snapshot,
@@ -365,6 +370,11 @@ impl GraphInner {
                     .as_ref()
                     .expect("statistics analysis exists")
                     .summary(),
+                if e2e_label.is_empty() {
+                    String::new()
+                } else {
+                    format!("\\n{e2e_label}")
+                },
             ));
         }
 
@@ -1244,6 +1254,25 @@ impl GraphInner {
     }
 }
 
+fn format_e2e_label(e2e: DotE2eCounters) -> String {
+    match (
+        latency_percentile_us(&e2e.latency_buckets, 50),
+        latency_percentile_us(&e2e.latency_buckets, 95),
+        latency_percentile_us(&e2e.latency_buckets, 99),
+    ) {
+        (Some(p50), Some(p95), Some(p99)) if e2e.frames > 0 => format!(
+            "e2e p50 {} · p95 {} · p99 {} · mean {} · max {} · frames {}",
+            duration_us(p50),
+            duration_us(p95),
+            duration_us(p99),
+            duration_us(e2e.total_us.checked_div(e2e.frames).unwrap_or(0)),
+            duration_us(e2e.max_us),
+            e2e.frames,
+        ),
+        _ => "e2e n/a".to_string(),
+    }
+}
+
 #[cfg(test)]
 mod percentile_tests {
     use super::*;
@@ -1259,5 +1288,18 @@ mod percentile_tests {
         assert_eq!(latency_percentile_us(&buckets, 95), Some(1024));
         assert_eq!(latency_percentile_us(&buckets, 99), Some(1024));
         assert_eq!(latency_percentile_us(&[0; LATENCY_BUCKETS], 99), None);
+    }
+
+    #[test]
+    fn e2e_label_tolerates_incomplete_concurrent_snapshot() {
+        assert_eq!(
+            format_e2e_label(DotE2eCounters {
+                frames: 1,
+                total_us: 10,
+                max_us: 10,
+                latency_buckets: [0; LATENCY_BUCKETS],
+            }),
+            "e2e n/a"
+        );
     }
 }

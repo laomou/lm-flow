@@ -14,6 +14,7 @@ use std::any::Any;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::ffi::{c_void, CString};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::Arc;
 
 use crate::metadata::{Metadata, MetadataValue};
@@ -602,10 +603,33 @@ impl std::fmt::Debug for Payload {
 /// data**. Mutation goes through copy-on-write, which is only actually copy-free while this is the
 /// sole reference — which is why a kernel should
 /// [`take_input`](crate::KernelCtx::take_input) rather than borrow when it intends to modify.
-#[derive(Clone)]
 pub(crate) struct PacketBody {
     pub payload: Arc<Payload>,
     pub metadata: Arc<Metadata>,
+    pub(crate) ingress_us: AtomicI64,
+    pub(crate) e2e_observed: AtomicBool,
+}
+
+impl Clone for PacketBody {
+    fn clone(&self) -> Self {
+        Self {
+            payload: self.payload.clone(),
+            metadata: self.metadata.clone(),
+            ingress_us: AtomicI64::new(self.ingress_us.load(Ordering::Relaxed)),
+            e2e_observed: AtomicBool::new(self.e2e_observed.load(Ordering::Relaxed)),
+        }
+    }
+}
+
+impl PacketBody {
+    fn new(payload: Payload, metadata: Metadata) -> Self {
+        Self {
+            payload: Arc::new(payload),
+            metadata: Arc::new(metadata),
+            ingress_us: AtomicI64::new(0),
+            e2e_observed: AtomicBool::new(false),
+        }
+    }
 }
 
 static EMPTY_METADATA: std::sync::LazyLock<Metadata> = std::sync::LazyLock::new(Metadata::new);
@@ -617,6 +641,43 @@ pub struct Packet {
 }
 
 impl Packet {
+    pub(crate) fn mark_ingress_us(&self, now_us: i64) {
+        if let Some(body) = self.data.as_deref() {
+            let _ = body.ingress_us.compare_exchange(
+                0,
+                now_us.max(1),
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            );
+        }
+    }
+
+    pub(crate) fn rebase_ingress_us(&mut self, now_us: i64) {
+        let Some(body) = self.data.as_deref() else {
+            return;
+        };
+        self.data = Some(Arc::new(PacketBody {
+            payload: body.payload.clone(),
+            metadata: body.metadata.clone(),
+            ingress_us: AtomicI64::new(now_us.max(1)),
+            e2e_observed: AtomicBool::new(false),
+        }));
+    }
+
+    pub(crate) fn ingress_us(&self) -> i64 {
+        self.data
+            .as_deref()
+            .map_or(0, |body| body.ingress_us.load(Ordering::Relaxed))
+    }
+
+    pub(crate) fn mark_e2e_observed(&self) -> bool {
+        self.data.as_deref().is_some_and(|body| {
+            body.e2e_observed
+                .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+        })
+    }
+
     /// 空包:只带时间戳,用于时间戳边界推进与关流。
     pub fn empty() -> Self {
         Self::default()
@@ -645,10 +706,10 @@ impl Packet {
     /// mismatch, which is strictly worse than the current loud one.
     pub fn new<T: Any + Send + Sync>(value: T) -> Self {
         Self {
-            data: Some(Arc::new(PacketBody {
-                payload: Arc::new(Payload::Native(Box::new(value))),
-                metadata: Arc::new(Metadata::new()),
-            })),
+            data: Some(Arc::new(PacketBody::new(
+                Payload::Native(Box::new(value)),
+                Metadata::new(),
+            ))),
             ts: Timestamp::unset(),
         }
     }
@@ -715,15 +776,15 @@ impl Packet {
             drop(unsafe { Box::from_raw(p as *mut T) });
         }
         Self {
-            data: Some(Arc::new(PacketBody {
-                payload: Arc::new(Payload::Foreign(Foreign {
+            data: Some(Arc::new(PacketBody::new(
+                Payload::Foreign(Foreign {
                     ptr,
                     drop_fn: Some(drop_boxed::<T>),
                     type_id,
                     byte_size: descriptor.size as u64,
-                })),
-                metadata: Arc::new(Metadata::new()),
-            })),
+                }),
+                Metadata::new(),
+            ))),
             ts: Timestamp::unset(),
         }
     }
@@ -768,10 +829,10 @@ impl Packet {
 
     pub fn from_builtin(b: Builtin) -> Self {
         Self {
-            data: Some(Arc::new(PacketBody {
-                payload: Arc::new(Payload::Builtin(b)),
-                metadata: Arc::new(Metadata::new()),
-            })),
+            data: Some(Arc::new(PacketBody::new(
+                Payload::Builtin(b),
+                Metadata::new(),
+            ))),
             ts: Timestamp::unset(),
         }
     }
@@ -782,10 +843,10 @@ impl Packet {
     /// 描述的全部地址在 Packet 生命周期内必须有效，且 release_fn 可跨线程调用一次。
     pub(crate) unsafe fn from_external_buffer(buffer: ExternalBuffer) -> Self {
         Self {
-            data: Some(Arc::new(PacketBody {
-                payload: Arc::new(Payload::Native(Box::new(buffer))),
-                metadata: Arc::new(Metadata::new()),
-            })),
+            data: Some(Arc::new(PacketBody::new(
+                Payload::Native(Box::new(buffer)),
+                Metadata::new(),
+            ))),
             ts: Timestamp::unset(),
         }
     }
@@ -800,16 +861,16 @@ impl Packet {
         drop_fn: Option<unsafe extern "C" fn(*mut c_void)>,
     ) -> Self {
         Self {
-            data: Some(Arc::new(PacketBody {
-                payload: Arc::new(Payload::Foreign(Foreign {
+            data: Some(Arc::new(PacketBody::new(
+                Payload::Foreign(Foreign {
                     ptr,
                     drop_fn,
                     type_id,
                     byte_size: type_descriptor(type_id)
                         .map_or(0, |descriptor| descriptor.size as u64),
-                })),
-                metadata: Arc::new(Metadata::new()),
-            })),
+                }),
+                Metadata::new(),
+            ))),
             ts: Timestamp::unset(),
         }
     }

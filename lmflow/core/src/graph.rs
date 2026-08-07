@@ -107,6 +107,7 @@ pub struct GraphInner {
     dot_intervals: Mutex<dot::DotIntervalBaselines>,
     /// 建图时确定，运行期间不变，故无需原子。
     stats_level: StatsLevel,
+    e2e_stats: E2eStats,
 }
 
 impl GraphInner {
@@ -118,6 +119,19 @@ impl GraphInner {
     #[inline]
     fn full_stats(&self) -> bool {
         self.stats_level == StatsLevel::Full
+    }
+
+    #[inline]
+    pub(super) fn record_e2e(&self, pkt: &Packet) {
+        if !self.full_stats() || !pkt.mark_e2e_observed() {
+            return;
+        }
+        let ingress = pkt.ingress_us();
+        if ingress == 0 {
+            return;
+        }
+        self.e2e_stats
+            .record(self.epoch_us().saturating_sub(ingress).max(0) as u64);
     }
 }
 
