@@ -24,7 +24,7 @@ pub(super) struct DotPressureCounters {
 pub(super) struct DotE2eCounters {
     pub(super) frames: u64,
     pub(super) total_us: u64,
-    pub(super) max_us: u64,
+    pub(super) all_time_max_us: u64,
     pub(super) latency_buckets: [u64; LATENCY_BUCKETS],
 }
 
@@ -59,7 +59,7 @@ impl DotInterval {
         DotE2eCounters {
             frames: current.frames.saturating_sub(previous.frames),
             total_us: current.total_us.saturating_sub(previous.total_us),
-            max_us: current.max_us,
+            all_time_max_us: current.all_time_max_us,
             latency_buckets: std::array::from_fn(|bucket| {
                 current.latency_buckets[bucket].saturating_sub(previous.latency_buckets[bucket])
             }),
@@ -140,7 +140,7 @@ impl GraphInner {
         let e2e = DotE2eCounters {
             frames: self.e2e_stats.frames.load(Ordering::Acquire),
             total_us: self.e2e_stats.total_us.load(Ordering::Relaxed),
-            max_us: self.e2e_stats.max_us.load(Ordering::Relaxed),
+            all_time_max_us: self.e2e_stats.max_us.load(Ordering::Relaxed),
             latency_buckets: std::array::from_fn(|bucket| {
                 self.e2e_stats.buckets[bucket].load(Ordering::Relaxed)
             }),
