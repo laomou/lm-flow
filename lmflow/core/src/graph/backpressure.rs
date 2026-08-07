@@ -365,10 +365,15 @@ impl GraphInner {
                     ctx.next_bounds[i].take(),
                 )
             };
-            self.flush_one(n, edge, &packets, explicit_bound, input_ts);
+            let dispatched = self.flush_one(n, edge, &packets, explicit_bound, input_ts);
             // 归还缓冲:清空后放回 staging,容量得以复用 —— 否则下次产出要重新分配。
+            // 必须先清掉 producer 的引用再唤醒消费者；线程池 worker 否则可能在这里
+            // 抢先执行下游 make_mutable，看见 staging 仍持有同一 payload 而触发 CoW。
             packets.clear();
             unsafe { node.ctx_slot(slot) }.staging[i] = packets;
+            if dispatched {
+                self.schedule_consumers(edge);
+            }
         }
         self.release_internal_reservations(&reservations);
         // 真正入队后 reservation 已转化为 queue len / bytes；此刻重试其它被挡住的刷新。
@@ -563,7 +568,7 @@ impl GraphInner {
         packets: &[Packet],
         explicit_bound: Option<Timestamp>,
         input_ts: Timestamp,
-    ) {
+    ) -> bool {
         if !packets.is_empty() {
             if self.basic_stats() {
                 self.nodes[n]
@@ -572,8 +577,7 @@ impl GraphInner {
                     .fetch_add(packets.len() as u64, Ordering::Relaxed);
             }
             self.dispatch(edge, packets);
-            self.schedule_consumers(edge);
-            return;
+            return true;
         }
         // **没有产出时也必须推进下游边界**,否则下游会永远等这一路。
         // 这是自动的:算子不显式调 SetNextTimestampBound 也不会卡住管线
@@ -581,8 +585,9 @@ impl GraphInner {
         let bound = match explicit_bound {
             Some(b) => b,
             None if input_ts.is_allowed_in_stream() => input_ts.next_allowed_in_stream(),
-            None => return,
+            None => return false,
         };
         self.propagate_bound(edge, bound);
+        false
     }
 }

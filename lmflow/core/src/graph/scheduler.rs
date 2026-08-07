@@ -769,6 +769,10 @@ impl GraphInner {
 
     pub(super) fn complete_invocation(&self, n: NodeId, slot: usize, seq: u64, ok: bool) {
         let node = &self.nodes[n];
+        // 算子回调已经返回，后续刷新只依赖 staging / next_bounds / input_ts。
+        // 立即释放本次输入引用；否则本调用若因顺序刷新或内部背压暂存，已经投递到
+        // 下游的同一 payload 仍会被上游 Context 持有，使下游 CoW 静默复制。
+        unsafe { node.ctx_slot(slot) }.clear_inputs();
         // 登记结果;当前无人刷新则由本线程担任刷新者。
         //
         // **快路**:重排缓冲为空、本次恰好就是待刷新序号、且当前无人刷新 —— 直接接手,

@@ -135,6 +135,61 @@ fn run_chain_of(yaml: &str, n: i64) -> Graph {
     g
 }
 
+#[derive(Default)]
+struct ThreadPoolCowMutator;
+
+impl Kernel for ThreadPoolCowMutator {
+    fn get_contract(contract: &mut lmflow::KernelContract) {
+        contract.input_any(0);
+        contract.output_any(0);
+    }
+
+    fn process(&mut self, context: &mut KernelCtx) -> lmflow::Result<()> {
+        let mut packet = context.take_input(0);
+        packet.make_mutable_builtin()?;
+        context.emit(0, packet)
+    }
+}
+
+#[test]
+fn thread_pool_linear_cow_releases_upstream_references_before_wakeup() {
+    lmflow::register_kernel::<ThreadPoolCowMutator>("ThreadPoolCowMutator").unwrap();
+    let graph = common::graph_from_yaml(
+        r#"
+stats: full
+executors:
+  - { name: pool, type: ThreadPoolExecutor, num_threads: 4 }
+nodes:
+  - { name: pass, kernel: PassThrough, executor: pool, input_ports: [in], output_ports: [mid] }
+  - { name: mutate, kernel: ThreadPoolCowMutator, executor: pool, input_ports: [mid], output_ports: [out] }
+input_ports: [in]
+output_ports: [out]
+"#,
+    )
+    .unwrap();
+    let poller = graph.add_poller("out").unwrap();
+    graph.start().unwrap();
+    let input = graph.input("in").unwrap();
+    for ts in 0..128 {
+        input.send(Packet::from_i64(ts).at(Timestamp(ts))).unwrap();
+    }
+    graph.close_all_inputs();
+    let mut received = 0;
+    while received < 128 {
+        if poller.next().is_none() {
+            break;
+        }
+        received += 1;
+    }
+    graph.wait_done_timeout(Duration::from_secs(5)).unwrap();
+    assert_eq!(received, 128);
+    let dot = graph.to_dot_with_stats();
+    assert!(
+        dot.contains("mutate") && dot.contains("CoW 0 copies"),
+        "linear thread-pool pipeline copied despite exclusive ownership:\n{dot}"
+    );
+}
+
 #[test]
 fn counts_packets_in_and_out() {
     let g = run_chain(6);
