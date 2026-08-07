@@ -14,6 +14,7 @@ lower-noise Rust Criterion or native C API benchmarks.
 from __future__ import annotations
 
 import argparse
+import json
 import time
 
 import numpy as np
@@ -33,7 +34,7 @@ output_ports: [out]
 """
 
 
-def benchmark(name: str, kernel: str, value: object, iterations: int) -> None:
+def benchmark(name: str, kernel: str, value: object, iterations: int) -> dict[str, object]:
     with lmflow.Graph.from_yaml(graph_yaml(kernel)) as graph:
         output = graph.add_poller("out")
         input_port = graph.input("in")
@@ -52,34 +53,50 @@ def benchmark(name: str, kernel: str, value: object, iterations: int) -> None:
 
     packets_per_second = iterations * 1e9 / elapsed_ns
     nanoseconds_per_packet = elapsed_ns / iterations
-    print(
-        f"{name:<38}{packets_per_second:>14.1f} pkt/s"
-        f"{nanoseconds_per_packet:>14.1f} ns/pkt"
-    )
+    payload_bytes = int(value.nbytes) if isinstance(value, np.ndarray) else 0
+    result: dict[str, object] = {
+        "name": name,
+        "iterations": iterations,
+        "payload_bytes": payload_bytes,
+        "packets_per_second": packets_per_second,
+        "nanoseconds_per_packet": nanoseconds_per_packet,
+    }
+    if payload_bytes:
+        result["mib_per_second"] = packets_per_second * payload_bytes / (1024 * 1024)
+    return result
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--iterations", type=int, default=5_000)
+    parser.add_argument("--json", action="store_true", help="emit one machine-readable JSON document")
     args = parser.parse_args()
     if args.iterations < 1:
         parser.error("--iterations must be positive")
 
-    benchmark("python/pass_through/i64", "PassThroughKernel", 0, args.iterations)
+    results = [benchmark("python/pass_through/i64", "PassThroughKernel", 0, args.iterations)]
 
     large = np.zeros((512, 512, 3), dtype=np.uint8)
-    benchmark(
+    results.append(benchmark(
         "python/pass_through/numpy_768k",
         "PassThroughKernel",
         large,
         max(1, args.iterations // 100),
-    )
-    benchmark(
+    ))
+    results.append(benchmark(
         "python/invert/numpy_768k",
         "InvertKernel",
         large,
         max(1, args.iterations // 100),
-    )
+    ))
+    if args.json:
+        print(json.dumps({"language": "python", "results": results}, separators=(",", ":")))
+    else:
+        for result in results:
+            print(
+                f"{result['name']:<38}{result['packets_per_second']:>14.1f} pkt/s"
+                f"{result['nanoseconds_per_packet']:>14.1f} ns/pkt"
+            )
 
 
 if __name__ == "__main__":
