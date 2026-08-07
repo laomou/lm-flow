@@ -25,6 +25,7 @@ use crate::runtime::{self, GraphShared};
 use crate::status::{Error, Result};
 use crate::timestamp::Timestamp;
 
+mod api;
 mod backpressure;
 mod build;
 mod dot;
