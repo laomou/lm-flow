@@ -826,19 +826,12 @@ impl GraphInner {
             .filter_map(|pkt| pkt.as_ref().map(Packet::ingress_us))
             .filter(|value| *value != 0)
             .min()
-            .unwrap_or(0);
-        if ingress == 0 {
-            ingress = self.epoch_us();
-        }
+            .unwrap_or_else(|| self.epoch_us());
         for batch in &ctx.input_batches {
             for pkt in batch {
                 let value = pkt.ingress_us();
                 if value != 0 {
-                    ingress = if ingress == 0 {
-                        value
-                    } else {
-                        ingress.min(value)
-                    };
+                    ingress = ingress.min(value);
                 }
             }
         }
