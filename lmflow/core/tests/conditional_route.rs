@@ -91,3 +91,50 @@ fn unmatched_port_receives_packet() {
     graph.wait_done().unwrap();
     assert_eq!(other.next().and_then(|packet| packet.as_i64()), Some(3));
 }
+
+#[test]
+fn diagnostic_dot_reports_route_hits_and_missing_metadata() {
+    let graph = route_graph("all");
+    graph.start().unwrap();
+    graph
+        .input("input")
+        .unwrap()
+        .send(
+            Packet::from_i64(9)
+                .at(Timestamp(12))
+                .with_metadata("confidence", 0.9),
+        )
+        .unwrap();
+    graph.close_all_inputs();
+    graph.wait_done().unwrap();
+
+    let dot = graph.to_dot_with_view(lmflow::DotView::Diagnostics);
+    assert!(dot.contains("route all"), "{dot}");
+    assert!(dot.contains("confidence gte 0.8"), "{dot}");
+    assert!(dot.contains("match 1 / emit 1"), "{dot}");
+    assert!(dot.contains("missing 1"), "{dot}");
+}
+
+#[test]
+fn reset_clears_route_statistics() {
+    let graph = route_graph("first");
+    graph.start().unwrap();
+    graph
+        .input("input")
+        .unwrap()
+        .send(
+            Packet::from_i64(9)
+                .at(Timestamp(12))
+                .with_metadata("confidence", 0.9),
+        )
+        .unwrap();
+    graph.close_all_inputs();
+    graph.wait_done().unwrap();
+    assert!(graph
+        .to_dot_with_view(lmflow::DotView::Diagnostics)
+        .contains("match 1"));
+
+    graph.reset().unwrap();
+    let dot = graph.to_dot_with_view(lmflow::DotView::Diagnostics);
+    assert!(dot.contains("match 0 / emit 0"), "{dot}");
+}

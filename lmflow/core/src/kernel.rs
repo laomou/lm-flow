@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::ffi::c_void;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{LazyLock, Mutex};
 
 use crate::config::{parse_port_spec, RouteConfig, RouteMode};
@@ -129,7 +130,36 @@ pub struct KernelInstance {
     vtable: KernelVTable,
     kernel_name: String,
     language: KernelLanguage,
-    internal: Option<RouteConfig>,
+    internal: Option<RouteRuntime>,
+}
+
+struct RouteRuleStats {
+    evaluated: AtomicU64,
+    matched: AtomicU64,
+    emitted: AtomicU64,
+}
+
+struct RouteRuntime {
+    config: RouteConfig,
+    rules: Vec<RouteRuleStats>,
+    default_emitted: AtomicU64,
+    unmatched: AtomicU64,
+    dropped: AtomicU64,
+    errors: AtomicU64,
+    missing_metadata: AtomicU64,
+    evaluation_errors: AtomicU64,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct RouteStatsSnapshot {
+    pub config: RouteConfig,
+    pub rules: Vec<(u64, u64, u64)>,
+    pub default_emitted: u64,
+    pub unmatched: u64,
+    pub dropped: u64,
+    pub errors: u64,
+    pub missing_metadata: u64,
+    pub evaluation_errors: u64,
 }
 
 // 安全性:self_ptr 指向算子实例,由「节点独占令牌」保证任一时刻只被单线程访问
@@ -155,6 +185,15 @@ impl KernelInstance {
     }
 
     pub fn create_route(config: RouteConfig) -> Self {
+        let rules = config
+            .routes
+            .iter()
+            .map(|_| RouteRuleStats {
+                evaluated: AtomicU64::new(0),
+                matched: AtomicU64::new(0),
+                emitted: AtomicU64::new(0),
+            })
+            .collect();
         Self {
             self_ptr: std::ptr::null_mut(),
             vtable: KernelVTable {
@@ -167,8 +206,56 @@ impl KernelInstance {
             },
             kernel_name: "__lmflow.route".into(),
             language: KernelLanguage::Rust,
-            internal: Some(config),
+            internal: Some(RouteRuntime {
+                config,
+                rules,
+                default_emitted: AtomicU64::new(0),
+                unmatched: AtomicU64::new(0),
+                dropped: AtomicU64::new(0),
+                errors: AtomicU64::new(0),
+                missing_metadata: AtomicU64::new(0),
+                evaluation_errors: AtomicU64::new(0),
+            }),
         }
+    }
+
+    pub(crate) fn route_stats(&self) -> Option<RouteStatsSnapshot> {
+        let route = self.internal.as_ref()?;
+        Some(RouteStatsSnapshot {
+            config: route.config.clone(),
+            rules: route
+                .rules
+                .iter()
+                .map(|stats| {
+                    (
+                        stats.evaluated.load(Ordering::Relaxed),
+                        stats.matched.load(Ordering::Relaxed),
+                        stats.emitted.load(Ordering::Relaxed),
+                    )
+                })
+                .collect(),
+            default_emitted: route.default_emitted.load(Ordering::Relaxed),
+            unmatched: route.unmatched.load(Ordering::Relaxed),
+            dropped: route.dropped.load(Ordering::Relaxed),
+            errors: route.errors.load(Ordering::Relaxed),
+            missing_metadata: route.missing_metadata.load(Ordering::Relaxed),
+            evaluation_errors: route.evaluation_errors.load(Ordering::Relaxed),
+        })
+    }
+
+    pub(crate) fn reset_stats(&self) {
+        let Some(route) = &self.internal else { return };
+        for stats in &route.rules {
+            stats.evaluated.store(0, Ordering::Relaxed);
+            stats.matched.store(0, Ordering::Relaxed);
+            stats.emitted.store(0, Ordering::Relaxed);
+        }
+        route.default_emitted.store(0, Ordering::Relaxed);
+        route.unmatched.store(0, Ordering::Relaxed);
+        route.dropped.store(0, Ordering::Relaxed);
+        route.errors.store(0, Ordering::Relaxed);
+        route.missing_metadata.store(0, Ordering::Relaxed);
+        route.evaluation_errors.store(0, Ordering::Relaxed);
     }
 
     pub fn kernel_name(&self) -> &str {
@@ -233,26 +320,39 @@ impl KernelInstance {
     }
 }
 
-fn route_process(route: &RouteConfig, context: &mut Context) -> Result<()> {
+fn route_process(route: &RouteRuntime, context: &mut Context) -> Result<()> {
     let packet = context.input(0).cloned().unwrap_or_default();
     let mut matched = false;
     let mut default_output = None;
-    for rule in &route.routes {
+    for (index, rule) in route.config.routes.iter().enumerate() {
         if rule.default {
             default_output = Some(rule.to.as_str());
             continue;
         }
-        let hit = rule
+        route.rules[index].evaluated.fetch_add(1, Ordering::Relaxed);
+        let predicate = rule
             .when
             .as_ref()
-            .ok_or_else(|| Error::InvalidArg("route rule missing condition".into()))?
-            .evaluate(packet.metadata(), packet.timestamp())?;
+            .ok_or_else(|| Error::InvalidArg("route rule missing condition".into()))?;
+        route.missing_metadata.fetch_add(
+            predicate.missing_metadata_count(packet.metadata()),
+            Ordering::Relaxed,
+        );
+        let hit = match predicate.evaluate(packet.metadata(), packet.timestamp()) {
+            Ok(hit) => hit,
+            Err(error) => {
+                route.evaluation_errors.fetch_add(1, Ordering::Relaxed);
+                return Err(error);
+            }
+        };
         if hit {
+            route.rules[index].matched.fetch_add(1, Ordering::Relaxed);
             let out = context
                 .out_ports
                 .index_by_name(&rule.to)
                 .ok_or_else(|| Error::InvalidArg(format!("unknown route output `{}`", rule.to)))?;
             context.emit(out, packet.clone())?;
+            route.rules[index].emitted.fetch_add(1, Ordering::Relaxed);
             context.shared.counter_add(
                 &format!("route.{}.matched.{}", context.node_name, rule.to),
                 1,
@@ -262,7 +362,7 @@ fn route_process(route: &RouteConfig, context: &mut Context) -> Result<()> {
                 1,
             );
             matched = true;
-            if route.mode == RouteMode::First {
+            if route.config.mode == RouteMode::First {
                 break;
             }
         }
@@ -273,16 +373,23 @@ fn route_process(route: &RouteConfig, context: &mut Context) -> Result<()> {
                 .out_ports
                 .index_by_name(port)
                 .ok_or_else(|| Error::InvalidArg(format!("unknown default output `{port}`")))?;
-            return context.emit(out, packet);
+            context.emit(out, packet)?;
+            route.default_emitted.fetch_add(1, Ordering::Relaxed);
+            return Ok(());
         }
-        match route.unmatched.as_str() {
+        route.unmatched.fetch_add(1, Ordering::Relaxed);
+        match route.config.unmatched.as_str() {
             "drop" => {
+                route.dropped.fetch_add(1, Ordering::Relaxed);
                 context
                     .shared
                     .counter_add(&format!("route.{}.dropped", context.node_name), 1);
                 Ok(())
             }
-            "error" => Err(Error::Kernel("route packet did not match any rule".into())),
+            "error" => {
+                route.errors.fetch_add(1, Ordering::Relaxed);
+                Err(Error::Kernel("route packet did not match any rule".into()))
+            }
             port => {
                 let out = context.out_ports.index_by_name(port).ok_or_else(|| {
                     Error::InvalidArg(format!("unknown unmatched output `{port}`"))

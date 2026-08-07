@@ -87,6 +87,50 @@ pub enum MetadataPredicate {
 }
 
 impl MetadataPredicate {
+    pub fn summary(&self) -> String {
+        match self {
+            Self::All { all } => format!(
+                "all({})",
+                all.iter().map(Self::summary).collect::<Vec<_>>().join(", ")
+            ),
+            Self::Any { any } => format!(
+                "any({})",
+                any.iter().map(Self::summary).collect::<Vec<_>>().join(", ")
+            ),
+            Self::Not { not } => format!("not({})", not.summary()),
+            Self::Timestamp { timestamp } => format!(
+                "timestamp {} {}",
+                op_name(timestamp.op),
+                timestamp
+                    .value
+                    .map_or_else(|| "?".into(), |value| value.to_string())
+            ),
+            Self::Metadata(condition) => {
+                let value = condition
+                    .value
+                    .as_ref()
+                    .map_or_else(String::new, |value| format!(" {}", value_summary(value)));
+                format!("{} {}{}", condition.metadata, op_name(condition.op), value)
+            }
+        }
+    }
+
+    pub(crate) fn missing_metadata_count(&self, metadata: &Metadata) -> u64 {
+        match self {
+            Self::All { all } => all
+                .iter()
+                .map(|predicate| predicate.missing_metadata_count(metadata))
+                .sum(),
+            Self::Any { any } => any
+                .iter()
+                .map(|predicate| predicate.missing_metadata_count(metadata))
+                .sum(),
+            Self::Not { not } => not.missing_metadata_count(metadata),
+            Self::Timestamp { .. } => 0,
+            Self::Metadata(condition) => u64::from(!metadata.contains_key(&condition.metadata)),
+        }
+    }
+
     pub fn validate(&self) -> Result<()> {
         match self {
             Self::All { all } => validate_group("all", all),
@@ -269,6 +313,15 @@ fn op_name(op: ComparisonOp) -> &'static str {
         ComparisonOp::Lte => "lte",
         ComparisonOp::Exists => "exists",
         ComparisonOp::Contains => "contains",
+    }
+}
+
+fn value_summary(value: &MetadataValue) -> String {
+    match value {
+        MetadataValue::Bool(value) => value.to_string(),
+        MetadataValue::I64(value) => value.to_string(),
+        MetadataValue::F64(value) => value.to_string(),
+        MetadataValue::String(value) => format!("\"{value}\""),
     }
 }
 

@@ -153,3 +153,37 @@ output_ports: []
     assert!(codes.contains(&"unused_executor"));
     std::fs::remove_file(path).unwrap();
 }
+
+#[test]
+fn route_json_and_dot_share_condition_summary() {
+    let path = write_config(
+        r#"
+nodes:
+  - name: router
+    type: route
+    input_ports: [in]
+    output_ports: [high, low]
+    routes:
+      - { to: high, when: { metadata: confidence, op: gte, value: 0.8 } }
+      - { to: low, default: true }
+input_ports: [in]
+output_ports: [high, low]
+"#,
+    );
+    let json_output = Command::new(env!("CARGO_BIN_EXE_lmflow"))
+        .args(["check-config", path.to_str().unwrap(), "--json"])
+        .output()
+        .unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&json_output.stdout).unwrap();
+    assert_eq!(
+        value["nodes"][0]["route"]["rules"][0]["when"],
+        "confidence gte 0.8"
+    );
+    let dot_output = Command::new(env!("CARGO_BIN_EXE_lmflow"))
+        .args(["check-config", path.to_str().unwrap(), "--dot"])
+        .output()
+        .unwrap();
+    let dot = String::from_utf8(dot_output.stdout).unwrap();
+    assert!(dot.contains("confidence gte 0.8"), "{dot}");
+    std::fs::remove_file(path).unwrap();
+}

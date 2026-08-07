@@ -74,6 +74,7 @@ fn summary_json(path: &str, plan: &GraphPlan) -> serde_json::Value {
                 "rules": route.routes.iter().map(|rule| json!({
                     "to": rule.to,
                     "default": rule.default,
+                    "when": rule.when.as_ref().map(|predicate| predicate.summary()),
                 })).collect::<Vec<_>>(),
             })),
             "executor": if node.executor.is_empty() { "default" } else { &node.executor },
