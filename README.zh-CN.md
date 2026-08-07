@@ -42,7 +42,7 @@ lm-flow/
 │   └── examples/              每个示例是独立工程:examples/<lang>/<name>/
 │       ├── cpp/               hello_world/、custom_type/(find_package 或从源码构建)
 │       ├── rust/              hello_world/(独立 cargo 工程)
-│       ├── python/            hello_world/、realtime_pipeline/、opencv_pipeline/
+│       ├── python/            hello_world/、async_pipeline/、realtime_pipeline/、opencv_pipeline/
 │       └── {android,ios,harmonyos}/hello_world/   移动端集成示例
 ├── third_party/pybind11/      vendored git 子模块(仅用于构建 Python wheel)
 ├── cmake/                     engine.cmake · install-sdk.cmake · find_package 配置
@@ -242,6 +242,8 @@ C ABI 是唯一稳定接口(`lmflow/flow.h`)；`flow.hpp` 是可选的 C++ 算�
 `adapters/opencv`，显式启用后使用 `<lmflow/opencv.hpp>` 与 `lmflow::opencv`。
 
 移动端集成示例:[`lmflow/examples/android/hello_world`](lmflow/examples/android/hello_world)(JNI)、[`lmflow/examples/ios/hello_world`](lmflow/examples/ios/hello_world)(Swift)、[`lmflow/examples/harmonyos/hello_world`](lmflow/examples/harmonyos/hello_world)(NAPI)。
+
+异步生产宿主示例见[`lmflow/examples/python/async_pipeline`](lmflow/examples/python/async_pipeline),演示事件循环唤醒、typed output events、超时取消与优雅清理。
 
 ## 性能测试
 
