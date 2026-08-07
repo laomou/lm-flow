@@ -352,8 +352,26 @@ impl GraphInner {
                     }
                 },
             );
+            let e2e_label = if diagnostics && self.stats_level == StatsLevel::Full {
+                let e2e = interval.as_ref().expect("statistics interval exists").e2e();
+                if e2e.frames == 0 {
+                    "e2e n/a".to_string()
+                } else {
+                    format!(
+                        "e2e p50 {} · p95 {} · p99 {} · mean {} · max {} · frames {}",
+                        duration_us(latency_percentile_us(&e2e.latency_buckets, 50).unwrap()),
+                        duration_us(latency_percentile_us(&e2e.latency_buckets, 95).unwrap()),
+                        duration_us(latency_percentile_us(&e2e.latency_buckets, 99).unwrap()),
+                        duration_us(e2e.total_us / e2e.frames),
+                        duration_us(e2e.max_us),
+                        e2e.frames,
+                    )
+                }
+            } else {
+                String::new()
+            };
             out.push_str(&format!(
-                "  graph [labelloc=t, label=\"state {:?} · stats {} · {} · {} · queued {}/{} packets\\n{}\\n{}\"];\n",
+                "  graph [labelloc=t, label=\"state {:?} · stats {} · {} · {} · queued {}/{} packets\\n{}\\n{}{}\"];\n",
                 self.state(),
                 self.stats_level.as_str(),
                 snapshot,
@@ -365,6 +383,11 @@ impl GraphInner {
                     .as_ref()
                     .expect("statistics analysis exists")
                     .summary(),
+                if e2e_label.is_empty() {
+                    String::new()
+                } else {
+                    format!("\\n{e2e_label}")
+                },
             ));
         }
 

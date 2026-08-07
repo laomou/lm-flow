@@ -15,6 +15,43 @@ fn latency_bucket(us: u64) -> usize {
     .min(LATENCY_BUCKETS - 1)
 }
 
+#[derive(Debug)]
+pub(super) struct E2eStats {
+    pub(super) frames: AtomicU64,
+    pub(super) total_us: AtomicU64,
+    pub(super) max_us: AtomicU64,
+    pub(super) buckets: [AtomicU64; LATENCY_BUCKETS],
+}
+
+impl Default for E2eStats {
+    fn default() -> Self {
+        Self {
+            frames: AtomicU64::new(0),
+            total_us: AtomicU64::new(0),
+            max_us: AtomicU64::new(0),
+            buckets: std::array::from_fn(|_| AtomicU64::new(0)),
+        }
+    }
+}
+
+impl E2eStats {
+    pub(super) fn record(&self, us: u64) {
+        self.frames.fetch_add(1, Ordering::Relaxed);
+        self.total_us.fetch_add(us, Ordering::Relaxed);
+        self.max_us.fetch_max(us, Ordering::Relaxed);
+        self.buckets[latency_bucket(us)].fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(super) fn reset(&self) {
+        self.frames.store(0, Ordering::Relaxed);
+        self.total_us.store(0, Ordering::Relaxed);
+        self.max_us.store(0, Ordering::Relaxed);
+        for bucket in &self.buckets {
+            bucket.store(0, Ordering::Relaxed);
+        }
+    }
+}
+
 /// 输入策略(节点级可插拔,见 docs/design.md §7.10)。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InputPolicy {

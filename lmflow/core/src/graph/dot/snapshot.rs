@@ -20,6 +20,14 @@ pub(super) struct DotPressureCounters {
     pub(super) dropped: u64,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub(super) struct DotE2eCounters {
+    pub(super) frames: u64,
+    pub(super) total_us: u64,
+    pub(super) max_us: u64,
+    pub(super) latency_buckets: [u64; LATENCY_BUCKETS],
+}
+
 #[derive(Debug, Clone, Default)]
 pub(super) struct DotIntervalSnapshot {
     pub(super) at_us: i64,
@@ -27,6 +35,7 @@ pub(super) struct DotIntervalSnapshot {
     pub(super) ports: Vec<Vec<DotPressureCounters>>,
     pub(super) edges: Vec<DotPressureCounters>,
     pub(super) pollers: Vec<Vec<DotPressureCounters>>,
+    pub(super) e2e: DotE2eCounters,
 }
 
 #[derive(Debug, Default)]
@@ -44,6 +53,18 @@ pub(super) struct DotInterval {
 }
 
 impl DotInterval {
+    pub(super) fn e2e(&self) -> DotE2eCounters {
+        let current = self.current.e2e;
+        let previous = self.previous.e2e;
+        DotE2eCounters {
+            frames: current.frames.saturating_sub(previous.frames),
+            total_us: current.total_us.saturating_sub(previous.total_us),
+            max_us: current.max_us,
+            latency_buckets: std::array::from_fn(|bucket| {
+                current.latency_buckets[bucket].saturating_sub(previous.latency_buckets[bucket])
+            }),
+        }
+    }
     pub(super) fn node(&self, node: usize) -> DotNodeCounters {
         let current = self.current.nodes[node];
         let previous = self.previous.nodes[node];
@@ -116,6 +137,14 @@ impl GraphInner {
                 cow_bytes: node.stats.cow_bytes.load(Ordering::Relaxed),
             })
             .collect();
+        let e2e = DotE2eCounters {
+            frames: self.e2e_stats.frames.load(Ordering::Relaxed),
+            total_us: self.e2e_stats.total_us.load(Ordering::Relaxed),
+            max_us: self.e2e_stats.max_us.load(Ordering::Relaxed),
+            latency_buckets: std::array::from_fn(|bucket| {
+                self.e2e_stats.buckets[bucket].load(Ordering::Relaxed)
+            }),
+        };
         let ports = self
             .nodes
             .iter()
@@ -172,6 +201,7 @@ impl GraphInner {
             ports,
             edges,
             pollers,
+            e2e,
         };
         let mut baselines = self
             .dot_intervals
@@ -203,6 +233,7 @@ impl GraphInner {
                     .iter()
                     .map(|pollers| vec![DotPressureCounters::default(); pollers.len()])
                     .collect(),
+                e2e: DotE2eCounters::default(),
             }
         });
         DotInterval {

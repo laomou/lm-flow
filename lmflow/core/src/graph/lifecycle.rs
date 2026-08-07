@@ -341,6 +341,7 @@ impl GraphInner {
         }
         self.paused.store(false, Ordering::SeqCst);
         self.run_started_us.store(0, Ordering::Relaxed);
+        self.e2e_stats.reset();
         *self
             .dot_intervals
             .lock()
