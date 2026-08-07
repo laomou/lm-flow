@@ -624,7 +624,12 @@ class Graph:
         """
         return bool(self._g.pump_step())
 
-    async def run_async(self, *, cancel_grace: float = 0.0) -> None:
+    async def run_async(
+        self,
+        *,
+        timeout: float | None = None,
+        cancel_grace: float = 0.0,
+    ) -> None:
         """Run the graph without blocking the current asyncio event loop.
 
         If the graph is initialized, this method starts it. Engine threads signal the loop through
@@ -634,35 +639,34 @@ class Graph:
         The graph must eventually terminate: close its inputs, let a source call
         :meth:`Context.source_done`, or call :meth:`cancel`. Cancelling the asyncio task cancels the
         graph and gives it up to ``cancel_grace`` seconds to terminate before re-raising
-        :class:`asyncio.CancelledError`. A second cancellation abandons that graceful wait
-        immediately. The default ``0.0`` re-raises without waiting; pass a positive grace when
-        termination before :meth:`reset` matters. :meth:`close` remains the final synchronous
-        cleanup fallback.
+        :class:`asyncio.CancelledError`. ``timeout`` applies the same graph cancellation and
+        cleanup policy, then raises :class:`Timeout`. A second task cancellation abandons a
+        graceful wait immediately. The default ``cancel_grace=0.0`` does not wait; pass a positive
+        grace when termination before :meth:`reset` matters. :meth:`close` remains the final
+        synchronous cleanup fallback.
         """
+        if timeout is not None and timeout < 0:
+            raise ValueError("timeout must be non-negative or None")
         if cancel_grace < 0:
             raise ValueError("cancel_grace must be non-negative")
         driver = self._get_async_driver()
-        try:
-            await driver.wait_terminated()
-            self.wait_done()
-        except asyncio.CancelledError as cancelled:
+
+        async def cancel_and_wait(reason: str) -> None:
             self.cancel()
-            current = asyncio.current_task()
-            uncancel = getattr(current, "uncancel", None)
             cleanup_coro = driver.wait_terminated()
             try:
                 cleanup = asyncio.create_task(cleanup_coro)
             except RuntimeError:
                 cleanup_coro.close()
-                raise cancelled
+                return
             try:
                 await asyncio.wait_for(asyncio.shield(cleanup), timeout=cancel_grace)
             except asyncio.TimeoutError:
                 warnings.warn(
-                    "run_async cancellation grace expired before the graph terminated; "
+                    f"run_async {reason} grace expired before the graph terminated; "
                     "Graph.close() will complete synchronous cleanup",
                     RuntimeWarning,
-                    stacklevel=2,
+                    stacklevel=3,
                 )
                 cleanup.cancel()
                 try:
@@ -670,13 +674,30 @@ class Graph:
                 except asyncio.CancelledError:
                     pass
             except asyncio.CancelledError:
-                if uncancel is not None:
-                    uncancel()
                 cleanup.cancel()
                 try:
                     await cleanup
                 except asyncio.CancelledError:
                     pass
+                raise
+
+        try:
+            if timeout is None:
+                await driver.wait_terminated()
+            else:
+                await asyncio.wait_for(driver.wait_terminated(), timeout=timeout)
+            self.wait_done()
+        except asyncio.TimeoutError as timed_out:
+            await cancel_and_wait("timeout")
+            raise Timeout(f"run_async timed out after {timeout} seconds") from timed_out
+        except asyncio.CancelledError as cancelled:
+            current = asyncio.current_task()
+            uncancel = getattr(current, "uncancel", None)
+            try:
+                await cancel_and_wait("cancellation")
+            except asyncio.CancelledError:
+                if uncancel is not None:
+                    uncancel()
             raise cancelled
 
     def _get_async_driver(self) -> _AsyncGraphDriver:

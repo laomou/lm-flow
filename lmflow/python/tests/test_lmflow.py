@@ -477,6 +477,104 @@ output_ports: [out]
 
         asyncio.run(scenario())
 
+    def test_run_async_timeout_allows_natural_completion(self):
+        async def scenario():
+            with graph(
+                """
+nodes:
+  - { name: src, kernel: RangeSourceKernel, input_ports: [], output_ports: [out],
+      options: { count: 3 }, rate: 100.0 }
+output_ports: [out]
+"""
+            ) as g:
+                out = g.add_poller("out")
+                await g.run_async(timeout=2.0)
+                self.assertEqual([packet.as_int() for packet in out], [0, 1, 2])
+                self.assertEqual(g.state, lmflow.GraphState.TERMINATED)
+
+        asyncio.run(scenario())
+
+    def test_run_async_timeout_cancels_and_terminates_delegated_graph(self):
+        async def scenario():
+            with graph(
+                """
+executors:
+  - { name: host, type: DelegatingExecutor }
+nodes:
+  - { name: dbl, kernel: TDouble, executor: host, input_ports: [in], output_ports: [out] }
+input_ports: [in]
+output_ports: [out]
+"""
+            ) as g:
+                with self.assertRaisesRegex(lmflow.Timeout, "timed out"):
+                    await g.run_async(timeout=0.01, cancel_grace=1.0)
+                self.assertEqual(g.state, lmflow.GraphState.TERMINATED)
+
+        asyncio.run(scenario())
+
+    def test_run_async_timeout_grace_has_an_upper_bound(self):
+        async def scenario():
+            with graph(
+                """
+executors:
+  - { name: cpu, type: ThreadPoolExecutor, num_threads: 1 }
+nodes:
+  - { name: slow, kernel: TCancelSlow, executor: cpu, input_ports: [in], output_ports: [out] }
+input_ports: [in]
+output_ports: [out]
+"""
+            ) as g:
+                CANCEL_STARTED.clear()
+                CANCEL_RELEASE.clear()
+                try:
+                    g.start()
+                    g.input("in").send(1, ts=0)
+                    self.assertTrue(await asyncio.to_thread(CANCEL_STARTED.wait, 1.0))
+                    started = time.monotonic()
+                    with self.assertWarnsRegex(RuntimeWarning, "timeout grace expired"):
+                        with self.assertRaises(lmflow.Timeout):
+                            await asyncio.wait_for(
+                                g.run_async(timeout=0.01, cancel_grace=0.01),
+                                timeout=0.2,
+                            )
+                    self.assertLess(time.monotonic() - started, 0.2)
+                    self.assertNotEqual(g.state, lmflow.GraphState.TERMINATED)
+                finally:
+                    CANCEL_RELEASE.set()
+
+        asyncio.run(scenario())
+
+    def test_run_async_task_cancellation_wins_before_timeout(self):
+        async def scenario():
+            with graph(
+                """
+executors:
+  - { name: host, type: DelegatingExecutor }
+nodes:
+  - { name: dbl, kernel: TDouble, executor: host, input_ports: [in], output_ports: [out] }
+input_ports: [in]
+output_ports: [out]
+"""
+            ) as g:
+                run = asyncio.create_task(
+                    g.run_async(timeout=10.0, cancel_grace=1.0)
+                )
+                await asyncio.sleep(0)
+                run.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await run
+                self.assertEqual(g.state, lmflow.GraphState.TERMINATED)
+
+        asyncio.run(scenario())
+
+    def test_run_async_rejects_negative_timeout(self):
+        async def scenario():
+            with graph(one_node("TDouble")) as g:
+                with self.assertRaisesRegex(ValueError, "timeout"):
+                    await g.run_async(timeout=-1.0)
+
+        asyncio.run(scenario())
+
     def test_run_async_cancellation_waits_briefly_for_running_pool_kernel(self):
         async def scenario():
             with graph(
