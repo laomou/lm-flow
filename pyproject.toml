@@ -67,4 +67,4 @@ environment = { PATH = "$HOME/.cargo/bin:$PATH" }
 
 [tool.cibuildwheel.macos]
 before-all = "rustup --version || curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal"
-environment = { PATH = "$HOME/.cargo/bin:$PATH", MACOSX_DEPLOYMENT_TARGET = "10.12" }
+environment = { PATH = "$HOME/.cargo/bin:$PATH", MACOSX_DEPLOYMENT_TARGET = "11.0" }

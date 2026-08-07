@@ -29,7 +29,7 @@ jobs:
       # macOS 直接在 runner 上装,给主机侧也备一份(host 工具没用到但无害)。
       - uses: dtolnay/rust-toolchain@stable
       - name: 构建 wheel(cibuildwheel:含 Rust 引擎 + pybind11 扩展)
-        uses: pypa/cibuildwheel@v2.21
+        uses: pypa/cibuildwheel@v4.2.0
         # 配置在 pyproject.toml 的 [tool.cibuildwheel];scikit-build-core 调根 CMake。
       - uses: actions/upload-artifact@v7
         with:
@@ -129,7 +129,7 @@ jobs:
     steps:
       - uses: actions/download-artifact@v8
         with: { path: assets, merge-multiple: true }
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3.0.2
         with:
           files: assets/*
           generate_release_notes: true
