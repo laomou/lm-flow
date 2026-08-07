@@ -14,9 +14,11 @@
 #include <cstdio>
 #include <exception>
 #include <stdexcept>
+#include <string>
 #include <type_traits>
 #include <typeinfo>
 #include <utility>
+#include <vector>
 
 #include "flow.h"
 
@@ -203,6 +205,18 @@ class Packet {
   }
   bool Metadata(const char* key, const char** out) const {
     return lmflow_packet_metadata_str(&raw_, key, out);
+  }
+  bool HasMetadata(const char* key) const { return lmflow_packet_has_metadata(&raw_, key); }
+  bool RemoveMetadata(const char* key) { return lmflow_packet_remove_metadata(&raw_, key); }
+  std::vector<std::string> MetadataKeys() const {
+    std::vector<std::string> keys;
+    const size_t count = lmflow_packet_metadata_count(&raw_);
+    keys.reserve(count);
+    for (size_t index = 0; index < count; ++index) {
+      const char* key = lmflow_packet_metadata_key_at(&raw_, index);
+      if (key) keys.emplace_back(key);
+    }
+    return keys;
   }
   /// N 维缓冲的**只读**视图(零拷贝)。cv::Mat 互转见可选 adapter `lmflow/opencv.hpp`。
   bool AsBuffer(LMFlowBuffer* o) const { return lmflow_packet_as_buffer(&raw_, o); }

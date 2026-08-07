@@ -127,6 +127,11 @@ bool lmflow_packet_metadata_i64(const LMFlowPacket* pkt, const char* key, int64_
 bool lmflow_packet_metadata_f64(const LMFlowPacket* pkt, const char* key, double* out);
 bool lmflow_packet_metadata_bool(const LMFlowPacket* pkt, const char* key, bool* out);
 bool lmflow_packet_metadata_str(const LMFlowPacket* pkt, const char* key, const char** out);
+bool lmflow_packet_has_metadata(const LMFlowPacket* pkt, const char* key);
+bool lmflow_packet_remove_metadata(LMFlowPacket* pkt, const char* key);
+size_t lmflow_packet_metadata_count(const LMFlowPacket* pkt);
+/* 返回线程局部 UTF-8 缓冲；下次在同一线程调用本函数后失效。越界返回 NULL。 */
+const char* lmflow_packet_metadata_key_at(const LMFlowPacket* pkt, size_t index);
 
 /* type_id 说明:
  *  引擎只做「相等性」比对,不解释其含义。0..15 为内建类型保留;0 表示「不声明类型」,

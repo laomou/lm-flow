@@ -116,6 +116,18 @@ output_ports: [out]
         self.assertIn("did you mean `metadata`", message)
 
 
+class PacketMetadataTests(unittest.TestCase):
+    def test_metadata_management(self):
+        packet = lmflow.Packet.from_int(7)
+        packet.set_metadata("confidence", 0.9)
+        packet.set_metadata("category", "person")
+        self.assertTrue(packet.has_metadata("confidence"))
+        self.assertEqual(packet.metadata_keys(), ["category", "confidence"])
+        self.assertTrue(packet.remove_metadata("category"))
+        self.assertFalse(packet.remove_metadata("category"))
+        self.assertIsNone(packet.metadata("category"))
+
+
 @lmflow.kernel("TBadContract")
 class TBadContract(lmflow.Kernel):
     @staticmethod

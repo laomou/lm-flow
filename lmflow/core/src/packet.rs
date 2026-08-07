@@ -853,6 +853,14 @@ impl Packet {
         self.metadata().get(key)
     }
 
+    pub fn has_metadata(&self, key: &str) -> bool {
+        self.metadata().contains_key(key)
+    }
+
+    pub fn metadata_keys(&self) -> impl Iterator<Item = &str> {
+        self.metadata().keys().map(String::as_str)
+    }
+
     pub fn with_metadata<V: Into<MetadataValue>>(
         mut self,
         key: impl Into<String>,
@@ -869,6 +877,11 @@ impl Packet {
         let body = Arc::make_mut(body);
         let metadata = Arc::make_mut(&mut body.metadata);
         metadata.insert(key.into(), value.into());
+    }
+
+    pub fn remove_metadata(&mut self, key: &str) -> Option<MetadataValue> {
+        let body = Arc::make_mut(self.data.as_mut()?);
+        Arc::make_mut(&mut body.metadata).remove(key)
     }
 
     pub(crate) fn make_mutable_buffer(&mut self) -> Result<BufferView> {
@@ -1266,5 +1279,28 @@ mod tests {
         let s = p.debug_string();
         assert!(s.contains("3x224x224"), "should contain shape: {s}");
         assert!(s.contains("42"), "should contain timestamp: {s}");
+    }
+
+    #[test]
+    fn metadata_can_be_listed_tested_and_removed_without_copying_payload() {
+        let mut packet = Packet::from_i64(7)
+            .with_metadata("confidence", 0.9)
+            .with_metadata("category", "person");
+        let shared = packet.clone();
+        let payload = packet.payload().unwrap() as *const Payload;
+
+        assert!(packet.has_metadata("confidence"));
+        assert_eq!(
+            packet.metadata_keys().collect::<Vec<_>>(),
+            vec!["category", "confidence"]
+        );
+        assert_eq!(
+            packet.remove_metadata("category"),
+            Some(MetadataValue::String("person".into()))
+        );
+        assert!(!packet.has_metadata("category"));
+        assert!(shared.has_metadata("category"));
+        assert!(std::ptr::eq(payload, packet.payload().unwrap()));
+        assert!(std::ptr::eq(payload, shared.payload().unwrap()));
     }
 }
