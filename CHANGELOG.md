@@ -10,6 +10,8 @@ to each GitHub Release.
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-08-07
+
 ### Added
 
 - Output Pollers and observers can now opt into timestamp-bound events through the existing
@@ -34,6 +36,10 @@ to each GitHub Release.
   unused fields, invalid dimensions/dtypes/strides, null data for non-empty views, and overflowing
   allocation sizes or pointer offsets before dereferencing the caller's data. Valid
   negative-stride, broadcast, and non-contiguous CPU views remain supported.
+- **Thread-pool CoW no longer retains producer references across dispatch.**
+  Invocation inputs are released as soon as the kernel returns, and downstream workers are
+  woken only after producer staging references are cleared. Linear pipelines therefore keep
+  zero-copy mutation on thread pools, while fan-out still copies to preserve branch isolation.
 
 ### Changed
 
@@ -123,17 +129,6 @@ to each GitHub Release.
 - **A graph whose every node named an executor no longer logs a bogus
   ``executor `` is defined but not used`` warning.** The implicitly created default executor is
   exempt from the unused-pool check.
-
-### Known issues
-
-- **CoW zero-copy on a linear pipeline is best-effort on thread pools, not guaranteed.** An upstream
-  node's context input slot is only cleared at the start of its *next* call, so a downstream in-place
-  write on another worker thread can still see a refcount ≥ 2 and silently copy. Measured over 600
-  single-packet three-stage runs: 0 copies on a delegating executor, ~13% on a 4-thread pool. This
-  predates the default change (any `executor:`-on-a-pool graph behaved this way), but the default
-  path now lands on it. See `docs/design.md` §3.4.
-
-## [0.3.0] — 2026-08-04
 
 ### Added
 
