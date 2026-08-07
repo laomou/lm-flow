@@ -48,6 +48,47 @@ unsafe fn last_error() -> String {
         .into_owned()
 }
 
+#[test]
+fn packet_metadata_management_through_c_abi() {
+    unsafe {
+        let mut packet = lmflow_packet_from_i64(7, 0);
+        assert_eq!(
+            lmflow_packet_set_metadata_f64(&mut packet, cs("confidence").as_ptr(), 0.9),
+            0
+        );
+        assert_eq!(
+            lmflow_packet_set_metadata_str(
+                &mut packet,
+                cs("category").as_ptr(),
+                cs("person").as_ptr()
+            ),
+            0
+        );
+        assert!(lmflow_packet_has_metadata(
+            &packet,
+            cs("confidence").as_ptr()
+        ));
+        assert_eq!(lmflow_packet_metadata_count(&packet), 2);
+        let keys = (0..2)
+            .map(|index| {
+                CStr::from_ptr(lmflow_packet_metadata_key_at(&packet, index))
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(keys, vec!["category", "confidence"]);
+        assert!(lmflow_packet_remove_metadata(
+            &mut packet,
+            cs("category").as_ptr()
+        ));
+        assert!(!lmflow_packet_has_metadata(
+            &packet,
+            cs("category").as_ptr()
+        ));
+        lmflow_packet_drop(&mut packet);
+    }
+}
+
 /// C 调用方自建包:owner=NULL + 自备 drop_fn(所有权在提交时移交引擎)。
 unsafe extern "C" fn drop_boxed_i32(p: *mut c_void) {
     drop(Box::from_raw(p as *mut i32));

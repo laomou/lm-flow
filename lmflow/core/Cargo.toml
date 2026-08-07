@@ -41,3 +41,7 @@ harness = false
 [[bench]]
 name = "packet"
 harness = false
+
+[[bench]]
+name = "route_metadata"
+harness = false

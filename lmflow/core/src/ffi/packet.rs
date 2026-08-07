@@ -285,6 +285,67 @@ pub unsafe extern "C" fn lmflow_packet_metadata_str(
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn lmflow_packet_has_metadata(
+    pkt: *const LMFlowPacket,
+    key: *const c_char,
+) -> bool {
+    guard_val(false, || {
+        let Some(key) = cstr(key) else { return false };
+        packet_body(pkt).is_some_and(|body| body.metadata.contains_key(key))
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lmflow_packet_remove_metadata(
+    pkt: *mut LMFlowPacket,
+    key: *const c_char,
+) -> bool {
+    guard_val(false, || {
+        let Some(packet) = pkt.as_mut() else {
+            return false;
+        };
+        let Some(key) = cstr(key) else { return false };
+        if packet.owner.is_null() {
+            last_error::set("metadata can only be removed from an owned engine packet");
+            return false;
+        }
+        let old = std::mem::take(packet);
+        let mut owned = take_packet(old);
+        let removed = owned.remove_metadata(key).is_some();
+        *packet = own_packet(owned);
+        removed
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lmflow_packet_metadata_count(pkt: *const LMFlowPacket) -> usize {
+    guard_val(0, || packet_body(pkt).map_or(0, |body| body.metadata.len()))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lmflow_packet_metadata_key_at(
+    pkt: *const LMFlowPacket,
+    index: usize,
+) -> *const c_char {
+    guard_val(std::ptr::null(), || {
+        let Some(body) = packet_body(pkt) else {
+            return std::ptr::null();
+        };
+        let Some(key) = body.metadata.keys().nth(index) else {
+            return std::ptr::null();
+        };
+        thread_local! {
+            static METADATA_KEY: std::cell::RefCell<std::ffi::CString> =
+                std::cell::RefCell::new(std::ffi::CString::default());
+        }
+        METADATA_KEY.with(|buffer| {
+            *buffer.borrow_mut() = std::ffi::CString::new(key.as_str()).unwrap_or_default();
+            buffer.borrow().as_ptr()
+        })
+    })
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn lmflow_packet_debug_string(pkt: *const LMFlowPacket) -> *const c_char {
     guard_val(c"".as_ptr(), || {
         thread_local! {

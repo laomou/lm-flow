@@ -245,6 +245,25 @@ class Packet {
     return py::none();
   }
 
+  bool has_metadata(const std::string& key) const {
+    return lmflow_packet_has_metadata(&raw_, key.c_str());
+  }
+
+  bool remove_metadata(const std::string& key) {
+    return lmflow_packet_remove_metadata(&raw_, key.c_str());
+  }
+
+  std::vector<std::string> metadata_keys() const {
+    std::vector<std::string> keys;
+    const size_t count = lmflow_packet_metadata_count(&raw_);
+    keys.reserve(count);
+    for (size_t index = 0; index < count; ++index) {
+      const char* key = lmflow_packet_metadata_key_at(&raw_, index);
+      if (key) keys.emplace_back(key);
+    }
+    return keys;
+  }
+
   /// 只读 numpy 视图(零拷贝)。**仅在本包存活期间有效** ——
   /// 算子输入包是借用的,回调返回后不得再用。
   py::array as_numpy(const py::object& self) const {
@@ -992,6 +1011,9 @@ PYBIND11_MODULE(_lmflow, m) {
       .def("as_int", &Packet::as_int, "Read the int payload; None on type mismatch.")
       .def("set_metadata", &Packet::set_metadata, py::arg("key"), py::arg("value"))
       .def("metadata", &Packet::metadata, py::arg("key"))
+      .def("has_metadata", &Packet::has_metadata, py::arg("key"))
+      .def("remove_metadata", &Packet::remove_metadata, py::arg("key"))
+      .def("metadata_keys", &Packet::metadata_keys)
       .def("as_float", &Packet::as_float, "Read the float payload; None on type mismatch.")
       .def("as_bool", &Packet::as_bool, "Read the bool payload; None on type mismatch.")
       .def("as_str", &Packet::as_str, "Read the str payload; None on type mismatch.")
