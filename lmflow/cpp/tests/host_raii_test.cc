@@ -1,3 +1,4 @@
+// End-to-end coverage for the flow.hpp C++ RAII host API.
 #include <cstdio>
 #include <optional>
 #include <type_traits>
