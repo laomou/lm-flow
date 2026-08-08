@@ -213,7 +213,7 @@ Or build the native SDK locally:
 
 ```bash
 cmake -B build -DCMAKE_BUILD_TYPE=Release \
-  -DBUILD_SHARED_LIBS=ON -DLMFLOW_BUILD_KERNELS=ON
+  -DLMFLOW_BUILD_SHARED_LIBS=ON -DLMFLOW_BUILD_KERNELS=ON
 cmake --build build
 ```
 
@@ -224,7 +224,7 @@ CMake builds the optional bundled C++ kernels and combines them for native consu
 
 ```bash
 cmake -B build -DCMAKE_BUILD_TYPE=Release \
-  -DBUILD_SHARED_LIBS=ON \
+  -DLMFLOW_BUILD_SHARED_LIBS=ON \
   -DLMFLOW_BUILD_KERNELS=ON
 cmake --build build
 ctest --test-dir build                       # flow.hpp test; CV test if OpenCV is present
@@ -233,8 +233,9 @@ cmake --install build --prefix /opt/lmflow   # → headers + lib + lib/cmake/lmf
 
 The switches are independent:
 
-- `BUILD_SHARED_LIBS=ON`: install `liblmflow_core.so` and the complete `liblmflow.so`.
-- `BUILD_SHARED_LIBS=OFF`: expose static CMake targets backed by `liblmflow_core.a` and, when enabled, `liblmflow_kernels.a`.
+- `LMFLOW_BUILD_SHARED_LIBS=ON` (default): install `liblmflow_core.so` and the complete `liblmflow.so`.
+- `LMFLOW_BUILD_SHARED_LIBS=OFF`: expose static CMake targets backed by `liblmflow_core.a` and, when enabled, `liblmflow_kernels.a`.
+- `BUILD_SHARED_LIBS` remains accepted as a compatibility default when `LMFLOW_BUILD_SHARED_LIBS` is not set, but LMFlow no longer changes or depends on the parent project's global setting.
 - `LMFLOW_BUILD_KERNELS=ON` (default): include the 18 bundled C++ kernels in `lmflow::lmflow`.
 - `LMFLOW_BUILD_KERNELS=OFF`: build a pure Rust engine only, without bundled C++ kernels.
 

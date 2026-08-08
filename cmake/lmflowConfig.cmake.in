@@ -41,7 +41,7 @@ if(@LMFLOW_BUILD_KERNELS@ AND NOT TARGET lmflow::kernels)
   endif()
 endif()
 
-if(@BUILD_SHARED_LIBS@)
+if(@LMFLOW_BUILD_SHARED_LIBS@)
   if(NOT TARGET lmflow::core)
     add_library(lmflow::core SHARED IMPORTED)
     if(WIN32)

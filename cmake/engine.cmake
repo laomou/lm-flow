@@ -1,5 +1,5 @@
 # Cargo builds the pure Rust static core. CMake builds the optional C++ kernels
-# and exposes static/shared variants selected by BUILD_SHARED_LIBS.
+# and exposes static/shared variants selected by LMFLOW_BUILD_SHARED_LIBS.
 
 set(_lmflow_optimized "$<OR:$<CONFIG:Release>,$<CONFIG:RelWithDebInfo>,$<CONFIG:MinSizeRel>>")
 
@@ -136,7 +136,7 @@ if(LMFLOW_BUILD_KERNELS)
   add_library(lmflow::kernels ALIAS lmflow_kernels)
 endif()
 
-if(BUILD_SHARED_LIBS)
+if(LMFLOW_BUILD_SHARED_LIBS)
   add_library(lmflow_core_shared SHARED "${LMFLOW_ROOT}/cmake/lmflow_link.cc")
   set_target_properties(lmflow_core_shared PROPERTIES
     OUTPUT_NAME lmflow_core
