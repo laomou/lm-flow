@@ -33,15 +33,8 @@ option(LMFLOW_BUILD_PYTHON "Build the pybind11 Python extension"      OFF)
 option(LMFLOW_WITH_CV_TEST "Compile the CV test kernel into _lmflow"  OFF)
 option(LMFLOW_BUILD_KERNELS "Build and link the bundled C++ kernels"   ON)
 option(LMFLOW_BUILD_OPENCV_ADAPTER "Build/install the optional OpenCV adapter" OFF)
-if(NOT DEFINED LMFLOW_BUILD_SHARED_LIBS)
-  if(DEFINED BUILD_SHARED_LIBS)
-    set(LMFLOW_BUILD_SHARED_LIBS "${BUILD_SHARED_LIBS}")
-  else()
-    set(LMFLOW_BUILD_SHARED_LIBS ON)
-  endif()
-endif()
 option(LMFLOW_BUILD_SHARED_LIBS
-  "Build LMFlow shared libraries (does not change the parent BUILD_SHARED_LIBS)"
+  "Build LMFlow shared libraries without changing parent project settings"
   ON)
 set(LMFLOW_RUST_TARGET "" CACHE STRING "Optional Rust target triple for cross-compiling the core")
 

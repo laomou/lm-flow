@@ -235,7 +235,6 @@ The switches are independent:
 
 - `LMFLOW_BUILD_SHARED_LIBS=ON` (default): install `liblmflow_core.so` and the complete `liblmflow.so`.
 - `LMFLOW_BUILD_SHARED_LIBS=OFF`: expose static CMake targets backed by `liblmflow_core.a` and, when enabled, `liblmflow_kernels.a`.
-- `BUILD_SHARED_LIBS` remains accepted as a compatibility default when `LMFLOW_BUILD_SHARED_LIBS` is not set, but LMFlow no longer changes or depends on the parent project's global setting.
 - `LMFLOW_BUILD_KERNELS=ON` (default): include the 18 bundled C++ kernels in `lmflow::lmflow`.
 - `LMFLOW_BUILD_KERNELS=OFF`: build a pure Rust engine only, without bundled C++ kernels.
 

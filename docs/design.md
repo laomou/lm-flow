@@ -1299,7 +1299,7 @@ cc.emit(0, packet)
 - `lmflow/core` 没有 `build.rs`、没有 C++ build dependency，也没有 kernels feature。
 - CMake 构建纯 Rust `lmflow::core_static`、可选 `lmflow::kernels`，并按
   `LMFLOW_BUILD_SHARED_LIBS` 组合 `lmflow::core` 与统一消费目标 `lmflow::lmflow`，
-  并避免污染宿主工程的全局 `BUILD_SHARED_LIBS`。
+  并避免污染宿主工程的全局共享库设置。
 - 引擎语义、C ABI、内存、策略和并发测试全部使用 Rust 测试 kernels，留在
   `lmflow/core/tests`；官方 C++ kernels 由 CMake/C++ 与 Python 端到端测试覆盖。
 - 示例宿主:`cargo run --manifest-path lmflow/examples/rust/hello_world/Cargo.toml`。

@@ -222,7 +222,6 @@ cmake --install build --prefix /opt/lmflow   # → headers + lib + lib/cmake/lmf
 
 - `LMFLOW_BUILD_SHARED_LIBS=ON`（默认）：安装纯 core 的 `liblmflow_core.so` 和完整的 `liblmflow.so`。
 - `LMFLOW_BUILD_SHARED_LIBS=OFF`：静态目标由 `liblmflow_core.a` 与可选的 `liblmflow_kernels.a` 组成。
-- 未显式设置 `LMFLOW_BUILD_SHARED_LIBS` 时仍兼容读取 `BUILD_SHARED_LIBS`，但 LMFlow 不再修改或依赖宿主工程的全局开关。
 - `LMFLOW_BUILD_KERNELS=ON`（默认）：`lmflow::lmflow` 包含 18 个官方 C++ kernels。
 - `LMFLOW_BUILD_KERNELS=OFF`：只构建纯 Rust 引擎，不包含捆绑的 C++ 算子。
 
