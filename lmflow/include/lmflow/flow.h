@@ -665,7 +665,8 @@ LMFlowPoller* lmflow_graph_add_poller_bounded(
 bool lmflow_poller_next(LMFlowPoller*, LMFlowPacket* out);
 /* 非阻塞:无数据返回 false(用 lmflow_last_error 区分「暂无」与「已结束」)*/
 bool lmflow_poller_try_next(LMFlowPoller*, LMFlowPacket* out);
-/* 带超时:LMFLOW_OK / LMFLOW_ERR_TIMEOUT / LMFLOW_ERR_CLOSED */
+/* 带超时:LMFLOW_OK / LMFLOW_ERR_TIMEOUT / LMFLOW_ERR_CLOSED。
+ * 仅返回 LMFLOW_OK 时写入 out；其它返回码不会转移包所有权。 */
 LMFlowStatus lmflow_poller_next_timeout(LMFlowPoller*, LMFlowPacket* out, int64_t timeout_ms);
 uint64_t lmflow_poller_dropped_count(LMFlowPoller*);
 /* 归还 poller 句柄。与 lmflow_input_free 同理:调用方拥有,持一份对引擎的引用,

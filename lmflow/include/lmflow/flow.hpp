@@ -1,10 +1,11 @@
 /*
- * flow.hpp — 可选的 C++ 算子糖(header-only,非 ABI)
+ * flow.hpp — C++ header-only convenience layer (non-ABI)
  *
  * 本层 100% 建立在 flow.h 的 C ABI 之上,自己不碰引擎内部,零运行开销。
- * 作用:让 C++ 算子作者用「继承 lmflow::Kernel + override Process + LMFLOW_REGISTER_KERNEL」
- * 的方式写算子,而不必手写函数指针 vtable。C++ 模板便利(Packet::Make<T> 等)全部在
- * 本层 monomorphize,不越过 FFI 边界。不想用它,直接对着 flow.h 裸写算子亦可。
+ * 作用:提供 lmflow::Graph/Input/Poller/Packet 的 RAII 宿主 API,以及让 C++ 算子作者用
+ * 「继承 lmflow::Kernel + override Process + LMFLOW_REGISTER_KERNEL」的方式写算子,
+ * 而不必手写函数指针 vtable。C++ 模板便利(Packet::Make<T> 等)全部在本层 monomorphize,
+ * 不越过 FFI 边界。不想用它,直接对着 flow.h 裸写宿主或算子亦可。
  */
 #ifndef LMFLOW_HPP_
 #define LMFLOW_HPP_
@@ -13,6 +14,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <exception>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <type_traits>
@@ -268,6 +270,296 @@ class Packet {
   LMFlowPacket raw_;
   Own own_;
 };
+
+/* ---------- Graph host API ----------
+ * This is the C++ RAII facade for the Rust Graph/Input/Poller API. Handles are
+ * move-only and retain the same lifecycle rules as the underlying C ABI. */
+class Input;
+class Poller;
+
+enum class PollerOverflow {
+  Block = LMFLOW_POLLER_BLOCK,
+  DropOldest = LMFLOW_POLLER_DROP_OLDEST,
+  DropNewest = LMFLOW_POLLER_DROP_NEWEST,
+  Latest = LMFLOW_POLLER_LATEST,
+};
+
+struct PollerOptions {
+  size_t capacity;
+  PollerOverflow overflow;
+};
+
+class Graph {
+ public:
+  Graph() : handle_(nullptr) {
+    if (lmflow_abi_version() != LMFLOW_ABI_VERSION) {
+      throw std::runtime_error("lmflow ABI mismatch: engine vs header");
+    }
+    handle_ = lmflow_graph_new();
+    if (!handle_) throw std::runtime_error(lmflow_last_error());
+  }
+  ~Graph() { destroy(); }
+
+  Graph(const Graph&) = delete;
+  Graph& operator=(const Graph&) = delete;
+  Graph(Graph&& other) noexcept : handle_(other.handle_) { other.handle_ = nullptr; }
+  Graph& operator=(Graph&& other) noexcept {
+    if (this != &other) {
+      destroy();
+      handle_ = other.handle_;
+      other.handle_ = nullptr;
+    }
+    return *this;
+  }
+
+  static Graph from_yaml(const char* yaml) {
+    Graph graph;
+    const Status status = graph.init_from_yaml(yaml);
+    if (!status.ok()) throw std::runtime_error(graph.error_message());
+    return graph;
+  }
+
+  static Graph from_yaml_file(const char* path) {
+    Graph graph;
+    const Status status = lmflow_status(lmflow_graph_init_from_yaml_file(graph.handle_, path));
+    if (!status.ok()) throw std::runtime_error(graph.error_message());
+    return graph;
+  }
+
+  bool valid() const { return handle_ != nullptr; }
+  Status init_from_yaml(const char* yaml) {
+    ensure_handle();
+    return lmflow_status(lmflow_graph_init_from_yaml(handle_, yaml));
+  }
+  Status start() {
+    ensure_handle();
+    return lmflow_status(lmflow_graph_start(handle_));
+  }
+  Status reset() {
+    ensure_handle();
+    return lmflow_status(lmflow_graph_reset(handle_));
+  }
+
+  Input input(const char* port);
+  Status close_input(const char* port) {
+    ensure_handle();
+    return lmflow_status(lmflow_graph_close_input(handle_, port));
+  }
+  void close_all_inputs() {
+    ensure_handle();
+    lmflow_graph_close_all_inputs(handle_);
+  }
+  Status set_side_packet(const char* name, Packet packet) {
+    ensure_handle();
+    return lmflow_status(lmflow_graph_set_side_packet(handle_, name, packet.release()));
+  }
+
+  Poller add_poller(const char* port);
+  Poller add_poller_ex(const char* port, bool observe_timestamp_bounds);
+  Poller add_poller_with_options(const char* port, PollerOptions options);
+  Poller add_poller_bounded(const char* port, size_t capacity, int overflow_policy);
+
+  void cancel() {
+    ensure_handle();
+    lmflow_graph_cancel(handle_);
+  }
+  Status wait_done() {
+    ensure_handle();
+    return lmflow_status(lmflow_graph_wait_done(handle_));
+  }
+  Status wait_done_timeout(int64_t timeout_ms) {
+    ensure_handle();
+    return lmflow_status(lmflow_graph_wait_done_timeout(handle_, timeout_ms));
+  }
+  Status wait_until_idle() {
+    ensure_handle();
+    return lmflow_status(lmflow_graph_wait_until_idle(handle_));
+  }
+  Status wait_until_idle_timeout(int64_t timeout_ms) {
+    ensure_handle();
+    return lmflow_status(lmflow_graph_wait_until_idle_timeout(handle_, timeout_ms));
+  }
+  bool pump_step() {
+    ensure_handle();
+    return lmflow_graph_pump_step(handle_);
+  }
+  void pause() {
+    ensure_handle();
+    lmflow_graph_pause(handle_);
+  }
+  void resume() {
+    ensure_handle();
+    lmflow_graph_resume(handle_);
+  }
+  LMFlowGraphState state() const {
+    ensure_handle();
+    return lmflow_graph_state(handle_);
+  }
+  const char* last_error() const {
+    ensure_handle();
+    return lmflow_graph_last_error(handle_);
+  }
+
+ private:
+  const char* error_message() const {
+    const char* message = lmflow_graph_last_error(handle_);
+    return (message && *message) ? message : lmflow_last_error();
+  }
+  static Status lmflow_status(LMFlowStatus code) { return Status(code); }
+  void ensure_handle() const {
+    if (!handle_) throw std::logic_error("lmflow::Graph is empty");
+  }
+  void destroy() {
+    if (handle_) {
+      lmflow_graph_free(handle_);
+      handle_ = nullptr;
+    }
+  }
+  LMFlowGraph* handle_ = nullptr;
+  friend class Input;
+  friend class Poller;
+};
+
+class Input {
+ public:
+  Input() = default;
+  ~Input() { reset(); }
+  Input(const Input&) = delete;
+  Input& operator=(const Input&) = delete;
+  Input(Input&& other) noexcept : handle_(other.handle_) { other.handle_ = nullptr; }
+  Input& operator=(Input&& other) noexcept {
+    if (this != &other) {
+      reset();
+      handle_ = other.handle_;
+      other.handle_ = nullptr;
+    }
+    return *this;
+  }
+  bool valid() const { return handle_ != nullptr; }
+  Status send(Packet packet) {
+    ensure_handle();
+    return Status(lmflow_input_send(handle_, packet.release()));
+  }
+  /* Returns false for backpressure. Ownership transfers to the engine before
+   * the call returns, so a false result means the packet was dropped. */
+  bool try_send(Packet packet) {
+    ensure_handle();
+    const LMFlowStatus status = lmflow_input_try_send(handle_, packet.release());
+    if (status == LMFLOW_OK) return true;
+    if (status == LMFLOW_ERR_WOULD_BLOCK) return false;
+    throw std::runtime_error(lmflow_last_error());
+  }
+  void close() {
+    ensure_handle();
+    lmflow_input_close(handle_);
+  }
+
+ private:
+  explicit Input(LMFlowInput* handle) : handle_(handle) {}
+  void ensure_handle() const {
+    if (!handle_) throw std::logic_error("lmflow::Input is empty");
+  }
+  void reset() {
+    if (handle_) {
+      lmflow_input_free(handle_);
+      handle_ = nullptr;
+    }
+  }
+  LMFlowInput* handle_ = nullptr;
+  friend class Graph;
+};
+
+class Poller {
+ public:
+  Poller() = default;
+  ~Poller() { reset(); }
+  Poller(const Poller&) = delete;
+  Poller& operator=(const Poller&) = delete;
+  Poller(Poller&& other) noexcept : handle_(other.handle_) { other.handle_ = nullptr; }
+  Poller& operator=(Poller&& other) noexcept {
+    if (this != &other) {
+      reset();
+      handle_ = other.handle_;
+      other.handle_ = nullptr;
+    }
+    return *this;
+  }
+  bool valid() const { return handle_ != nullptr; }
+  std::optional<Packet> next() {
+    ensure_handle();
+    LMFlowPacket raw{};
+    if (!lmflow_poller_next(handle_, &raw)) return std::nullopt;
+    return Packet::Adopt(raw);
+  }
+  std::optional<Packet> try_next() {
+    ensure_handle();
+    LMFlowPacket raw{};
+    if (!lmflow_poller_try_next(handle_, &raw)) return std::nullopt;
+    return Packet::Adopt(raw);
+  }
+  /* Returns an empty optional on timeout or closed poller. Other failures
+   * throw; successful packets are transferred into the returned Packet. */
+  std::optional<Packet> next_timeout(int64_t timeout_ms) {
+    ensure_handle();
+    LMFlowPacket raw{};
+    const LMFlowStatus status = lmflow_poller_next_timeout(handle_, &raw, timeout_ms);
+    if (status == LMFLOW_OK) return Packet::Adopt(raw);
+    if (status == LMFLOW_ERR_TIMEOUT || status == LMFLOW_ERR_CLOSED) return std::nullopt;
+    throw std::runtime_error(lmflow_last_error());
+  }
+  uint64_t dropped_count() const {
+    ensure_handle();
+    return lmflow_poller_dropped_count(handle_);
+  }
+
+ private:
+  explicit Poller(LMFlowPoller* handle) : handle_(handle) {}
+  void ensure_handle() const {
+    if (!handle_) throw std::logic_error("lmflow::Poller is empty");
+  }
+  void reset() {
+    if (handle_) {
+      lmflow_poller_free(handle_);
+      handle_ = nullptr;
+    }
+  }
+  LMFlowPoller* handle_ = nullptr;
+  friend class Graph;
+};
+
+inline Input Graph::input(const char* port) {
+  ensure_handle();
+  LMFlowInput* handle = lmflow_graph_input(handle_, port);
+  if (!handle) throw std::runtime_error(error_message());
+  return Input(handle);
+}
+
+inline Poller Graph::add_poller(const char* port) {
+  ensure_handle();
+  LMFlowPoller* handle = lmflow_graph_add_poller(handle_, port);
+  if (!handle) throw std::runtime_error(error_message());
+  return Poller(handle);
+}
+
+inline Poller Graph::add_poller_ex(const char* port, bool observe_timestamp_bounds) {
+  ensure_handle();
+  LMFlowPoller* handle = lmflow_graph_add_poller_ex(handle_, port, observe_timestamp_bounds);
+  if (!handle) throw std::runtime_error(error_message());
+  return Poller(handle);
+}
+
+inline Poller Graph::add_poller_with_options(const char* port, PollerOptions options) {
+  return add_poller_bounded(port, options.capacity, static_cast<int>(options.overflow));
+}
+
+inline Poller Graph::add_poller_bounded(
+    const char* port, size_t capacity, int overflow_policy) {
+  ensure_handle();
+  LMFlowPoller* handle =
+      lmflow_graph_add_poller_bounded(handle_, port, capacity, overflow_policy);
+  if (!handle) throw std::runtime_error(error_message());
+  return Poller(handle);
+}
 
 /* ---------- Contract:在 GetContract 里声明端口类型 ---------- */
 class Contract {
