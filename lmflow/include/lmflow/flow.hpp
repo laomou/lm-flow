@@ -291,7 +291,11 @@ struct PollerOptions {
 
 class Graph {
  public:
-  Graph() : handle_(lmflow_graph_new()) {
+  Graph() : handle_(nullptr) {
+    if (lmflow_abi_version() != LMFLOW_ABI_VERSION) {
+      throw std::runtime_error("lmflow ABI mismatch: engine vs header");
+    }
+    handle_ = lmflow_graph_new();
     if (!handle_) throw std::runtime_error(lmflow_last_error());
   }
   ~Graph() { destroy(); }
@@ -311,14 +315,14 @@ class Graph {
   static Graph from_yaml(const char* yaml) {
     Graph graph;
     const Status status = graph.init_from_yaml(yaml);
-    if (!status.ok()) throw std::runtime_error(lmflow_last_error());
+    if (!status.ok()) throw std::runtime_error(graph.error_message());
     return graph;
   }
 
   static Graph from_yaml_file(const char* path) {
     Graph graph;
     const Status status = lmflow_status(lmflow_graph_init_from_yaml_file(graph.handle_, path));
-    if (!status.ok()) throw std::runtime_error(lmflow_last_error());
+    if (!status.ok()) throw std::runtime_error(graph.error_message());
     return graph;
   }
 
@@ -336,7 +340,7 @@ class Graph {
     return lmflow_status(lmflow_graph_reset(handle_));
   }
 
-  Input input(const char* port) const;
+  Input input(const char* port);
   Status close_input(const char* port) {
     ensure_handle();
     return lmflow_status(lmflow_graph_close_input(handle_, port));
@@ -350,10 +354,10 @@ class Graph {
     return lmflow_status(lmflow_graph_set_side_packet(handle_, name, packet.release()));
   }
 
-  Poller add_poller(const char* port) const;
-  Poller add_poller_ex(const char* port, bool observe_timestamp_bounds) const;
-  Poller add_poller_with_options(const char* port, PollerOptions options) const;
-  Poller add_poller_bounded(const char* port, size_t capacity, int overflow_policy) const;
+  Poller add_poller(const char* port);
+  Poller add_poller_ex(const char* port, bool observe_timestamp_bounds);
+  Poller add_poller_with_options(const char* port, PollerOptions options);
+  Poller add_poller_bounded(const char* port, size_t capacity, int overflow_policy);
 
   void cancel() {
     ensure_handle();
@@ -397,6 +401,10 @@ class Graph {
   }
 
  private:
+  const char* error_message() const {
+    const char* message = lmflow_graph_last_error(handle_);
+    return (message && *message) ? message : lmflow_last_error();
+  }
   static Status lmflow_status(LMFlowStatus code) { return Status(code); }
   void ensure_handle() const {
     if (!handle_) throw std::logic_error("lmflow::Graph is empty");
@@ -432,9 +440,14 @@ class Input {
     ensure_handle();
     return Status(lmflow_input_send(handle_, packet.release()));
   }
-  Status try_send(Packet packet) {
+  /* Returns false for backpressure. Ownership transfers to the engine before
+   * the call returns, so a false result means the packet was dropped. */
+  bool try_send(Packet packet) {
     ensure_handle();
-    return Status(lmflow_input_try_send(handle_, packet.release()));
+    const LMFlowStatus status = lmflow_input_try_send(handle_, packet.release());
+    if (status == LMFLOW_OK) return true;
+    if (status == LMFLOW_ERR_WOULD_BLOCK) return false;
+    throw std::runtime_error(lmflow_last_error());
   }
   void close() {
     ensure_handle();
@@ -484,12 +497,12 @@ class Poller {
     if (!lmflow_poller_try_next(handle_, &raw)) return std::nullopt;
     return Packet::Adopt(raw);
   }
-  Status next_timeout(int64_t timeout_ms, Packet* out) {
+  /* Returns TIMEOUT or CLOSED through Status; on success, fills `out`. */
+  Status next_timeout(int64_t timeout_ms, Packet& out) {
     ensure_handle();
-    if (!out) return Status(LMFLOW_ERR_INVALID_ARG);
     LMFlowPacket raw{};
     const Status status = Status(lmflow_poller_next_timeout(handle_, &raw, timeout_ms));
-    if (status.ok()) *out = Packet::Adopt(raw);
+    if (status.ok()) out = Packet::Adopt(raw);
     return status;
   }
   uint64_t dropped_count() const {
@@ -512,37 +525,37 @@ class Poller {
   friend class Graph;
 };
 
-inline Input Graph::input(const char* port) const {
+inline Input Graph::input(const char* port) {
   ensure_handle();
   LMFlowInput* handle = lmflow_graph_input(handle_, port);
-  if (!handle) throw std::runtime_error(lmflow_last_error());
+  if (!handle) throw std::runtime_error(error_message());
   return Input(handle);
 }
 
-inline Poller Graph::add_poller(const char* port) const {
+inline Poller Graph::add_poller(const char* port) {
   ensure_handle();
   LMFlowPoller* handle = lmflow_graph_add_poller(handle_, port);
-  if (!handle) throw std::runtime_error(lmflow_last_error());
+  if (!handle) throw std::runtime_error(error_message());
   return Poller(handle);
 }
 
-inline Poller Graph::add_poller_ex(const char* port, bool observe_timestamp_bounds) const {
+inline Poller Graph::add_poller_ex(const char* port, bool observe_timestamp_bounds) {
   ensure_handle();
   LMFlowPoller* handle = lmflow_graph_add_poller_ex(handle_, port, observe_timestamp_bounds);
-  if (!handle) throw std::runtime_error(lmflow_last_error());
+  if (!handle) throw std::runtime_error(error_message());
   return Poller(handle);
 }
 
-inline Poller Graph::add_poller_with_options(const char* port, PollerOptions options) const {
+inline Poller Graph::add_poller_with_options(const char* port, PollerOptions options) {
   return add_poller_bounded(port, options.capacity, static_cast<int>(options.overflow));
 }
 
 inline Poller Graph::add_poller_bounded(
-    const char* port, size_t capacity, int overflow_policy) const {
+    const char* port, size_t capacity, int overflow_policy) {
   ensure_handle();
   LMFlowPoller* handle =
       lmflow_graph_add_poller_bounded(handle_, port, capacity, overflow_policy);
-  if (!handle) throw std::runtime_error(lmflow_last_error());
+  if (!handle) throw std::runtime_error(error_message());
   return Poller(handle);
 }
 
