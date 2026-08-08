@@ -207,9 +207,38 @@ jobs:
             return status == LMFLOW_OK ? 0 : 2;
           }
           EOF
+          cat >/tmp/lmflow-sdk-consumer/raii.cc <<'EOF'
+          #include "lmflow/flow.hpp"
+          #include <cstdint>
+          #include <stdexcept>
+          int main() {
+            const char* yaml = R"(
+          nodes:
+            - { name: pass, kernel: PassThroughKernel, input_ports: [in], output_ports: [out] }
+          input_ports: [in]
+          output_ports: [out]
+          )";
+            lmflow::Graph graph = lmflow::Graph::from_yaml(yaml);
+            lmflow::Poller poller = graph.add_poller("out");
+            lmflow::Input input = graph.input("in");
+            if (!graph.start().ok()) return 2;
+            if (!input.send(lmflow::Packet::FromI64(7).At(1)).ok()) return 3;
+            auto packet = poller.next_timeout(1000);
+            int64_t value = 0;
+            if (!packet || !packet->AsI64(&value) || value != 7) return 4;
+            input.close();
+            return graph.wait_done().ok() ? 0 : 5;
+          }
+          EOF
+          cmake -S /tmp/lmflow-sdk-consumer -B /tmp/ex -Dlmflow_DIR=/tmp/sdk/lib/cmake/lmflow
+          cat >>/tmp/lmflow-sdk-consumer/CMakeLists.txt <<'EOF'
+          add_executable(sdk_raii_smoke raii.cc)
+          target_link_libraries(sdk_raii_smoke PRIVATE lmflow::lmflow)
+          EOF
           cmake -S /tmp/lmflow-sdk-consumer -B /tmp/ex -Dlmflow_DIR=/tmp/sdk/lib/cmake/lmflow
           cmake --build /tmp/ex
           /tmp/ex/sdk_smoke
+          /tmp/ex/sdk_raii_smoke
       - name: 动态完整库 + 纯 core + kernels 关闭
         run: |
           cmake -B build-shared -DCMAKE_BUILD_TYPE=Release \
