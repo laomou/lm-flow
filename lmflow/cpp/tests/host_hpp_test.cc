@@ -1,7 +1,15 @@
 #include <cstdio>
 #include <optional>
+#include <type_traits>
 
 #include "lmflow/flow.hpp"
+
+static_assert(!std::is_copy_constructible<lmflow::Graph>::value);
+static_assert(std::is_move_constructible<lmflow::Graph>::value);
+static_assert(!std::is_copy_constructible<lmflow::Input>::value);
+static_assert(std::is_move_constructible<lmflow::Input>::value);
+static_assert(!std::is_copy_constructible<lmflow::Poller>::value);
+static_assert(std::is_move_constructible<lmflow::Poller>::value);
 
 int main() {
   const char* yaml = R"(
