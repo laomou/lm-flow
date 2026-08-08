@@ -131,35 +131,13 @@ jobs:
           [ -z "$missing" ] || { echo "header 声明了但库里没有:"; echo "$missing"; exit 1; }
       - name: 编译并运行最小外部 C++ ABI consumer
         run: |
-          cat >/tmp/cpp_host.cc <<'EOF'
-          #include "lmflow/flow.h"
-          int main() {
-            if (lmflow_abi_version() != LMFLOW_ABI_VERSION) return 1;
-            const char* type_name = "lmflow.test.ExternalHost";
-            const uint64_t type_id = lmflow_type_id(type_name);
-            if (!type_id) return 2;
-            if (lmflow_register_type_descriptor(type_id, type_name, 16, 8) != LMFLOW_OK) return 3;
-            if (lmflow_register_type_descriptor(type_id, type_name, 24, 8) == LMFLOW_OK) return 4;
-            LMFlowGraph* graph = lmflow_graph_new();
-            if (!graph) return 5;
-            const char* yaml = R"(
-          nodes:
-            - { name: pass, kernel: PassThroughKernel, input_ports: [in], output_ports: [out] }
-          input_ports: [in]
-          output_ports: [out]
-          )";
-            const LMFlowStatus status = lmflow_graph_init_from_yaml(graph, yaml);
-            lmflow_graph_free(graph);
-            return status == LMFLOW_OK ? 0 : 6;
-          }
-          EOF
           g++ -std=c++17 -Wall -Wextra -Werror -Iinclude \
-              /tmp/cpp_host.cc -Wl,--whole-archive \
+              cpp/tests/external_c_abi_host.cc -Wl,--whole-archive \
               /tmp/lmflow-external/liblmflow_kernels.a \
               -Wl,--no-whole-archive \
               core/target/release/liblmflow.a \
-              -lpthread -ldl -lm -o /tmp/cpp_host
-          /tmp/cpp_host
+              -lpthread -ldl -lm -o /tmp/external_c_abi_host
+          /tmp/external_c_abi_host
 
   # 用 CMake 出原生 SDK 并被消费者 find_package —— 与 cargo 并存(CMake 驱动 cargo)。
   # 根 CMakeLists 在仓库根,configure/build 都在根跑。
@@ -183,38 +161,8 @@ jobs:
           cmake --install build --prefix /tmp/sdk
           test ! -e /tmp/sdk/include/lmflow/opencv.hpp \
             || { echo "default SDK unexpectedly installed OpenCV adapter"; exit 1; }
-          mkdir -p /tmp/lmflow-sdk-consumer
-          cat >/tmp/lmflow-sdk-consumer/CMakeLists.txt <<'EOF'
-          cmake_minimum_required(VERSION 3.18)
-          project(lmflow_sdk_smoke LANGUAGES CXX)
-          find_package(lmflow REQUIRED)
-          add_executable(sdk_raii_smoke raii.cc)
-          target_link_libraries(sdk_raii_smoke PRIVATE lmflow::lmflow)
-          EOF
-          cat >/tmp/lmflow-sdk-consumer/raii.cc <<'EOF'
-          #include "lmflow/flow.hpp"
-          #include <cstdint>
-          #include <stdexcept>
-          int main() {
-            const char* yaml = R"(
-          nodes:
-            - { name: pass, kernel: PassThroughKernel, input_ports: [in], output_ports: [out] }
-          input_ports: [in]
-          output_ports: [out]
-          )";
-            lmflow::Graph graph = lmflow::Graph::from_yaml(yaml);
-            lmflow::Poller poller = graph.add_poller("out");
-            lmflow::Input input = graph.input("in");
-            if (!graph.start().ok()) return 2;
-            if (!input.send(lmflow::Packet::FromI64(7).At(1)).ok()) return 3;
-            auto packet = poller.next_timeout(1000);
-            int64_t value = 0;
-            if (!packet || !packet->AsI64(&value) || value != 7) return 4;
-            input.close();
-            return graph.wait_done().ok() ? 0 : 5;
-          }
-          EOF
-          cmake -S /tmp/lmflow-sdk-consumer -B /tmp/ex -Dlmflow_DIR=/tmp/sdk/lib/cmake/lmflow
+          cmake -S lmflow/cpp/tests/sdk_consumer -B /tmp/ex \
+            -Dlmflow_DIR=/tmp/sdk/lib/cmake/lmflow
           cmake --build /tmp/ex
           /tmp/ex/sdk_raii_smoke
       - name: 动态完整库 + 纯 core + kernels 关闭
@@ -224,23 +172,7 @@ jobs:
           cmake --build build-shared -j
           test -f build-shared/liblmflow.so
           test -f build-shared/liblmflow_core.so
-          cat >/tmp/shared_host.cc <<'EOF'
-          #include "lmflow/flow.h"
-          int main() {
-            LMFlowGraph* graph = lmflow_graph_new();
-            if (!graph) return 1;
-            const char* yaml = R"(
-          nodes:
-            - { name: pass, kernel: PassThroughKernel, input_ports: [in], output_ports: [out] }
-          input_ports: [in]
-          output_ports: [out]
-          )";
-            const LMFlowStatus status = lmflow_graph_init_from_yaml(graph, yaml);
-            lmflow_graph_free(graph);
-            return status == LMFLOW_OK ? 0 : 2;
-          }
-          EOF
-          g++ -std=c++17 -Ilmflow/include /tmp/shared_host.cc \
+          g++ -std=c++17 -Ilmflow/include lmflow/cpp/tests/shared_c_abi_smoke.cc \
             -Lbuild-shared -Wl,-rpath,"$PWD/build-shared" -llmflow -o /tmp/shared_host
           /tmp/shared_host
           cmake -B build-core-only -DCMAKE_BUILD_TYPE=Release \
@@ -520,26 +452,10 @@ jobs:
           cmake --install build-opencv --prefix /tmp/lmflow-opencv-sdk
       - name: 已安装 OpenCV component 可消费
         run: |
-          mkdir -p /tmp/lmflow-opencv-consumer
-          cat >/tmp/lmflow-opencv-consumer/CMakeLists.txt <<'EOF'
-          cmake_minimum_required(VERSION 3.18)
-          project(lmflow_opencv_consumer LANGUAGES CXX)
-          find_package(lmflow REQUIRED COMPONENTS opencv)
-          add_executable(smoke main.cc)
-          target_link_libraries(smoke PRIVATE lmflow::opencv)
-          EOF
-          cat >/tmp/lmflow-opencv-consumer/main.cc <<'EOF'
-          #include <lmflow/opencv.hpp>
-          int main() {
-            cv::Mat image(2, 2, CV_8UC1);
-            lmflow::Packet packet = lmflow::AdoptMat(std::move(image));
-            return packet.IsEmpty() ? 1 : 0;
-          }
-          EOF
-          cmake -S /tmp/lmflow-opencv-consumer -B /tmp/lmflow-opencv-consumer-build \
+          cmake -S lmflow/adapters/opencv/tests/consumer -B /tmp/lmflow-opencv-consumer-build \
             -Dlmflow_DIR=/tmp/lmflow-opencv-sdk/lib/cmake/lmflow
           cmake --build /tmp/lmflow-opencv-consumer-build
-          /tmp/lmflow-opencv-consumer-build/smoke
+          /tmp/lmflow-opencv-consumer-build/opencv_sdk_smoke
       # 直接证明「Python numpy 图 → C++ OpenCV 算子 → 读回」是同一块内存:开 LMFLOW_WITH_CV_TEST
       # 把 CvInvertTest 编进扩展(仅测试构建链 OpenCV;生产扩展仍零 CV),再从 Python 调用。
       - uses: actions/setup-python@v7
