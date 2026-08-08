@@ -497,13 +497,15 @@ class Poller {
     if (!lmflow_poller_try_next(handle_, &raw)) return std::nullopt;
     return Packet::Adopt(raw);
   }
-  /* Returns TIMEOUT or CLOSED through Status; on success, fills `out`. */
-  Status next_timeout(int64_t timeout_ms, Packet& out) {
+  /* Returns an empty optional on timeout or closed poller. Other failures
+   * throw; successful packets are transferred into the returned Packet. */
+  std::optional<Packet> next_timeout(int64_t timeout_ms) {
     ensure_handle();
     LMFlowPacket raw{};
-    const Status status = Status(lmflow_poller_next_timeout(handle_, &raw, timeout_ms));
-    if (status.ok()) out = Packet::Adopt(raw);
-    return status;
+    const LMFlowStatus status = lmflow_poller_next_timeout(handle_, &raw, timeout_ms);
+    if (status == LMFLOW_OK) return Packet::Adopt(raw);
+    if (status == LMFLOW_ERR_TIMEOUT || status == LMFLOW_ERR_CLOSED) return std::nullopt;
+    throw std::runtime_error(lmflow_last_error());
   }
   uint64_t dropped_count() const {
     ensure_handle();
