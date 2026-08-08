@@ -265,10 +265,11 @@ async for event in events:
 `events()` starts the graph on first iteration and shares the same event-loop wakeup driver as
 `graph.run_async()`, so multiple output ports can be consumed concurrently.
 
-The C ABI is the only stable interface (`lmflow/flow.h`); `flow.hpp` is the optional C++ kernel
-sugar, and `flow_platform_log.hpp` bridges engine logs to the platform logger (logcat / os_log /
-HiLog). OpenCV interop is a separate opt-in component under `adapters/opencv`, exposed as
-`<lmflow/opencv.hpp>` and the CMake target `lmflow::opencv`.
+The C ABI is the only stable interface (`lmflow/flow.h`). `flow.hpp` adds header-only C++ RAII
+host wrappers (`lmflow::Graph`, `lmflow::Input`, `lmflow::Poller`) with Rust-compatible method
+names, plus the existing C++ kernel authoring sugar. `flow_platform_log.hpp` bridges engine logs
+to the platform logger (logcat / os_log / HiLog). OpenCV interop is a separate opt-in component
+under `adapters/opencv`, exposed as `<lmflow/opencv.hpp>` and the CMake target `lmflow::opencv`.
 
 Mobile integration examples: [`lmflow/examples/android/hello_world`](lmflow/examples/android/hello_world) (JNI), [`lmflow/examples/ios/hello_world`](lmflow/examples/ios/hello_world) (Swift), [`lmflow/examples/harmonyos/hello_world`](lmflow/examples/harmonyos/hello_world) (NAPI).
 

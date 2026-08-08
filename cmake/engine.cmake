@@ -141,6 +141,9 @@ if(LMFLOW_BUILD_SHARED_LIBS)
   set_target_properties(lmflow_core_shared PROPERTIES
     OUTPUT_NAME lmflow_core
     WINDOWS_EXPORT_ALL_SYMBOLS ON)
+  target_include_directories(lmflow_core_shared PUBLIC
+    "$<BUILD_INTERFACE:${LMFLOW_SRC}/include>"
+    "$<INSTALL_INTERFACE:include>")
   add_dependencies(lmflow_core_shared flow_engine)
   _lmflow_whole_archive(lmflow_core_shared lmflow_core_static)
   _lmflow_add_windows_exports(lmflow_core_shared)
@@ -150,6 +153,9 @@ if(LMFLOW_BUILD_SHARED_LIBS)
   set_target_properties(lmflow_complete PROPERTIES
     OUTPUT_NAME lmflow
     WINDOWS_EXPORT_ALL_SYMBOLS ON)
+  target_include_directories(lmflow_complete PUBLIC
+    "$<BUILD_INTERFACE:${LMFLOW_SRC}/include>"
+    "$<INSTALL_INTERFACE:include>")
   add_dependencies(lmflow_complete flow_engine)
   if(LMFLOW_BUILD_KERNELS)
     _lmflow_whole_archive(lmflow_complete lmflow_core_static lmflow_kernels_archive)

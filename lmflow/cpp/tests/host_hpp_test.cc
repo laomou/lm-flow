@@ -1,0 +1,50 @@
+#include <cstdio>
+#include <optional>
+
+#include "lmflow/flow.hpp"
+
+int main() {
+  const char* yaml = R"(
+nodes:
+  - { name: pass, kernel: PassThroughKernel, input_ports: [in], output_ports: [out] }
+input_ports: [in]
+output_ports: [out]
+)";
+
+  try {
+    lmflow::Graph graph = lmflow::Graph::from_yaml(yaml);
+    lmflow::Poller poller = graph.add_poller("out");
+    lmflow::Input input = graph.input("in");
+
+    if (!graph.start().ok()) {
+      std::fprintf(stderr, "start failed: %s\n", lmflow_last_error());
+      return 1;
+    }
+    if (!input.send(lmflow::Packet::FromI64(42).At(7)).ok()) {
+      std::fprintf(stderr, "send failed: %s\n", lmflow_last_error());
+      return 2;
+    }
+
+    std::optional<lmflow::Packet> output = poller.next();
+    int64_t value = 0;
+    if (!output || !output->AsI64(&value) || value != 42 || output->Timestamp() != 7) {
+      std::fprintf(stderr, "unexpected output\n");
+      return 3;
+    }
+
+    input.close();
+    if (!graph.wait_done().ok()) {
+      std::fprintf(stderr, "wait_done failed: %s\n", graph.last_error());
+      return 4;
+    }
+    if (graph.state() != LMFLOW_STATE_TERMINATED) {
+      std::fprintf(stderr, "unexpected terminal state\n");
+      return 5;
+    }
+  } catch (const std::exception& error) {
+    std::fprintf(stderr, "%s\n", error.what());
+    return 6;
+  }
+
+  return 0;
+}
