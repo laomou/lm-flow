@@ -548,6 +548,38 @@ shared, and `MakeMutable*` is obliged to copy. In a linear pipeline `TakeInput` 
 copy-free; when a packet is genuinely fanned out to several consumers, the copy happens then — which
 is exactly what stops one branch from corrupting another.
 
+## C++ RAII host API
+
+Include `lmflow/flow.hpp` when the host itself should own a graph. `Graph`, `Input`, `Poller`, and
+`Packet` are move-only wrappers: constructors acquire an engine handle and destructors release it,
+including during exception unwinding.
+
+```cpp
+#include "lmflow/flow.hpp"
+
+lmflow::Graph graph = lmflow::Graph::from_yaml(yaml);
+lmflow::Poller poller = graph.add_poller("out");
+lmflow::Input input = graph.input("in");
+
+if (!graph.start().ok()) throw std::runtime_error(graph.last_error());
+if (!input.send(lmflow::Packet::FromI64(42).At(1)).ok())
+  throw std::runtime_error(graph.last_error());
+
+if (auto packet = poller.next_timeout(100)) {
+  int64_t value = 0;
+  packet->AsI64(&value);
+}
+input.close();
+graph.wait_done();
+```
+
+The `Graph` constructor checks `lmflow_abi_version()` against `LMFLOW_ABI_VERSION` before creating
+the handle. `input()` and `add_poller*()` intentionally are non-`const`: both register or create
+graph-owned handles. `try_send(Packet)` returns `true` only when accepted; `false` means
+`LMFLOW_ERR_WOULD_BLOCK` and the packet has already been consumed/dropped by the C ABI, so it cannot
+be retried. Other failures throw with the engine's last-error text. `Poller::next_timeout(ms)` returns
+an empty `std::optional` on timeout or closed output and throws for other errors.
+
 ## Writing a kernel with `flow.hpp`
 
 Implement `Process`; `Open` and `Close` are optional. A static `GetContract` is picked up
