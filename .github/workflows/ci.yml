@@ -116,7 +116,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
-      - run: cmake -S .. -B /tmp/lmflow-external -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF
+      - run: cmake -S .. -B /tmp/lmflow-external -DCMAKE_BUILD_TYPE=Release -DLMFLOW_BUILD_SHARED_LIBS=OFF
         working-directory: lmflow
       - run: cmake --build /tmp/lmflow-external --target flow_engine lmflow_kernels_archive
         working-directory: lmflow
@@ -172,7 +172,7 @@ jobs:
       - name: configure + build + ctest
         run: |
           cmake -B build -DCMAKE_BUILD_TYPE=Release \
-            -DBUILD_SHARED_LIBS=OFF -DLMFLOW_BUILD_KERNELS=ON \
+            -DLMFLOW_BUILD_SHARED_LIBS=OFF -DLMFLOW_BUILD_KERNELS=ON \
             -DLMFLOW_BUILD_BENCHMARKS=ON
           cmake --build build -j
           ctest --test-dir build --output-on-failure
@@ -213,7 +213,7 @@ jobs:
       - name: 动态完整库 + 纯 core + kernels 关闭
         run: |
           cmake -B build-shared -DCMAKE_BUILD_TYPE=Release \
-            -DBUILD_SHARED_LIBS=ON -DLMFLOW_BUILD_KERNELS=ON
+            -DLMFLOW_BUILD_SHARED_LIBS=ON -DLMFLOW_BUILD_KERNELS=ON
           cmake --build build-shared -j
           test -f build-shared/liblmflow.so
           test -f build-shared/liblmflow_core.so
@@ -237,7 +237,7 @@ jobs:
             -Lbuild-shared -Wl,-rpath,"$PWD/build-shared" -llmflow -o /tmp/shared_host
           /tmp/shared_host
           cmake -B build-core-only -DCMAKE_BUILD_TYPE=Release \
-            -DBUILD_SHARED_LIBS=ON -DLMFLOW_BUILD_KERNELS=OFF
+            -DLMFLOW_BUILD_SHARED_LIBS=ON -DLMFLOW_BUILD_KERNELS=OFF
           cmake --build build-core-only -j
       - run: sudo apt-get update && sudo apt-get install -y ninja-build
       - name: 多配置生成器下 cargo profile 必须跟随 --config
@@ -370,7 +370,7 @@ jobs:
         run: |
           $PSNativeCommandUseErrorActionPreference = $true
           cmake -S . -B build-windows -A x64 `
-            -DBUILD_SHARED_LIBS=OFF -DLMFLOW_BUILD_KERNELS=ON
+            -DLMFLOW_BUILD_SHARED_LIBS=OFF -DLMFLOW_BUILD_KERNELS=ON
           cmake --build build-windows --config Debug --parallel
           ctest --test-dir build-windows -C Debug --output-on-failure
           cmake --build build-windows --config Release --parallel
@@ -388,7 +388,7 @@ jobs:
         run: |
           $PSNativeCommandUseErrorActionPreference = $true
           cmake -S . -B build-windows-shared -A x64 `
-            -DBUILD_SHARED_LIBS=ON -DLMFLOW_BUILD_KERNELS=ON -DLMFLOW_BUILD_TESTS=OFF
+            -DLMFLOW_BUILD_SHARED_LIBS=ON -DLMFLOW_BUILD_KERNELS=ON -DLMFLOW_BUILD_TESTS=OFF
           cmake --build build-windows-shared --config Release --parallel
           if (-not (Test-Path "build-windows-shared\Release\lmflow.dll")) {
             throw "shared build is missing lmflow.dll"
@@ -463,7 +463,7 @@ jobs:
           cmake -S .. -B /tmp/lmflow-android \
             -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_LATEST_HOME/build/cmake/android.toolchain.cmake" \
             -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-21 \
-            -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF \
+            -DCMAKE_BUILD_TYPE=Release -DLMFLOW_BUILD_SHARED_LIBS=OFF \
             -DLMFLOW_BUILD_KERNELS=ON -DLMFLOW_BUILD_TESTS=OFF \
             -DLMFLOW_RUST_TARGET=aarch64-linux-android
           cmake --build /tmp/lmflow-android --parallel
@@ -487,7 +487,7 @@ jobs:
           cmake -S .. -B /tmp/lmflow-ios \
             -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_SYSROOT=iphoneos \
             -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_BUILD_TYPE=Release \
-            -DBUILD_SHARED_LIBS=OFF -DLMFLOW_BUILD_KERNELS=ON \
+            -DLMFLOW_BUILD_SHARED_LIBS=OFF -DLMFLOW_BUILD_KERNELS=ON \
             -DLMFLOW_BUILD_TESTS=OFF -DLMFLOW_RUST_TARGET=aarch64-apple-ios
           cmake --build /tmp/lmflow-ios --parallel
 
@@ -506,7 +506,7 @@ jobs:
       - name: 构建并测试 OpenCV adapter
         run: |
           cmake -S . -B build-opencv -DCMAKE_BUILD_TYPE=Release \
-            -DBUILD_SHARED_LIBS=OFF -DLMFLOW_BUILD_KERNELS=ON \
+            -DLMFLOW_BUILD_SHARED_LIBS=OFF -DLMFLOW_BUILD_KERNELS=ON \
             -DLMFLOW_BUILD_TESTS=ON -DLMFLOW_BUILD_OPENCV_ADAPTER=ON
           cmake --build build-opencv --parallel
           ctest --test-dir build-opencv -R lmflow_opencv_test --output-on-failure

@@ -77,7 +77,7 @@ needs, so nothing else has to be spelled out.
 ```bash
 cd lmflow/core
 cmake -B build -DCMAKE_BUILD_TYPE=Release \
-  -DBUILD_SHARED_LIBS=ON -DLMFLOW_BUILD_KERNELS=ON
+  -DLMFLOW_BUILD_SHARED_LIBS=ON -DLMFLOW_BUILD_KERNELS=ON
 cmake --build build
 # → build/liblmflow_core.so + build/liblmflow.so; headers are in lmflow/include/lmflow
 ```

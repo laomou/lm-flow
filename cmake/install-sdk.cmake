@@ -1,5 +1,5 @@
 # Install the native SDK: public headers, pure Rust core, optional kernels, and
-# the complete shared library selected by BUILD_SHARED_LIBS.
+# the complete shared library selected by LMFLOW_BUILD_SHARED_LIBS.
 
 install(FILES
     "${LMFLOW_SRC}/include/lmflow/flow.h"
@@ -17,7 +17,7 @@ if(LMFLOW_BUILD_KERNELS)
       ARCHIVE DESTINATION lib)
 endif()
 
-if(BUILD_SHARED_LIBS)
+if(LMFLOW_BUILD_SHARED_LIBS)
   install(TARGETS lmflow_core_shared lmflow_complete
       RUNTIME DESTINATION bin
       LIBRARY DESTINATION lib

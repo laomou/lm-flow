@@ -200,7 +200,7 @@ g++ -std=c++17 -Iinclude my_host.cc \
 
 ```bash
 cmake -B build -DCMAKE_BUILD_TYPE=Release \
-  -DBUILD_SHARED_LIBS=ON -DLMFLOW_BUILD_KERNELS=ON
+  -DLMFLOW_BUILD_SHARED_LIBS=ON -DLMFLOW_BUILD_KERNELS=ON
 cmake --build build
 ```
 
@@ -211,7 +211,7 @@ C++/原生侧的顶层构建是 CMake。Cargo 只构建纯 Rust core，CMake 单
 
 ```bash
 cmake -B build -DCMAKE_BUILD_TYPE=Release \
-  -DBUILD_SHARED_LIBS=ON \
+  -DLMFLOW_BUILD_SHARED_LIBS=ON \
   -DLMFLOW_BUILD_KERNELS=ON
 cmake --build build
 ctest --test-dir build                       # flow.hpp 测试;装了 OpenCV 则含 CV 测试
@@ -220,8 +220,8 @@ cmake --install build --prefix /opt/lmflow   # → headers + lib + lib/cmake/lmf
 
 两个开关互相独立：
 
-- `BUILD_SHARED_LIBS=ON`：安装纯 core 的 `liblmflow_core.so` 和完整的 `liblmflow.so`。
-- `BUILD_SHARED_LIBS=OFF`：静态目标由 `liblmflow_core.a` 与可选的 `liblmflow_kernels.a` 组成。
+- `LMFLOW_BUILD_SHARED_LIBS=ON`（默认）：安装纯 core 的 `liblmflow_core.so` 和完整的 `liblmflow.so`。
+- `LMFLOW_BUILD_SHARED_LIBS=OFF`：静态目标由 `liblmflow_core.a` 与可选的 `liblmflow_kernels.a` 组成。
 - `LMFLOW_BUILD_KERNELS=ON`（默认）：`lmflow::lmflow` 包含 18 个官方 C++ kernels。
 - `LMFLOW_BUILD_KERNELS=OFF`：只构建纯 Rust 引擎，不包含捆绑的 C++ 算子。
 
