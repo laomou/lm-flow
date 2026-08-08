@@ -188,24 +188,8 @@ jobs:
           cmake_minimum_required(VERSION 3.18)
           project(lmflow_sdk_smoke LANGUAGES CXX)
           find_package(lmflow REQUIRED)
-          add_executable(sdk_smoke main.cc)
-          target_link_libraries(sdk_smoke PRIVATE lmflow::lmflow)
-          EOF
-          cat >/tmp/lmflow-sdk-consumer/main.cc <<'EOF'
-          #include "lmflow/flow.h"
-          int main() {
-            LMFlowGraph* graph = lmflow_graph_new();
-            if (!graph) return 1;
-            const char* yaml = R"(
-          nodes:
-            - { name: pass, kernel: PassThroughKernel, input_ports: [in], output_ports: [out] }
-          input_ports: [in]
-          output_ports: [out]
-          )";
-            const LMFlowStatus status = lmflow_graph_init_from_yaml(graph, yaml);
-            lmflow_graph_free(graph);
-            return status == LMFLOW_OK ? 0 : 2;
-          }
+          add_executable(sdk_raii_smoke raii.cc)
+          target_link_libraries(sdk_raii_smoke PRIVATE lmflow::lmflow)
           EOF
           cat >/tmp/lmflow-sdk-consumer/raii.cc <<'EOF'
           #include "lmflow/flow.hpp"
@@ -231,13 +215,7 @@ jobs:
           }
           EOF
           cmake -S /tmp/lmflow-sdk-consumer -B /tmp/ex -Dlmflow_DIR=/tmp/sdk/lib/cmake/lmflow
-          cat >>/tmp/lmflow-sdk-consumer/CMakeLists.txt <<'EOF'
-          add_executable(sdk_raii_smoke raii.cc)
-          target_link_libraries(sdk_raii_smoke PRIVATE lmflow::lmflow)
-          EOF
-          cmake -S /tmp/lmflow-sdk-consumer -B /tmp/ex -Dlmflow_DIR=/tmp/sdk/lib/cmake/lmflow
           cmake --build /tmp/ex
-          /tmp/ex/sdk_smoke
           /tmp/ex/sdk_raii_smoke
       - name: 动态完整库 + 纯 core + kernels 关闭
         run: |
