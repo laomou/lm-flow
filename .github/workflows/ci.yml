@@ -337,7 +337,7 @@ jobs:
           cmake --build "$env:RUNNER_TEMP\sdk-shared-consumer-build" `
             --config Release --parallel
           $env:PATH = "$prefix\bin;$env:PATH"
-          & "$env:RUNNER_TEMP\sdk-shared-consumer-build\Release\sdk_smoke.exe"
+          & "$env:RUNNER_TEMP\sdk-shared-consumer-build\Release\sdk_raii_smoke.exe"
 
       - name: 已安装 SDK 可被外部 MSVC 工程消费
         shell: pwsh
