@@ -589,7 +589,8 @@ const char* lmflow_ctx_options_json(const LMFlowContext*);
  * 没有 side packet 就无法把「一个已经初始化好的模型」交给算子 —— options 做不到。
  *
  * 必须在 lmflow_graph_start 之前设置(之后返回 LMFLOW_ERR_STATE)。
- * 传入即移交所有权;引擎持有到 graph 释放。同名重复设置以最后一次为准。 */
+ * 调用即消费 pkt 的所有权,**无论返回 OK 或错误**,调用方都不得再 drop。
+ * 设置成功后引擎持有到 graph 释放;同名重复设置以最后一次为准。 */
 LMFlowStatus lmflow_graph_set_side_packet(LMFlowGraph*, const char* name, LMFlowPacket pkt);
 
 /* 算子在 open/process/close 内按名字读取(**借用**,不得 drop)。
@@ -639,6 +640,8 @@ void lmflow_graph_free(LMFlowGraph*); /* 内部先 cancel + wait,再释放 */
  *   A 已阻塞在 C 上 —— 循环等待,且不需要环形拓扑就会发生。
  *   因此内部无损背压不会阻塞 worker:生产者保留 staging 后让出线程,下游出队后恢复。 */
 LMFlowInput* lmflow_graph_input(LMFlowGraph*, const char* port);
+/* send / try_send 调用即消费 pkt 的所有权,**无论返回 OK、WOULD_BLOCK、CLOSED
+ * 或其它错误**,调用方都不得再 drop。失败表示包未进入图,但其引用已由本次调用释放。 */
 LMFlowStatus lmflow_input_send(LMFlowInput*, LMFlowPacket pkt);
 LMFlowStatus lmflow_input_try_send(LMFlowInput*, LMFlowPacket pkt);
 void lmflow_input_close(LMFlowInput*);
@@ -646,7 +649,7 @@ void lmflow_input_close(LMFlowInput*);
  * 了图,句柄仍安全(之后再用只会返回「图已结束」错误,不会 use-after-free)。
  * 不释放会泄漏引擎(句柄的引用一直撑着)。可传 NULL。 */
 void lmflow_input_free(LMFlowInput*);
-/* 便捷式(内部查表),等价于 lmflow_graph_input + lmflow_input_send */
+/* 便捷式(内部查表),所有权语义同 lmflow_input_send:无论成败都消费 pkt。 */
 LMFlowStatus lmflow_graph_add_packet(LMFlowGraph*, const char* port, LMFlowPacket pkt);
 LMFlowStatus lmflow_graph_close_input(LMFlowGraph*, const char* port);
 void lmflow_graph_close_all_inputs(LMFlowGraph*);
