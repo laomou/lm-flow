@@ -257,6 +257,8 @@ typedef struct {
 size_t lmflow_dtype_size(int32_t dtype); /* 未知 dtype 返回 0 */
 
 /* 【推荐的零拷贝入口】由**引擎**分配连续缓冲，通过 out 返回可写视图。
+ * 在算子回调内，YAML 顶层 buffer_pool_max_bytes > 0 时可复用本 Graph 已释放的
+ * 同尺寸存储；无论是否复用，本函数都保证内容清零。宿主线程直接调用时不使用 Graph 池。
  * data 的对齐满足其分配器要求，但 C ABI 不承诺特定的 SIMD(32/64 字节)对齐；
  * 需要 SIMD 对齐加载时请使用非对齐指令或由宿主自行复制/校验对齐。
  * 调用方(Python 用 numpy、C++ 用 cv::Mat)直接包住
@@ -265,7 +267,8 @@ size_t lmflow_dtype_size(int32_t dtype); /* 未知 dtype 返回 0 */
 LMFlowPacket lmflow_packet_new_buffer(int32_t ndim, const int64_t* shape, int32_t dtype, int64_t ts,
                                   LMFlowBuffer* out);
 
-/* 高性能变体:分配连续 CPU 缓冲但**不初始化内容**。
+/* 高性能变体:取得连续 CPU 缓冲但**不初始化内容**。在算子回调内可从当前 Graph 的
+ * buffer 池复用同尺寸存储(池有界,超出容量时正常释放);复用不会改变未初始化语义。
  * 调用方必须在 clone、send、emit、as_buffer 或其它任何读取/共享操作前写满全部字节。
  * 未写满即移交或读取该 Packet 的行为未定义。仅应用于输出会被完整覆写的算子；
  * 需要确定的初始值时继续使用 lmflow_packet_new_buffer。 */

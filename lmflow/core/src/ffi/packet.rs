@@ -4,10 +4,11 @@
 //! 那里定义了整层的约定(catch_unwind 包裹、last_error、空指针检查、布局钉死)。
 #![allow(clippy::missing_safety_doc)]
 
-use std::alloc::{alloc, dealloc, Layout};
+use std::alloc::Layout;
 use std::ffi::{c_char, c_void};
 use std::sync::Arc;
 
+use crate::buffer_pool::{self, BufferAllocation, BufferPool};
 use crate::metadata::MetadataValue;
 use crate::packet::{
     self, BufferData, BufferView, Builtin, ExternalBuffer, Packet, PacketBody, Payload,
@@ -716,23 +717,6 @@ fn validate_buffer_descriptor(src: &LMFlowBuffer) -> crate::status::Result<Valid
     })
 }
 
-fn fill_buffer(out: *mut LMFlowBuffer, b: &BufferData, readonly: bool, data: *mut c_void) {
-    if out.is_null() {
-        return;
-    }
-    let v = LMFlowBuffer {
-        data,
-        shape: b.shape,
-        strides: b.strides,
-        ndim: b.ndim,
-        dtype: b.dtype,
-        flags: if readonly { BUF_FLAG_READONLY } else { 0 },
-        device: DEVICE_CPU,
-        reserved: [0; 2],
-    };
-    unsafe { std::ptr::write(out, v) };
-}
-
 fn fill_buffer_view(out: *mut LMFlowBuffer, view: BufferView) {
     if out.is_null() {
         return;
@@ -750,19 +734,35 @@ fn fill_buffer_view(out: *mut LMFlowBuffer, view: BufferView) {
     unsafe { std::ptr::write(out, value) };
 }
 
-struct UninitializedAllocation {
-    data: *mut u8,
-    layout: Layout,
+struct BufferAllocationOwner {
+    allocation: Option<BufferAllocation>,
+    pool: Option<Arc<BufferPool>>,
 }
 
 unsafe extern "C" fn release_uninitialized_allocation(user_data: *mut c_void) {
     if user_data.is_null() {
         return;
     }
-    let allocation = Box::from_raw(user_data as *mut UninitializedAllocation);
-    if !allocation.data.is_null() {
-        dealloc(allocation.data, allocation.layout);
+    let mut owner = Box::from_raw(user_data as *mut BufferAllocationOwner);
+    if let Some(allocation) = owner.allocation.take() {
+        if let Some(pool) = owner.pool.take() {
+            pool.release(allocation);
+        } else if !allocation.data.is_null() {
+            unsafe { std::alloc::dealloc(allocation.data, allocation.layout) };
+        }
     }
+}
+
+fn allocate_buffer(layout: Layout) -> Option<(BufferAllocation, Option<Arc<BufferPool>>)> {
+    let pool = buffer_pool::active();
+    let allocation = pool.as_ref().map_or_else(
+        || BufferAllocation {
+            data: unsafe { std::alloc::alloc(layout) },
+            layout,
+        },
+        |pool| pool.take(layout),
+    );
+    (!allocation.data.is_null()).then_some((allocation, pool))
 }
 
 #[no_mangle]
@@ -787,23 +787,54 @@ pub unsafe extern "C" fn lmflow_packet_new_buffer(
             return LMFlowPacket::default();
         }
         let dims = std::slice::from_raw_parts(shape, ndim as usize);
-        match BufferData::new(dims, dtype) {
-            Ok(b) => {
-                let pkt = Packet::from_builtin(Builtin::Buffer(b)).at(Timestamp(ts));
-                let fp = own_packet(pkt);
-                // 填可写视图:此时引擎持有的那份就是调用方拿到的那份(独占)
-                if let Payload::Builtin(Builtin::Buffer(b)) =
-                    (*(fp.owner as *const PacketBody)).payload.as_ref()
-                {
-                    fill_buffer(out, b, false, b.bytes.as_ptr() as *mut c_void);
-                }
-                fp
+        let (shape_array, strides, total) = match BufferData::checked_layout(dims, dtype) {
+            Ok(layout) => layout,
+            Err(error) => {
+                last_error::set(&error.to_string());
+                return LMFlowPacket::default();
             }
-            Err(e) => {
-                last_error::set(&e.to_string());
-                LMFlowPacket::default()
+        };
+        let layout = match Layout::from_size_align(total.max(1), 1) {
+            Ok(layout) => layout,
+            Err(_) => {
+                last_error::set("lmflow_packet_new_buffer: invalid allocation layout");
+                return LMFlowPacket::default();
             }
+        };
+        let Some((allocation, pool)) = allocate_buffer(layout) else {
+            last_error::set(&format!(
+                "lmflow_packet_new_buffer: cannot allocate {total} buffer bytes"
+            ));
+            return LMFlowPacket::default();
+        };
+        unsafe { std::ptr::write_bytes(allocation.data, 0, total) };
+        let owner = Box::new(BufferAllocationOwner {
+            allocation: Some(allocation),
+            pool,
+        });
+        let source = LMFlowBuffer {
+            data: owner.allocation.as_ref().unwrap().data as *mut c_void,
+            shape: shape_array,
+            strides,
+            ndim,
+            dtype,
+            flags: 0,
+            device: DEVICE_CPU,
+            reserved: [0; 2],
+        };
+        let user_data = Box::into_raw(owner) as *mut c_void;
+        let packet = lmflow_packet_adopt_buffer(
+            &source,
+            ts,
+            Some(release_uninitialized_allocation),
+            user_data,
+        );
+        if packet.owner.is_null() {
+            release_uninitialized_allocation(user_data);
+        } else if !out.is_null() {
+            std::ptr::write(out, source);
         }
+        packet
     })
 }
 
@@ -838,14 +869,17 @@ pub unsafe extern "C" fn lmflow_packet_new_buffer_uninit(
                 return LMFlowPacket::default();
             }
         };
-        let data = alloc(layout);
-        if data.is_null() {
+        let Some((allocation, pool)) = allocate_buffer(layout) else {
             last_error::set(&format!(
                 "lmflow_packet_new_buffer_uninit: cannot allocate {total} buffer bytes"
             ));
             return LMFlowPacket::default();
-        }
-        let allocation = Box::new(UninitializedAllocation { data, layout });
+        };
+        let data = allocation.data;
+        let allocation = Box::new(BufferAllocationOwner {
+            allocation: Some(allocation),
+            pool,
+        });
         let user_data = Box::into_raw(allocation) as *mut c_void;
         let source = LMFlowBuffer {
             data: data as *mut c_void,
