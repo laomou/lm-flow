@@ -110,7 +110,7 @@ function(_lmflow_add_windows_exports target)
   foreach(_symbol IN LISTS _lmflow_exports)
     file(APPEND "${_def}" "  ${_symbol}\n")
   endforeach()
-  target_link_options(${target} PRIVATE "/DEF:${_def}")
+  target_sources(${target} PRIVATE "${_def}")
 endfunction()
 
 if(LMFLOW_BUILD_KERNELS)
@@ -139,8 +139,7 @@ endif()
 if(LMFLOW_BUILD_SHARED_LIBS)
   add_library(lmflow_core_shared SHARED "${LMFLOW_ROOT}/cmake/lmflow_link.cc")
   set_target_properties(lmflow_core_shared PROPERTIES
-    OUTPUT_NAME lmflow_core
-    WINDOWS_EXPORT_ALL_SYMBOLS ON)
+    OUTPUT_NAME lmflow_core)
   target_include_directories(lmflow_core_shared PUBLIC
     "$<BUILD_INTERFACE:${LMFLOW_SRC}/include>"
     "$<INSTALL_INTERFACE:include>")
@@ -151,8 +150,7 @@ if(LMFLOW_BUILD_SHARED_LIBS)
 
   add_library(lmflow_complete SHARED "${LMFLOW_ROOT}/cmake/lmflow_link.cc")
   set_target_properties(lmflow_complete PROPERTIES
-    OUTPUT_NAME lmflow
-    WINDOWS_EXPORT_ALL_SYMBOLS ON)
+    OUTPUT_NAME lmflow)
   target_include_directories(lmflow_complete PUBLIC
     "$<BUILD_INTERFACE:${LMFLOW_SRC}/include>"
     "$<INSTALL_INTERFACE:include>")
