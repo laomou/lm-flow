@@ -171,6 +171,11 @@ class Packet {
   static Packet NewBuffer(int32_t ndim, const int64_t* shape, int32_t dtype, LMFlowBuffer* out) {
     return Adopt(lmflow_packet_new_buffer(ndim, shape, dtype, LMFLOW_TS_UNSET, out));
   }
+  static Packet NewBufferUninitialized(int32_t ndim, const int64_t* shape, int32_t dtype,
+                                       LMFlowBuffer* out) {
+    return Adopt(
+        lmflow_packet_new_buffer_uninit(ndim, shape, dtype, LMFLOW_TS_UNSET, out));
+  }
   /// 零拷贝接管外部 CPU buffer。成功后最后一个 Packet 引用释放时调用
   /// release_fn(user_data)；失败时所有权仍归调用方。
   static Packet AdoptBuffer(const LMFlowBuffer& buffer, LMFlowBufferReleaseFn release_fn,

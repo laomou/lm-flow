@@ -271,11 +271,14 @@ pub struct BufferData {
 }
 
 impl BufferData {
-    /// 按 shape/dtype 分配连续缓冲(行优先),内容置零。
-    pub fn new(shape: &[i64], dt: i32) -> Result<Self> {
+    pub(crate) fn checked_layout(
+        shape: &[i64],
+        dt: i32,
+    ) -> Result<([i64; MAX_DIMS], [i64; MAX_DIMS], usize)> {
         if shape.is_empty() || shape.len() > MAX_DIMS {
             return Err(Error::InvalidArg(format!(
-                "ndim must be in 1..={MAX_DIMS}, got {}",
+                "ndim must be in 1..={}, got {}",
+                MAX_DIMS,
                 shape.len()
             )));
         }
@@ -297,11 +300,9 @@ impl BufferData {
         let total = count
             .checked_mul(esz)
             .ok_or_else(|| Error::InvalidArg("buffer byte count overflow".into()))?;
-
         let mut s = [0i64; MAX_DIMS];
         let mut st = [0i64; MAX_DIMS];
         s[..shape.len()].copy_from_slice(shape);
-        // 行优先连续:最后一维步长 = 元素大小
         let mut acc = esz as i64;
         for i in (0..shape.len()).rev() {
             st[i] = acc;
@@ -309,6 +310,12 @@ impl BufferData {
                 .checked_mul(shape[i])
                 .ok_or_else(|| Error::InvalidArg("buffer stride overflow".into()))?;
         }
+        Ok((s, st, total))
+    }
+
+    /// 按 shape/dtype 分配连续缓冲(行优先),内容置零。
+    pub fn new(shape: &[i64], dt: i32) -> Result<Self> {
+        let (s, st, total) = Self::checked_layout(shape, dt)?;
         let mut bytes = Vec::new();
         bytes
             .try_reserve_exact(total)
