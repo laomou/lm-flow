@@ -348,9 +348,9 @@ jobs:
             -B "$env:RUNNER_TEMP\sdk-consumer-build" `
             -A x64 "-Dlmflow_DIR=$sdk"
           cmake --build "$env:RUNNER_TEMP\sdk-consumer-build" --config Debug --parallel
-          & "$env:RUNNER_TEMP\sdk-consumer-build\Debug\sdk_smoke.exe"
+          & "$env:RUNNER_TEMP\sdk-consumer-build\Debug\sdk_raii_smoke.exe"
           cmake --build "$env:RUNNER_TEMP\sdk-consumer-build" --config Release --parallel
-          & "$env:RUNNER_TEMP\sdk-consumer-build\Release\sdk_smoke.exe"
+          & "$env:RUNNER_TEMP\sdk-consumer-build\Release\sdk_raii_smoke.exe"
 
       - name: Windows wheel 构建 + Python 测试
         timeout-minutes: 10
