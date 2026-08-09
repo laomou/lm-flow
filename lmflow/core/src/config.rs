@@ -240,6 +240,9 @@ pub struct GraphConfig {
     /// 单次算子回调超过该时长即打 WARN(0 = 关闭)
     #[serde(default)]
     pub watchdog_ms: u64,
+    /// 算子内 buffer 分配池上限(字节, 0 = 关闭)
+    #[serde(default)]
+    pub buffer_pool_max_bytes: usize,
     /// 运行时统计级别。省略时为 `basic`。
     ///
     /// `full` 才记录每次回调耗时、百分位、CoW 与执行器耗时；`off` 进一步关闭低成本
@@ -267,6 +270,7 @@ impl Default for GraphConfig {
             max_queue_size: default_max_queue_size(),
             max_queued_packets: 0,
             watchdog_ms: 0,
+            buffer_pool_max_bytes: 0,
             stats: None,
             stats_timing: None,
         }
@@ -1465,6 +1469,7 @@ nodes:
       roi: { x: 5 }
 watchdog_ms: 5000
 max_queued_packets: 500
+buffer_pool_max_bytes: 268435456
 "#,
         )
         .unwrap();
@@ -1472,6 +1477,7 @@ max_queued_packets: 500
         assert_eq!(cfg.nodes[0].executor, "cpu");
         assert_eq!(cfg.watchdog_ms, 5000);
         assert_eq!(cfg.max_queued_packets, 500);
+        assert_eq!(cfg.buffer_pool_max_bytes, 268435456);
         assert!(cfg.nodes[0].options.get("factor").is_some());
     }
 

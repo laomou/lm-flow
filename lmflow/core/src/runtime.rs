@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Mutex;
 
 use crate::config::GraphConfig;
+use crate::packet::BufferPool;
 use crate::status::Error;
 
 // ---------------------------------------------------------------- 日志
@@ -132,6 +133,7 @@ pub const CLOSE_CANCELLED: i32 = 2;
 
 pub struct GraphShared {
     pub config: GraphConfig,
+    pub(crate) buffer_pool: std::sync::Arc<BufferPool>,
     /// 首个错误(后续错误只记日志,不覆盖首因)
     error: Mutex<Option<Error>>,
     error_c: CStrArena,
@@ -148,6 +150,7 @@ pub struct GraphShared {
 impl GraphShared {
     pub fn new(config: GraphConfig) -> Self {
         Self {
+            buffer_pool: std::sync::Arc::new(BufferPool::new(config.buffer_pool_max_bytes)),
             config,
             error: Mutex::new(None),
             error_c: CStrArena::default(),

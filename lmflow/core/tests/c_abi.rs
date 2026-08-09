@@ -30,11 +30,63 @@ impl Kernel for CAbiI64Pass {
     }
 }
 
+#[derive(Default)]
+struct CAbiBufferPoolProbe;
+
+static BUFFER_POOL_PROBE: AtomicUsize = AtomicUsize::new(0);
+
+impl Kernel for CAbiBufferPoolProbe {
+    fn get_contract(contract: &mut KernelContract) {
+        contract.input_type(0, type_id::I64);
+    }
+
+    fn process(&mut self, _context: &mut KernelCtx) -> lmflow::Result<()> {
+        unsafe {
+            let shape = [4096i64];
+            let mut first_view = LMFlowBuffer::default();
+            let mut first =
+                lmflow_packet_new_buffer_uninit(1, shape.as_ptr(), 0, 0, &mut first_view);
+            if first.owner.is_null() {
+                BUFFER_POOL_PROBE.store(1, Ordering::SeqCst);
+                return Ok(());
+            }
+            std::ptr::write_bytes(first_view.data, 0xa5, shape[0] as usize);
+            let first_data = first_view.data;
+            lmflow_packet_drop(&mut first);
+
+            let mut second_view = LMFlowBuffer::default();
+            let mut second = lmflow_packet_new_buffer(1, shape.as_ptr(), 0, 1, &mut second_view);
+            if second.owner.is_null() {
+                BUFFER_POOL_PROBE.store(2, Ordering::SeqCst);
+                return Ok(());
+            }
+            let reused = second_view.data == first_data;
+            let zeroed =
+                std::slice::from_raw_parts(second_view.data as *const u8, shape[0] as usize)
+                    .iter()
+                    .all(|byte| *byte == 0);
+            lmflow_packet_drop(&mut second);
+            BUFFER_POOL_PROBE.store(
+                if reused && zeroed {
+                    3
+                } else if reused {
+                    4
+                } else {
+                    5
+                },
+                Ordering::SeqCst,
+            );
+        }
+        Ok(())
+    }
+}
+
 fn register_test_kernels() {
     common::register_test_kernels();
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
         register_kernel::<CAbiI64Pass>("CAbiI64Pass").unwrap();
+        register_kernel::<CAbiBufferPoolProbe>("CAbiBufferPoolProbe").unwrap();
     });
 }
 
@@ -583,30 +635,32 @@ fn uninitialized_buffer_preserves_caller_writes() {
 }
 
 #[test]
-fn uninitialized_buffer_reuses_released_storage() {
+fn graph_buffer_pool_reuses_storage_and_new_buffer_zeroes_it() {
+    register_test_kernels();
+    BUFFER_POOL_PROBE.store(0, Ordering::SeqCst);
     unsafe {
-        let shape = [1024i64, 1024];
-        let mut first_view = LMFlowBuffer::default();
-        let mut first =
-            lmflow_packet_new_buffer_uninit(2, shape.as_ptr(), 0 /*U8*/, 0, &mut first_view);
-        assert!(
-            !first.owner.is_null(),
-            "allocation failed: {}",
+        let graph = lmflow_graph_new();
+        let yaml = cs(r#"
+buffer_pool_max_bytes: 4096
+nodes:
+  - { name: probe, kernel: CAbiBufferPoolProbe, input_ports: [in] }
+input_ports: [in]
+"#);
+        assert_eq!(lmflow_graph_init_from_yaml(graph, yaml.as_ptr()), 0);
+        assert_eq!(lmflow_graph_start(graph), 0);
+        let input = lmflow_graph_input(graph, c"in".as_ptr());
+        assert_eq!(lmflow_input_send(input, lmflow_packet_from_i64(1, 0)), 0);
+        assert_eq!(lmflow_graph_wait_until_idle(graph), 0);
+        assert_eq!(
+            BUFFER_POOL_PROBE.load(Ordering::SeqCst),
+            3,
+            "pool probe failed: {}",
             last_error()
         );
-        let first_data = first_view.data;
-        lmflow_packet_drop(&mut first);
-
-        let mut second_view = LMFlowBuffer::default();
-        let mut second =
-            lmflow_packet_new_buffer_uninit(2, shape.as_ptr(), 0 /*U8*/, 1, &mut second_view);
-        assert!(
-            !second.owner.is_null(),
-            "allocation failed: {}",
-            last_error()
-        );
-        assert_eq!(second_view.data, first_data);
-        lmflow_packet_drop(&mut second);
+        lmflow_graph_close_all_inputs(graph);
+        assert_eq!(lmflow_graph_wait_done(graph), 0);
+        lmflow_input_free(input);
+        lmflow_graph_free(graph);
     }
 }
 
