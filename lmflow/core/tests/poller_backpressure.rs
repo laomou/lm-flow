@@ -393,6 +393,7 @@ fn poller_block_reports_stats_and_recovery() {
     let _callback_guard = LogCallbackGuard::install();
     let graph = common::graph_from_yaml(
         r#"
+stats: full
 nodes:
   - { name: poller_diagnostic_pass, kernel: PassThrough, input_ports: [in], output_ports: [poller_diagnostic_out] }
 input_ports: [in]
@@ -422,6 +423,8 @@ output_ports: [poller_diagnostic_out]
         loop {
             let stats = poller.backpressure_stats();
             if stats.blocked {
+                std::thread::sleep(Duration::from_millis(20));
+                let stats = poller.backpressure_stats();
                 assert_eq!(stats.port_name, "poller_diagnostic_out");
                 assert_eq!(stats.capacity, Some(1));
                 assert_eq!(stats.overflow, PollerOverflow::Block);
@@ -429,6 +432,13 @@ output_ports: [poller_diagnostic_out]
                 assert_eq!(stats.active_waiters, 1);
                 assert_eq!(stats.block_events, 1);
                 assert!(stats.blocked_for_us > 0);
+                let node_stats = graph.node_stats(0).unwrap();
+                assert!(
+                    node_stats.total_process_us < stats.blocked_for_us as i64,
+                    "process timing must exclude poller blocking: process={}us blocked={}us",
+                    node_stats.total_process_us,
+                    stats.blocked_for_us
+                );
                 let dot = graph.to_dot_with_stats();
                 assert!(dot.contains("poller: poller_diagnostic_out"));
                 assert!(dot.contains("Block · queue 1/1"));
