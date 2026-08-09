@@ -8,6 +8,7 @@ use std::alloc::Layout;
 use std::ffi::{c_char, c_void};
 use std::sync::Arc;
 
+use crate::buffer_pool::{self, BufferAllocation, BufferPool};
 use crate::metadata::MetadataValue;
 use crate::packet::{
     self, BufferData, BufferView, Builtin, ExternalBuffer, Packet, PacketBody, Payload,
@@ -734,8 +735,8 @@ fn fill_buffer_view(out: *mut LMFlowBuffer, view: BufferView) {
 }
 
 struct BufferAllocationOwner {
-    allocation: Option<crate::packet::BufferAllocation>,
-    pool: Option<Arc<crate::packet::BufferPool>>,
+    allocation: Option<BufferAllocation>,
+    pool: Option<Arc<BufferPool>>,
 }
 
 unsafe extern "C" fn release_uninitialized_allocation(user_data: *mut c_void) {
@@ -752,15 +753,10 @@ unsafe extern "C" fn release_uninitialized_allocation(user_data: *mut c_void) {
     }
 }
 
-fn allocate_buffer(
-    layout: Layout,
-) -> Option<(
-    crate::packet::BufferAllocation,
-    Option<Arc<crate::packet::BufferPool>>,
-)> {
-    let pool = crate::packet::active_buffer_pool();
+fn allocate_buffer(layout: Layout) -> Option<(BufferAllocation, Option<Arc<BufferPool>>)> {
+    let pool = buffer_pool::active();
     let allocation = pool.as_ref().map_or_else(
-        || crate::packet::BufferAllocation {
+        || BufferAllocation {
             data: unsafe { std::alloc::alloc(layout) },
             layout,
         },

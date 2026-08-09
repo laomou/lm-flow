@@ -91,6 +91,7 @@
 //! timestamp and termination semantics, lock ordering rules and the decision log — is
 //! `docs/design.md` (written in Chinese).
 
+mod buffer_pool;
 pub mod config;
 pub mod context;
 mod diagnostic;

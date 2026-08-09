@@ -5,8 +5,8 @@ use std::ffi::{c_void, CString};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Mutex;
 
+use crate::buffer_pool::BufferPool;
 use crate::config::GraphConfig;
-use crate::packet::BufferPool;
 use crate::status::Error;
 
 // ---------------------------------------------------------------- 日志

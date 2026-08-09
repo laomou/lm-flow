@@ -1090,7 +1090,7 @@ impl GraphInner {
         }
 
         // 安全性:ctx_ptr 来自本槽的 UnsafeCell,该槽此刻独占。
-        let _buffer_pool = crate::packet::enter_buffer_pool(self.shared.buffer_pool.clone());
+        let _buffer_pool = crate::buffer_pool::enter(self.shared.buffer_pool.clone());
         let rc = unsafe {
             match phase {
                 KernelPhase::Open => node.kernel.open(ctx_ptr),
