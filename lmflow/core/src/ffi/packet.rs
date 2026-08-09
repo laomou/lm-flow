@@ -4,6 +4,7 @@
 //! 那里定义了整层的约定(catch_unwind 包裹、last_error、空指针检查、布局钉死)。
 #![allow(clippy::missing_safety_doc)]
 
+use std::alloc::{alloc, dealloc, Layout};
 use std::ffi::{c_char, c_void};
 use std::sync::Arc;
 
@@ -749,6 +750,21 @@ fn fill_buffer_view(out: *mut LMFlowBuffer, view: BufferView) {
     unsafe { std::ptr::write(out, value) };
 }
 
+struct UninitializedAllocation {
+    data: *mut u8,
+    layout: Layout,
+}
+
+unsafe extern "C" fn release_uninitialized_allocation(user_data: *mut c_void) {
+    if user_data.is_null() {
+        return;
+    }
+    let allocation = Box::from_raw(user_data as *mut UninitializedAllocation);
+    if !allocation.data.is_null() {
+        dealloc(allocation.data, allocation.layout);
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn lmflow_dtype_size(dt: i32) -> usize {
     packet::dtype_size(dt)
@@ -788,6 +804,71 @@ pub unsafe extern "C" fn lmflow_packet_new_buffer(
                 LMFlowPacket::default()
             }
         }
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn lmflow_packet_new_buffer_uninit(
+    ndim: i32,
+    shape: *const i64,
+    dtype: i32,
+    ts: i64,
+    out: *mut LMFlowBuffer,
+) -> LMFlowPacket {
+    guard_val(LMFlowPacket::default(), || {
+        if !(1..=packet::MAX_DIMS as i32).contains(&ndim) || shape.is_null() {
+            last_error::set(&format!(
+                "lmflow_packet_new_buffer_uninit: ndim must be in 1..={}, and shape must be non-null",
+                packet::MAX_DIMS
+            ));
+            return LMFlowPacket::default();
+        }
+        let dims = std::slice::from_raw_parts(shape, ndim as usize);
+        let (shape_array, strides, total) = match BufferData::checked_layout(dims, dtype) {
+            Ok(layout) => layout,
+            Err(error) => {
+                last_error::set(&error.to_string());
+                return LMFlowPacket::default();
+            }
+        };
+        let layout = match Layout::from_size_align(total.max(1), 1) {
+            Ok(layout) => layout,
+            Err(_) => {
+                last_error::set("lmflow_packet_new_buffer_uninit: invalid allocation layout");
+                return LMFlowPacket::default();
+            }
+        };
+        let data = alloc(layout);
+        if data.is_null() {
+            last_error::set(&format!(
+                "lmflow_packet_new_buffer_uninit: cannot allocate {total} buffer bytes"
+            ));
+            return LMFlowPacket::default();
+        }
+        let allocation = Box::new(UninitializedAllocation { data, layout });
+        let user_data = Box::into_raw(allocation) as *mut c_void;
+        let source = LMFlowBuffer {
+            data: data as *mut c_void,
+            shape: shape_array,
+            strides,
+            ndim,
+            dtype,
+            flags: 0,
+            device: DEVICE_CPU,
+            reserved: [0; 2],
+        };
+        let packet = lmflow_packet_adopt_buffer(
+            &source,
+            ts,
+            Some(release_uninitialized_allocation),
+            user_data,
+        );
+        if packet.owner.is_null() {
+            release_uninitialized_allocation(user_data);
+        } else if !out.is_null() {
+            std::ptr::write(out, source);
+        }
+        packet
     })
 }
 

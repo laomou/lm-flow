@@ -554,6 +554,35 @@ fn buffer_alloc_view_and_cow() {
 }
 
 #[test]
+fn uninitialized_buffer_preserves_caller_writes() {
+    unsafe {
+        let shape = [2i64, 3];
+        let mut buffer = LMFlowBuffer::default();
+        let mut packet =
+            lmflow_packet_new_buffer_uninit(2, shape.as_ptr(), 0 /*U8*/, 9, &mut buffer);
+        assert!(
+            !packet.owner.is_null(),
+            "allocation failed: {}",
+            last_error()
+        );
+        assert_eq!(&buffer.shape[..2], &shape);
+        assert_eq!(&buffer.strides[..2], &[3, 1]);
+
+        let output = std::slice::from_raw_parts_mut(buffer.data as *mut u8, 6);
+        output.copy_from_slice(&[1, 2, 3, 4, 5, 6]);
+
+        let mut view = LMFlowBuffer::default();
+        assert!(lmflow_packet_as_buffer(&packet, &mut view));
+        assert_eq!(
+            std::slice::from_raw_parts(view.data as *const u8, 6),
+            &[1, 2, 3, 4, 5, 6]
+        );
+        assert_eq!(packet.timestamp, 9);
+        lmflow_packet_drop(&mut packet);
+    }
+}
+
+#[test]
 fn cow_copies_when_shared() {
     unsafe {
         let shape = [4i64];
