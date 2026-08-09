@@ -256,8 +256,10 @@ typedef struct {
 
 size_t lmflow_dtype_size(int32_t dtype); /* 未知 dtype 返回 0 */
 
-/* 【推荐的零拷贝入口】由**引擎**分配缓冲(连续、按 SIMD 友好边界对齐),
- * 通过 out 返回可写视图。调用方(Python 用 numpy、C++ 用 cv::Mat)直接包住
+/* 【推荐的零拷贝入口】由**引擎**分配连续缓冲，通过 out 返回可写视图。
+ * data 的对齐满足其分配器要求，但 C ABI 不承诺特定的 SIMD(32/64 字节)对齐；
+ * 需要 SIMD 对齐加载时请使用非对齐指令或由宿主自行复制/校验对齐。
+ * 调用方(Python 用 numpy、C++ 用 cv::Mat)直接包住
  * out->data 就地写入 —— 全程不发生跨语言引用计数,这避免了「在引擎工作线程上
  * 析构 PyObject 需抢 GIL」的死锁风险。 */
 LMFlowPacket lmflow_packet_new_buffer(int32_t ndim, const int64_t* shape, int32_t dtype, int64_t ts,
