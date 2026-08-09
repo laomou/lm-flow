@@ -4,4 +4,5 @@ project(lmflow_sdk_consumer LANGUAGES CXX)
 find_package(lmflow REQUIRED)
 
 add_executable(sdk_raii_smoke main.cc)
+target_compile_features(sdk_raii_smoke PRIVATE cxx_std_17)
 target_link_libraries(sdk_raii_smoke PRIVATE lmflow::lmflow)
