@@ -326,48 +326,26 @@ jobs:
         shell: pwsh
         run: |
           $PSNativeCommandUseErrorActionPreference = $true
+          $prefix = "$env:RUNNER_TEMP\lmflow-shared-sdk"
           cmake -S . -B build-windows-shared -A x64 `
             -DLMFLOW_BUILD_SHARED_LIBS=ON -DLMFLOW_BUILD_KERNELS=ON -DLMFLOW_BUILD_TESTS=OFF
           cmake --build build-windows-shared --config Release --parallel
-          if (-not (Test-Path "build-windows-shared\Release\lmflow.dll")) {
-            throw "shared build is missing lmflow.dll"
-          }
-          if (-not (Test-Path "build-windows-shared\Release\lmflow_core.dll")) {
-            throw "shared build is missing lmflow_core.dll"
-          }
+          cmake --install build-windows-shared --config Release --prefix $prefix
+          cmake -S lmflow/cpp/tests/sdk_consumer `
+            -B "$env:RUNNER_TEMP\sdk-shared-consumer-build" -A x64 `
+            "-Dlmflow_DIR=$prefix\lib\cmake\lmflow"
+          cmake --build "$env:RUNNER_TEMP\sdk-shared-consumer-build" `
+            --config Release --parallel
+          $env:PATH = "$prefix\bin;$env:PATH"
+          & "$env:RUNNER_TEMP\sdk-shared-consumer-build\Release\sdk_smoke.exe"
 
       - name: 已安装 SDK 可被外部 MSVC 工程消费
         shell: pwsh
         run: |
           $PSNativeCommandUseErrorActionPreference = $true
           $sdk = "$env:RUNNER_TEMP\lmflow-sdk\lib\cmake\lmflow"
-          $source = "$env:RUNNER_TEMP\sdk-consumer"
-          New-Item -ItemType Directory -Force -Path $source | Out-Null
-          Set-Content -Path "$source\CMakeLists.txt" -Value @'
-          cmake_minimum_required(VERSION 3.18)
-          project(lmflow_sdk_smoke LANGUAGES CXX)
-          find_package(lmflow REQUIRED)
-          add_executable(sdk_smoke main.cc)
-          target_link_libraries(sdk_smoke PRIVATE lmflow::lmflow)
-          '@
-          Set-Content -Path "$source\main.cc" -Value @'
-          #include "lmflow/flow.h"
-          int main() {
-            LMFlowGraph* graph = lmflow_graph_new();
-            if (!graph) return 1;
-            const char* yaml = R"(
-          nodes:
-            - { name: pass, kernel: PassThroughKernel, input_ports: [in], output_ports: [out] }
-          input_ports: [in]
-          output_ports: [out]
-          )";
-            const LMFlowStatus status = lmflow_graph_init_from_yaml(graph, yaml);
-            lmflow_graph_free(graph);
-            return status == LMFLOW_OK ? 0 : 2;
-          }
-          '@
-
-          cmake -S $source -B "$env:RUNNER_TEMP\sdk-consumer-build" `
+          cmake -S lmflow/cpp/tests/sdk_consumer `
+            -B "$env:RUNNER_TEMP\sdk-consumer-build" `
             -A x64 "-Dlmflow_DIR=$sdk"
           cmake --build "$env:RUNNER_TEMP\sdk-consumer-build" --config Debug --parallel
           & "$env:RUNNER_TEMP\sdk-consumer-build\Debug\sdk_smoke.exe"
