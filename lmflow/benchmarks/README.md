@@ -37,7 +37,7 @@ cmake --build build-bench --target lmflow_native_throughput --parallel
 
 It covers C ABI round trips, large-buffer forwarding, the payload-dependent
 cost of `InvertKernel`, and the allocation-plus-zero-fill cost of
-`lmflow_packet_new_buffer` for a 3072×4096×2 U8 buffer. The allocation case
+`lmflow_packet_new_buffer` for a 3072×4096×3 F16 buffer (about 75.5 MB). The allocation case
 exists to measure Issue #95 before introducing any unsafe/uninitialised API.
 
 ## Python binding

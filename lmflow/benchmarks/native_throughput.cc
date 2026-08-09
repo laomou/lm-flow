@@ -107,13 +107,13 @@ Result RunBenchmark(const char* name, std::size_t iterations, std::size_t payloa
 }
 
 Result RunAllocationBenchmark(std::size_t iterations) {
-  constexpr int64_t kShape[] = {3072, 4096, 2};
-  constexpr std::size_t kBytes = 3072 * 4096 * 2;
+  constexpr int64_t kShape[] = {3072, 4096, 3};
+  constexpr std::size_t kBytes = 3072 * 4096 * 3 * 2;
   const auto begin = Clock::now();
   for (std::size_t index = 0; index < iterations; ++index) {
     LMFlowBuffer view{};
     OwnedPacket packet(
-        lmflow_packet_new_buffer(3, kShape, LMFLOW_DTYPE_U8, static_cast<int64_t>(index), &view));
+        lmflow_packet_new_buffer(3, kShape, LMFLOW_DTYPE_F16, static_cast<int64_t>(index), &view));
     if (packet.packet.payload == nullptr) {
       throw std::runtime_error(std::string("new_buffer: ") + lmflow_last_error());
     }
@@ -121,7 +121,7 @@ Result RunAllocationBenchmark(std::size_t iterations) {
   const auto elapsed = Clock::now() - begin;
   const double seconds = std::chrono::duration<double>(elapsed).count();
   const double packets_per_second = static_cast<double>(iterations) / seconds;
-  return {"c_api/allocation/3072x4096x2", iterations, kBytes, packets_per_second,
+  return {"c_api/allocation/3072x4096x3_f16", iterations, kBytes, packets_per_second,
           seconds * 1e9 / static_cast<double>(iterations)};
 }
 
