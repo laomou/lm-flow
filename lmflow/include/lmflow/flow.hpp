@@ -363,6 +363,17 @@ class Graph {
     ensure_handle();
     lmflow_graph_cancel(handle_);
   }
+  Status finish() {
+    ensure_handle();
+    lmflow_graph_close_all_inputs(handle_);
+    return lmflow_status(lmflow_graph_wait_done(handle_));
+  }
+  Status stop() {
+    ensure_handle();
+    lmflow_graph_cancel(handle_);
+    const Status status = lmflow_status(lmflow_graph_wait_done(handle_));
+    return status.code() == LMFLOW_ERR_CANCELLED ? Status::Ok() : status;
+  }
   Status wait_done() {
     ensure_handle();
     return lmflow_status(lmflow_graph_wait_done(handle_));

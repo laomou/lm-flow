@@ -263,6 +263,19 @@ void         lmflow_graph_resume(LMFlowGraph*);
 `cancel` is cooperative. The engine has no way to preempt a kernel that is already running — see
 [Observability](#observability) for how to find out which node is stuck.
 
+The C++ RAII wrapper keeps `start()` explicit: pollers, observers and side packets must be attached
+before kernel `Open()` callbacks and source scheduling begin. It also provides two unambiguous
+convenience methods:
+
+```cpp
+graph.finish();  // normal completion: close all graph inputs, then drain and wait
+graph.stop();    // forced completion: cancel, then wait; requested cancellation counts as success
+```
+
+Use `finish()` when the input stream is complete and every queued packet must be processed. Use
+`stop()` when abandoning the run. Both may block until a currently executing kernel returns;
+cancellation is cooperative and cannot preempt user code.
+
 ### Taking output: pull or push
 
 ```c
