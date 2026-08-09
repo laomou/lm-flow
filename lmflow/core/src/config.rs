@@ -806,7 +806,7 @@ impl GraphPlan {
             }
             let mut input_edges = Vec::with_capacity(inputs.len());
             for (port, name) in inputs.iter().enumerate() {
-                let edge = edge_by_name[name];
+                let edge = plan_edge(name, &mut edges, &mut edge_by_name);
                 edges[edge].consumers.push(index);
                 edges[edge].consumer_ports.push((index, port));
                 input_edges.push(edge);

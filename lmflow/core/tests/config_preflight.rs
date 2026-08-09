@@ -116,6 +116,25 @@ output_ports: [out]
 }
 
 #[test]
+fn graph_plan_accepts_consumer_declared_before_producer() {
+    let config = GraphConfig::from_yaml(
+        r#"
+nodes:
+  - { name: a, kernel: NotLinkedYet, input_ports: [in], output_ports: [mid] }
+  - { name: c, kernel: NotLinkedYet, input_ports: [out_b], output_ports: [out] }
+  - { name: b, kernel: NotLinkedYet, input_ports: [mid], output_ports: [out_b] }
+input_ports: [in]
+output_ports: [out]
+"#,
+    )
+    .unwrap();
+    let plan = GraphPlan::build(config).unwrap();
+    let out_b = plan.edges.iter().find(|edge| edge.name == "out_b").unwrap();
+    assert_eq!(out_b.producer, Some(2));
+    assert_eq!(out_b.consumers, vec![1]);
+}
+
+#[test]
 fn graph_plan_dot_uses_runtime_topology_theme() {
     let config = GraphConfig::from_yaml(
         r#"
