@@ -822,8 +822,11 @@ typedef struct {
   int64_t running_for_us;  /* running 时:本次已执行多久;否则 0 */
   uint64_t processed;      /* 累计 process 调用次数 */
   uint64_t errors;         /* 累计失败次数 */
-  int64_t total_process_us; /* 累计耗时,可算均值 */
-  int64_t max_process_us;   /* 最慢的一次 */
+  /* 仅累计 kernel 的 process 回调执行时间(从进入回调到返回)。
+   * 不包含输出 staging 刷新、下游入队、poller/observer 回调或宿主取包等待。
+   * 需要观察端到端延迟请使用带 e2e 的诊断视图/字段，而不要用此值。 */
+  int64_t total_process_us;
+  int64_t max_process_us;   /* 单次 process 回调的最长执行时间,同样不含派发开销 */
   uint64_t packets_in;      /* 累计从输入口取走的包数 */
   uint64_t packets_out;     /* 累计产出并派发下游的包数 */
   size_t peak_queue_depth;  /* 下游入队时观察到的队列深度峰值(高水位)*/
