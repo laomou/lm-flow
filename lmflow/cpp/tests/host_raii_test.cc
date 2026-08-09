@@ -45,18 +45,23 @@ output_ports: [out]
       return 4;
     }
 
-    input.close();
-    if (!graph.wait_done().ok()) {
-      std::fprintf(stderr, "wait_done failed: %s\n", graph.last_error());
+    if (!graph.finish().ok()) {
+      std::fprintf(stderr, "finish failed: %s\n", graph.last_error());
       return 5;
     }
     if (graph.state() != LMFLOW_STATE_TERMINATED) {
       std::fprintf(stderr, "unexpected terminal state\n");
       return 6;
     }
+
+    lmflow::Graph cancelled = lmflow::Graph::from_yaml(yaml);
+    if (!cancelled.start().ok() || !cancelled.stop().ok()) {
+      std::fprintf(stderr, "stop failed: %s\n", cancelled.last_error());
+      return 7;
+    }
   } catch (const std::exception& error) {
     std::fprintf(stderr, "%s\n", error.what());
-    return 7;
+    return 8;
   }
 
   return 0;
