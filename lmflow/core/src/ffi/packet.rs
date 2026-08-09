@@ -6,7 +6,7 @@
 
 use std::alloc::{alloc, dealloc, Layout};
 use std::ffi::{c_char, c_void};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::metadata::MetadataValue;
 use crate::packet::{
@@ -755,12 +755,52 @@ struct UninitializedAllocation {
     layout: Layout,
 }
 
+const UNINITIALIZED_POOL_LIMIT_BYTES: usize = 256 * 1024 * 1024;
+
+struct UninitializedPool {
+    entries: Vec<UninitializedAllocation>,
+    bytes: usize,
+}
+
+unsafe impl Send for UninitializedAllocation {}
+
+fn uninitialized_pool() -> &'static Mutex<UninitializedPool> {
+    static POOL: OnceLock<Mutex<UninitializedPool>> = OnceLock::new();
+    POOL.get_or_init(|| {
+        Mutex::new(UninitializedPool {
+            entries: Vec::new(),
+            bytes: 0,
+        })
+    })
+}
+
+fn take_uninitialized_allocation(layout: Layout) -> Option<UninitializedAllocation> {
+    let mut pool = uninitialized_pool()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let index = pool
+        .entries
+        .iter()
+        .position(|entry| entry.layout == layout)?;
+    let allocation = pool.entries.swap_remove(index);
+    pool.bytes = pool.bytes.saturating_sub(layout.size());
+    Some(allocation)
+}
+
 unsafe extern "C" fn release_uninitialized_allocation(user_data: *mut c_void) {
     if user_data.is_null() {
         return;
     }
-    let allocation = Box::from_raw(user_data as *mut UninitializedAllocation);
-    if !allocation.data.is_null() {
+    let allocation = *Box::from_raw(user_data as *mut UninitializedAllocation);
+    let mut pool = uninitialized_pool()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    if allocation.layout.size() <= UNINITIALIZED_POOL_LIMIT_BYTES
+        && pool.bytes.saturating_add(allocation.layout.size()) <= UNINITIALIZED_POOL_LIMIT_BYTES
+    {
+        pool.bytes = pool.bytes.saturating_add(allocation.layout.size());
+        pool.entries.push(allocation);
+    } else if !allocation.data.is_null() {
         dealloc(allocation.data, allocation.layout);
     }
 }
@@ -838,7 +878,9 @@ pub unsafe extern "C" fn lmflow_packet_new_buffer_uninit(
                 return LMFlowPacket::default();
             }
         };
-        let data = alloc(layout);
+        let data = take_uninitialized_allocation(layout)
+            .map(|allocation| allocation.data)
+            .unwrap_or_else(|| alloc(layout));
         if data.is_null() {
             last_error::set(&format!(
                 "lmflow_packet_new_buffer_uninit: cannot allocate {total} buffer bytes"

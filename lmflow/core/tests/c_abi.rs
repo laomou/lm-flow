@@ -583,6 +583,34 @@ fn uninitialized_buffer_preserves_caller_writes() {
 }
 
 #[test]
+fn uninitialized_buffer_reuses_released_storage() {
+    unsafe {
+        let shape = [1024i64, 1024];
+        let mut first_view = LMFlowBuffer::default();
+        let mut first =
+            lmflow_packet_new_buffer_uninit(2, shape.as_ptr(), 0 /*U8*/, 0, &mut first_view);
+        assert!(
+            !first.owner.is_null(),
+            "allocation failed: {}",
+            last_error()
+        );
+        let first_data = first_view.data;
+        lmflow_packet_drop(&mut first);
+
+        let mut second_view = LMFlowBuffer::default();
+        let mut second =
+            lmflow_packet_new_buffer_uninit(2, shape.as_ptr(), 0 /*U8*/, 1, &mut second_view);
+        assert!(
+            !second.owner.is_null(),
+            "allocation failed: {}",
+            last_error()
+        );
+        assert_eq!(second_view.data, first_data);
+        lmflow_packet_drop(&mut second);
+    }
+}
+
+#[test]
 fn cow_copies_when_shared() {
     unsafe {
         let shape = [4i64];

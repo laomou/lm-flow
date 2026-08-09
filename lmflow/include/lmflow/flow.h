@@ -265,7 +265,8 @@ size_t lmflow_dtype_size(int32_t dtype); /* 未知 dtype 返回 0 */
 LMFlowPacket lmflow_packet_new_buffer(int32_t ndim, const int64_t* shape, int32_t dtype, int64_t ts,
                                   LMFlowBuffer* out);
 
-/* 高性能变体:分配连续 CPU 缓冲但**不初始化内容**。
+/* 高性能变体:取得连续 CPU 缓冲但**不初始化内容**。引擎会在进程内按精确字节布局
+ * 复用此前释放的同尺寸存储(池有界,超出容量时仍正常释放);复用不会改变未初始化语义。
  * 调用方必须在 clone、send、emit、as_buffer 或其它任何读取/共享操作前写满全部字节。
  * 未写满即移交或读取该 Packet 的行为未定义。仅应用于输出会被完整覆写的算子；
  * 需要确定的初始值时继续使用 lmflow_packet_new_buffer。 */
