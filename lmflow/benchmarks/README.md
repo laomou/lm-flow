@@ -40,6 +40,11 @@ cost of `InvertKernel`, and the allocation-plus-zero-fill cost of
 `lmflow_packet_new_buffer` for a 3072×4096×3 F16 buffer (about 75.5 MB). The allocation case
 exists to measure Issue #95 before introducing any unsafe/uninitialised API.
 
+It also measures `lmflow_packet_new_buffer_uninit` from inside a kernel callback with the
+Graph buffer pool disabled, capped below one 75.5 MB allocation, and capped at 256 MiB. Each
+iteration fully overwrites the buffer before releasing it, matching the API contract and exposing
+the allocation/free cost seen by full-frame image kernels.
+
 ## Python binding
 
 Build or install the wheel, then run:
