@@ -33,6 +33,7 @@ option(LMFLOW_BUILD_PYTHON "Build the pybind11 Python extension"      OFF)
 option(LMFLOW_WITH_CV_TEST "Compile the CV test kernel into _lmflow"  OFF)
 option(LMFLOW_BUILD_KERNELS "Build and link the bundled C++ kernels"   ON)
 option(LMFLOW_BUILD_OPENCV_ADAPTER "Build/install the optional OpenCV adapter" OFF)
+option(LMFLOW_BUILD_OPENCL_ADAPTER "Build/install the optional OpenCL adapter" OFF)
 option(LMFLOW_BUILD_SHARED_LIBS
   "Build LMFlow shared libraries without changing parent project settings"
   ON)
@@ -46,6 +47,10 @@ endif()
 
 if(LMFLOW_BUILD_OPENCV_ADAPTER OR LMFLOW_WITH_CV_TEST)
   add_subdirectory(lmflow/adapters/opencv)
+endif()
+
+if(LMFLOW_BUILD_OPENCL_ADAPTER)
+  add_subdirectory(lmflow/adapters/opencl)
 endif()
 
 if(LMFLOW_BUILD_PYTHON)
