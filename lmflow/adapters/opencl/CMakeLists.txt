@@ -27,6 +27,9 @@ if(LMFLOW_BUILD_OPENCL_ADAPTER AND LMFLOW_BUILD_BENCHMARKS
   # benchmarks/native_throughput.cc 同一 JSON 形状,可直接喂给 compare_reports.py。
   add_executable(lmflow_opencl_bench benchmarks/opencl_bench.cc)
   target_link_libraries(lmflow_opencl_bench PRIVATE lmflow::opencl)
+  # 基准需要 GPU 执行耗时,故为它单独打开 profiling。注意这会让本二进制里
+  # dispatch_enqueue 一类的主机侧数字比默认构建偏高约 5µs/次 —— 见 bench 文件头说明。
+  target_compile_definitions(lmflow_opencl_bench PRIVATE LMFLOW_OCL_PROFILING=1)
   add_dependencies(lmflow_opencl_bench flow_engine)
 endif()
 
