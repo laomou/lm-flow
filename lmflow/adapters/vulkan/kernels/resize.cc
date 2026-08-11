@@ -79,60 +79,22 @@ class VkResizeKernel : public lmflow::Kernel {
     params.scale_x = static_cast<float>(params.in_w) / static_cast<float>(params.out_w);
 
     int64_t out_shape[3] = {params.out_h, params.out_w, params.channels};
-    const std::shared_ptr<lmflow::vk::Context>& context = image->context();
+
+    // 输出与输入不同形,故用 DispatchSpec 指定输出形状与 2 维工作规模;分配 descriptor set /
+    // 命令缓冲、绑 binding 0/1、推 push constants、按生产者时间线值提交、记同步点与延迟回收
+    // 这些通用步骤都由 Enqueue 负责。global 给的是**工作项数**,组数由它按 local_size 取整。
+    lmflow::vk::DispatchSpec spec;
+    spec.ndim = ndim;
+    spec.shape = out_shape;
+    spec.work_dim = 2;
+    spec.global[0] = static_cast<uint32_t>(params.out_w);
+    spec.global[1] = static_cast<uint32_t>(params.out_h);
+    spec.local_size[0] = kLocalSize;
+    spec.local_size[1] = kLocalSize;
+
     lmflow::vk::Image output =
-        lmflow::vk::Image::Allocate(context, LMFLOW_DTYPE_F32, ndim, out_shape);
-
-    // 输出与输入不同形,故用不了 EnqueueUnary(它按输入形状分配输出);这里自己录制
-    // 一次 2D dispatch。ProgramFor 建的 descriptor layout 正好是两个 storage buffer,
-    // 与 shader 的 binding 0/1 对应,所以能直接复用、不必自建 layout。
-    const lmflow::vk::Context::Program& program =
-        context->ProgramFor(kResizeSpv, sizeof kResizeSpv / sizeof kResizeSpv[0], "main",
-                            sizeof params);
-    const uint32_t groups_x = (static_cast<uint32_t>(params.out_w) + kLocalSize - 1) / kLocalSize;
-    const uint32_t groups_y = (static_cast<uint32_t>(params.out_h) + kLocalSize - 1) / kLocalSize;
-
-    uint64_t signalled = 0;
-    VkCommandBuffer command_buffer = VK_NULL_HANDLE;
-    VkDescriptorSet descriptor_set = VK_NULL_HANDLE;
-    {
-      std::lock_guard<std::mutex> guard(context->submit_mutex());
-      context->ReclaimCompletedLocked();
-      context->AllocateLocked(program.set_layout, &command_buffer, &descriptor_set);
-
-      VkDescriptorBufferInfo buffers[2]{};
-      buffers[0].buffer = image->buffer();
-      buffers[0].range = VK_WHOLE_SIZE;
-      buffers[1].buffer = output.buffer();
-      buffers[1].range = VK_WHOLE_SIZE;
-      VkWriteDescriptorSet writes[2]{};
-      for (uint32_t i = 0; i < 2; ++i) {
-        writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        writes[i].dstSet = descriptor_set;
-        writes[i].dstBinding = i;
-        writes[i].descriptorCount = 1;
-        writes[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        writes[i].pBufferInfo = &buffers[i];
-      }
-      vkUpdateDescriptorSets(context->device(), 2, writes, 0, nullptr);
-
-      VkCommandBufferBeginInfo begin{};
-      begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-      begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-      lmflow::vk::Check(vkBeginCommandBuffer(command_buffer, &begin), "vkBeginCommandBuffer");
-      vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, program.pipeline);
-      vkCmdBindDescriptorSets(command_buffer, VK_PIPELINE_BIND_POINT_COMPUTE,
-                              program.pipeline_layout, 0, 1, &descriptor_set, 0, nullptr);
-      vkCmdPushConstants(command_buffer, program.pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0,
-                         sizeof params, &params);
-      vkCmdDispatch(command_buffer, groups_x, groups_y, 1);
-      lmflow::vk::Check(vkEndCommandBuffer(command_buffer), "vkEndCommandBuffer");
-
-      // 以生产者的时间线值为等待值 —— 设备侧串联,CPU 线程不阻塞。
-      signalled = context->SubmitLocked(command_buffer, image->ready());
-    }
-    output.SetReady(signalled);
-    output.RetainDispatch(command_buffer, descriptor_set);
+        lmflow::vk::Enqueue(*image, spec, kResizeSpv, sizeof kResizeSpv / sizeof kResizeSpv[0],
+                            "main", &params, sizeof params);
 
     cc.Emit(0, lmflow::Packet::Make<lmflow::vk::Image>(std::move(output)));
     return lmflow::Status::Ok();

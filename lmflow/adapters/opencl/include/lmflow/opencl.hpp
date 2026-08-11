@@ -507,16 +507,57 @@ inline Packet DownloadMapped(Packet image_packet) {
 /// 生产者的同步点进 wait list、新的 event 记到输出上 —— **CPU 线程不阻塞**,
 /// 这就是连续 GPU 段不落主机的机制。`set_args` 负责除输入输出之外的其余参数,
 /// 参数序号从 2 开始(0 = 输入 mem,1 = 输出 mem)。
+/// 一次 1 输入 1 输出 dispatch 里**因算子而异**的部分。
+///
+/// 各算子之间真正不同的只有两样:输出的形状/类型,以及工作规模 —— 其余(加锁、把 src/dst
+/// 绑到 arg 0/1、设其余参数、把生产者 event 放进 wait list、记录同步点)完全一致。把这两样
+/// 参数化,算子里就不必再自己抄一遍入队流程。
+///
+/// 全部留空即"输出与输入同形同类型、按输出元素数铺 1 维",也就是 `EnqueueUnary` 的行为。
+struct DispatchSpec {
+  int32_t dtype = 0;                   ///< 0 = 沿用输入的 dtype(cast 类算子改这里)
+  int ndim = 0;                        ///< 0 = 沿用输入的 ndim/shape
+  const int64_t* shape = nullptr;      ///< ndim 非 0 时必填(resize 类算子改这里)
+  int work_dim = 0;                    ///< 0 = 1 维;可为 1/2/3
+  size_t global[3] = {0, 0, 0};        ///< work_dim 为 0 时忽略,按输出元素数铺
+};
+
+/// 把一个 kernel 入队,产出新的设备图像。
+///
+/// `set_args` 负责除输入输出之外的参数,序号从 2 开始(0 = 输入 mem,1 = 输出 mem)。
+/// 生产者的同步点进 wait list、新 event 记到输出上 —— **CPU 线程不阻塞**,这就是连续
+/// GPU 段不落主机的机制。
+///
+/// 只覆盖「1 输入 1 输出」。多输入算子要自己绑更多 arg,不适用本函数。
 template <typename SetArgs>
-inline Image EnqueueUnary(const Image& input, const std::string& source, const std::string& entry,
-                          SetArgs&& set_args) {
+inline Image Enqueue(const Image& input, const DispatchSpec& spec, const std::string& source,
+                     const std::string& entry, SetArgs&& set_args) {
   const std::shared_ptr<Context>& context = input.context();
   int64_t shape[kMaxNdim] = {0, 0, 0, 0};
-  for (int i = 0; i < input.ndim(); ++i) shape[i] = input.shape(i);
-  Image output = Image::Allocate(context, input.dtype(), input.ndim(), shape);
+  const int out_ndim = spec.ndim != 0 ? spec.ndim : input.ndim();
+  if (spec.ndim != 0) {
+    if (spec.shape == nullptr) {
+      throw std::invalid_argument("flow/ocl: DispatchSpec.ndim set but shape is null");
+    }
+    if (spec.ndim < 0 || spec.ndim > kMaxNdim) {
+      throw std::invalid_argument("flow/ocl: DispatchSpec.ndim must be within [1, 4]");
+    }
+    for (int i = 0; i < spec.ndim; ++i) shape[i] = spec.shape[i];
+  } else {
+    for (int i = 0; i < input.ndim(); ++i) shape[i] = input.shape(i);
+  }
+  Image output = Image::Allocate(context, spec.dtype != 0 ? spec.dtype : input.dtype(), out_ndim,
+                                 shape);
 
   cl_kernel kernel = context->KernelFor(source, entry);
-  const size_t count = input.element_count();
+  // 默认按**输出**的元素数铺 —— 写的是输出,输入可能更大或更小(resize 两种都会遇到)。
+  const size_t count = output.element_count();
+  const int work_dim = spec.work_dim != 0 ? spec.work_dim : 1;
+  size_t global[3] = {count, 1, 1};
+  if (spec.work_dim != 0) {
+    for (int i = 0; i < work_dim; ++i) global[i] = spec.global[i];
+  }
+
   cl_event done = nullptr;
   {
     // clSetKernelArg 对同一 cl_kernel 非线程安全,故设参与入队同锁保护。
@@ -527,12 +568,19 @@ inline Image EnqueueUnary(const Image& input, const std::string& source, const s
     Check(clSetKernelArg(kernel, 1, sizeof out_mem, &out_mem), "clSetKernelArg(1)");
     set_args(kernel);
     cl_event wait = input.ready();
-    Check(clEnqueueNDRangeKernel(context->queue(), kernel, 1, nullptr, &count, nullptr,
+    Check(clEnqueueNDRangeKernel(context->queue(), kernel, work_dim, nullptr, global, nullptr,
                                  wait ? 1 : 0, wait ? &wait : nullptr, &done),
           "clEnqueueNDRangeKernel");
   }
   output.SetReady(done);
   return output;
+}
+
+/// `Enqueue` 的薄封装:输出与输入同形同类型,按元素数铺 1 维。
+template <typename SetArgs>
+inline Image EnqueueUnary(const Image& input, const std::string& source, const std::string& entry,
+                          SetArgs&& set_args) {
+  return Enqueue(input, DispatchSpec{}, source, entry, std::forward<SetArgs>(set_args));
 }
 
 /// LMFlowBuffer -> Image。注册名建议 "OclUpload"。
