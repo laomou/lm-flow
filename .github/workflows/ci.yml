@@ -384,6 +384,33 @@ jobs:
             -DLMFLOW_BUILD_KERNELS=ON -DLMFLOW_BUILD_TESTS=OFF \
             -DLMFLOW_RUST_TARGET=aarch64-linux-android
           cmake --build /tmp/lmflow-android --parallel
+      # Vulkan adapter 在 Android 上单独编一遍。两点与上面不同,都是必需的:
+      #   * ANDROID_PLATFORM=31 —— 时间线信号量是 Vulkan 1.2 core,NDK 的 libvulkan.so
+      #     存根**从 API 31 起**才导出 vkWaitSemaphores / vkGetSemaphoreCounterValue
+      #     (28 起才有 vkGetPhysicalDeviceFeatures2,21–23 连库都没有)。低于 31 是
+      #     链接期失败,不是运行期回退。故 core 保持 21 基线,adapter 单列一档。
+      #   * LMFLOW_BUILD_TESTS=ON —— adapter 是 INTERFACE 库,不开测试就没有任何目标
+      #     include vulkan.hpp,这一步会变成空跑。要的正是 lmflow_vulkan_test 的
+      #     **编译 + 链接**:链接才抓得到上面那些缺符号。二进制是 arm64,不在 CI 运行。
+      # OpenCL adapter 不在此列:NDK 既不带 OpenCL 头也不带库,得自备 Khronos 头 +
+      # 目标设备的 libOpenCL.so,不适合放进这个 job。
+      - name: 交叉编译 Vulkan adapter 到 Android(API 31)
+        run: |
+          TOOL="$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          export CC_aarch64_linux_android="$TOOL/aarch64-linux-android21-clang"
+          export CXX_aarch64_linux_android="$TOOL/aarch64-linux-android21-clang++"
+          export AR_aarch64_linux_android="$TOOL/llvm-ar"
+          export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$TOOL/aarch64-linux-android21-clang"
+          cmake -S .. -B /tmp/lmflow-android-vk \
+            -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_LATEST_HOME/build/cmake/android.toolchain.cmake" \
+            -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-31 \
+            -DCMAKE_BUILD_TYPE=Release -DLMFLOW_BUILD_SHARED_LIBS=OFF \
+            -DLMFLOW_BUILD_KERNELS=ON -DLMFLOW_BUILD_TESTS=ON \
+            -DLMFLOW_BUILD_VULKAN_ADAPTER=ON \
+            -DLMFLOW_RUST_TARGET=aarch64-linux-android
+          cmake --build /tmp/lmflow-android-vk --parallel
+          test -x /tmp/lmflow-android-vk/lmflow/adapters/vulkan/lmflow_vulkan_test \
+            || { echo "adapter 测试没被构建 —— 这一步没有真的编译 vulkan.hpp"; exit 1; }
       # 鸿蒙/OpenHarmony 标准系统是 target_os=linux(rustc 已确认),与 Linux 走同一套代码路径,
       # 由 rust/external-host 门禁间接覆盖;其 SDK 不在 runner 上,故不单列交叉编译。
 

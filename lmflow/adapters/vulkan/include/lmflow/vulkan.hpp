@@ -36,6 +36,39 @@
  *
  * 以免头文件被多个 TU 包含时重复注册。必须先起别名:该宏会把类型名拼进标识符
  * (`LMFlowReg_##T`),带 `::` 的限定名无法通过。
+ *
+ * ---- Android:需要 API level ≥ 31 ----
+ *
+ * 上面第 2 点那套时间线信号量是 **Vulkan 1.2 core**,而 Android 的 NDK 为每个 API level
+ * 提供各自的 `libvulkan.so` 存根,低版本**不导出**这些入口。实测(NDK r27c):
+ *
+ *   API 21–23   连 libvulkan.so 都没有(Vulkan 自 API 24 才进 NDK)
+ *   API 24–27   有库,但缺 vkGetPhysicalDeviceFeatures2 与两个时间线函数
+ *   API 28–30   有 vkGetPhysicalDeviceFeatures2,仍缺时间线函数
+ *   API 31+     vkWaitSemaphores / vkGetSemaphoreCounterValue 齐全 ✓
+ *
+ * 所以在 Android 上链接本 adapter,`ANDROID_PLATFORM` 必须 ≥ **android-31**;否则是
+ * **链接期**失败(`undefined symbol: vkWaitSemaphores`),不是运行期回退。注意这比仓库
+ * 其它 Android 产物的基线高:`cross-android` 的 core 构建与 examples/android 的 JNI
+ * 示例都用 android-21 —— 那些不含本 adapter,不受影响。
+ *
+ * 有个看似能降底线的思路值得先否掉:用 1.0 的 `vkGetPhysicalDeviceProperties` 读
+ * `apiVersion >= VK_API_VERSION_1_2` 来替代 `vkGetPhysicalDeviceFeatures2` 那次特性查询。
+ * 这一步**确实可行**(timeline semaphore 在 1.2 是 core 必备;Adreno 840 与 llvmpipe 上
+ * 实测 apiVersion 判定与特性位一致)。反过来,1.0 的 `vkGetPhysicalDeviceFeatures`
+ * **无论如何都读不出**它 —— `timelineSemaphore` 只存在于 `...TimelineSemaphoreFeatures` /
+ * `...Vulkan12Features`,而这两个结构只能经 `Features2` 的 pNext 链取到。
+ *
+ * 但**换掉查询并不能降低 API 底线**:本 adapter 用到的三个符号里,查询只占一个,另外两个
+ * (`vkWaitSemaphores` 在 WaitTimeline、`vkGetSemaphoreCounterValue` 在
+ * ReclaimCompletedLocked)是运行期真在干活的时间线 API,没有 1.0 等价物。低版本存根里
+ * 照样没有它们,链接照样失败。
+ *
+ * 真正能降底线的只有**运行期取符号**(`vkGetInstanceProcAddr` / `vkGetDeviceProcAddr`
+ * 取全部三个),那样编译期不链接任何 1.1/1.2 入口,能否运行只取决于设备真实驱动 ——
+ * Android 12+ 的机器驱动本身都是 1.2+,与编译时选的 API level 无关。这是 Android 上的
+ * 常规做法;本 adapter 目前**没有**这么做。走 `VK_KHR_timeline_semaphore` 扩展也不行:
+ * `vkWaitSemaphoresKHR` 之类在低版本存根里同样缺席,一样得动态取。
  */
 #ifndef LMFLOW_VULKAN_HPP_
 #define LMFLOW_VULKAN_HPP_
