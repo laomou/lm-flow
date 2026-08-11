@@ -76,6 +76,22 @@ inline void Check(VkResult status, const char* what) {
   }
 }
 
+/// 行优先连续?strides 按**字节**计,最内维步长应 = 元素大小,再逐维外推。
+///
+/// LMFlowBuffer 明确允许非连续布局(见 flow.h),而 Upload 是整块拷贝 —— 带行填充的
+/// cv::Mat、numpy 切片视图这类输入若不拦住,会**静默上传错数据**。语义与
+/// cpp/kernels/buffer_util.hpp 的 is_contiguous 一致(那个头不随 SDK 安装,故此处重述)。
+inline bool IsContiguous(const LMFlowBuffer& buffer) {
+  const size_t element = lmflow_dtype_size(buffer.dtype);
+  if (element == 0 || buffer.ndim <= 0) return false;
+  int64_t expected = static_cast<int64_t>(element);
+  for (int i = buffer.ndim - 1; i >= 0; --i) {
+    if (buffer.strides[i] != expected) return false;
+    expected *= buffer.shape[i];
+  }
+  return true;
+}
+
 class Image;
 
 /// 进程级共享的设备上下文。
@@ -636,6 +652,11 @@ inline void CopyMapped(const std::shared_ptr<Context>& context, VkDeviceMemory m
 inline Image Upload(const std::shared_ptr<Context>& context, const LMFlowBuffer& buffer) {
   if (buffer.ndim <= 0 || buffer.ndim > kMaxNdim) {
     throw std::invalid_argument("flow/vk: Upload supports buffers with ndim within [1, 4]");
+  }
+  if (!IsContiguous(buffer)) {
+    throw std::invalid_argument(
+        "flow/vk: Upload needs a row-major contiguous buffer, but the descriptor is strided "
+        "(a padded cv::Mat row or a sliced numpy view looks like this); pack it first");
   }
   Image image = Image::Allocate(context, buffer.dtype, buffer.ndim, buffer.shape);
   const size_t bytes = image.byte_size();
