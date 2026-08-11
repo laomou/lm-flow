@@ -150,6 +150,15 @@ class Context {
     throw std::runtime_error("flow/vk: no memory type satisfies the requested properties");
   }
 
+  /// 某内存类型的属性位。零拷贝下载要据此判断映射出的内存是否 HOST_CACHED ——
+  /// 未缓存/写合并内存(独显的 PCIe BAR 窗口就是这种)交给下游 CPU 算子读,
+  /// 每次访存都走总线,比一次 bulk memcpy 慢得多,那种设备上必须退回拷贝路径。
+  VkMemoryPropertyFlags memory_type_flags(uint32_t index) const {
+    return index < memory_properties_.memoryTypeCount
+               ? memory_properties_.memoryTypes[index].propertyFlags
+               : 0;
+  }
+
   /// 一次 dispatch 用完就要回收的资源。按时间线值延迟回收,**不做主机等待**。
   struct Retired {
     uint64_t value = 0;
@@ -537,12 +546,18 @@ class Image {
     VkMemoryAllocateInfo allocate{};
     allocate.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
     allocate.allocationSize = requirements.size;
-    allocate.memoryTypeIndex = context->FindMemoryType(requirements.memoryTypeBits, want);
+    const uint32_t type_index = context->FindMemoryType(requirements.memoryTypeBits, want);
+    allocate.memoryTypeIndex = type_index;
     Check(vkAllocateMemory(context->device(), &allocate, nullptr, &image.memory_),
           "vkAllocateMemory");
     Check(vkBindBufferMemory(context->device(), image.buffer_, image.memory_, 0),
           "vkBindBufferMemory");
     image.host_visible_ = context->unified_memory();
+    // 记下实际挑中的内存类型是否**主机缓存**:零拷贝下载只在缓存内存上才是划算的。
+    const VkMemoryPropertyFlags picked = context->memory_type_flags(type_index);
+    image.host_cached_ = (picked & VK_MEMORY_PROPERTY_HOST_CACHED_BIT) != 0 &&
+                         (picked & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) != 0;
+    image.mapped_bytes_ = requirements.size;
     return image;
   }
 
@@ -551,6 +566,8 @@ class Image {
   VkBuffer buffer() const { return buffer_; }
   VkDeviceMemory memory() const { return memory_; }
   bool host_visible() const { return host_visible_; }
+  /// 映射出的内存是否既 HOST_CACHED 又 HOST_COHERENT —— 零拷贝下载的前提。
+  bool host_cached() const { return host_cached_; }
   /// 生产者签发的时间线值;0 表示无需等待。
   uint64_t ready() const { return ready_; }
   void SetReady(uint64_t value) { ready_ = value; }
@@ -608,6 +625,8 @@ class Image {
     dtype_ = other.dtype_;
     ndim_ = other.ndim_;
     host_visible_ = other.host_visible_;
+    host_cached_ = other.host_cached_;
+    mapped_bytes_ = other.mapped_bytes_;
     for (int i = 0; i < kMaxNdim; ++i) shape_[i] = other.shape_[i];
     other.buffer_ = VK_NULL_HANDLE;
     other.memory_ = VK_NULL_HANDLE;
@@ -625,6 +644,8 @@ class Image {
   int32_t dtype_ = 0;
   int ndim_ = 0;
   bool host_visible_ = false;
+  bool host_cached_ = false;
+  VkDeviceSize mapped_bytes_ = 0;
   int64_t shape_[kMaxNdim] = {0, 0, 0, 0};
 };
 
@@ -641,6 +662,30 @@ inline void CopyMapped(const std::shared_ptr<Context>& context, VkDeviceMemory m
     std::memcpy(host, mapped, bytes);
   }
   vkUnmapMemory(context->device(), memory);
+}
+
+}  // namespace detail
+
+namespace detail {
+
+/// 零拷贝下载交给引擎的释放状态。
+///
+/// 输出包**可能比产生它的 Image 活得久**(扇出、下游缓存),所以这里必须连**持有 Image 的
+/// 那个输入包**一起留住:它析构才会走 Image::Reset 去按时间线退还显存。unmap 必须先于
+/// 那次析构发生,故两件事在同一个回调里按序做。
+struct MappedHandoff {
+  std::shared_ptr<Context> context;
+  VkDeviceMemory memory = VK_NULL_HANDLE;
+  Packet owner;
+};
+
+/// 引擎在最后一个包引用消失时调用一次;可能落在任意工作线程上。
+inline void ReleaseMappedHandoff(void* user_data) {
+  auto* state = static_cast<MappedHandoff*>(user_data);
+  if (state->context && state->memory != VK_NULL_HANDLE) {
+    vkUnmapMemory(state->context->device(), state->memory);
+  }
+  delete state;  // owner 在此析构 —— 显存随之进入延迟回收表
 }
 
 }  // namespace detail
@@ -740,6 +785,73 @@ inline Packet Download(const Image& image) {
   context->WaitTimeline(image.ready());
   detail::CopyMapped(context, image.memory(), out.data, image.byte_size(), /*to_device=*/false);
   return packet;
+}
+
+/// 零拷贝下载:把已映射的设备内存**直接交给引擎**,不再拷进一个新包。
+///
+/// 适用条件由 `CanDownloadMapped` 判定,必须先问再调:内存要既 HOST_VISIBLE 又
+/// **HOST_CACHED**(ARM 统一内存与软件实现如此)。未缓存/写合并内存 —— 独显的 PCIe BAR
+/// 窗口正是这种 —— 绝不能走这条路:下游 CPU 算子的每次访存都会过总线,比一次 bulk
+/// memcpy 慢得多,那种设备上 `Download()` 的拷贝反而是对的。
+///
+/// `image_packet` 是持有 vk::Image 的包,并在此**移交所有权**:引擎会一直持有它,直到
+/// 下游放掉最后一个引用,才 unmap 并把显存交还延迟回收表。
+///
+/// 交出的视图标了 READONLY —— 它是设备内存的视图,扇出时多个下游共享同一份;想就地改写
+/// 的下游会照常走 CoW 复制一份,不会写穿到显存上。
+inline Packet DownloadMapped(Packet image_packet) {
+  const Image* image = image_packet.TryGet<Image>();
+  if (!image || !image->valid()) {
+    throw std::invalid_argument("flow/vk: DownloadMapped needs a valid vk::Image packet");
+  }
+  if (!image->host_visible() || !image->host_cached()) {
+    throw std::invalid_argument(
+        "flow/vk: DownloadMapped needs host-cached, host-coherent device memory; check "
+        "CanDownloadMapped() first and fall back to Download()");
+  }
+
+  // 先把要用的东西取成值,后面 image_packet 会被移走,不再依赖 image 指针。
+  std::shared_ptr<Context> context = image->context();
+  const VkDeviceMemory memory = image->memory();
+  const int ndim = image->ndim();
+  const int32_t dtype = image->dtype();
+  const size_t bytes = image->byte_size();
+  int64_t shape[kMaxNdim] = {0, 0, 0, 0};
+  for (int i = 0; i < ndim; ++i) shape[i] = image->shape(i);
+
+  // 交出去之前必须等生产者写完 —— 之后读的是下游 CPU 算子,引擎不会替我们同步。
+  context->WaitTimeline(image->ready());
+
+  void* mapped = nullptr;
+  Check(vkMapMemory(context->device(), memory, 0, bytes, 0, &mapped), "vkMapMemory");
+
+  LMFlowBuffer view{};
+  view.data = mapped;
+  view.ndim = ndim;
+  view.dtype = dtype;
+  int64_t stride = static_cast<int64_t>(DtypeSize(dtype));
+  for (int i = ndim - 1; i >= 0; --i) {
+    view.shape[i] = shape[i];
+    view.strides[i] = stride;
+    stride *= shape[i];
+  }
+  view.flags = LMFLOW_BUF_FLAG_READONLY;
+
+  auto* state = new detail::MappedHandoff{context, memory, std::move(image_packet)};
+  Packet adopted = Packet::AdoptBuffer(view, detail::ReleaseMappedHandoff, state);
+  if (adopted.IsEmpty()) {
+    // 契约:失败时 release_fn 不会被调用,所有权仍归我们,自己收拾干净。
+    vkUnmapMemory(context->device(), memory);
+    state->memory = VK_NULL_HANDLE;
+    delete state;
+    throw std::runtime_error("flow/vk: lmflow_packet_adopt_buffer rejected the mapped view");
+  }
+  return adopted;
+}
+
+/// 本 Image 能否走零拷贝下载。见 `DownloadMapped` 的条件说明。
+inline bool CanDownloadMapped(const Image& image) {
+  return image.valid() && image.host_visible() && image.host_cached();
 }
 
 /// 把一个一维 dispatch 入队,产出新的设备负载。
@@ -845,7 +957,12 @@ class DownloadKernel : public Kernel {
     Packet input = cc.TakeInput(0);
     const Image* image = input.TryGet<Image>();
     if (!image || !image->valid()) return cc.Fail("VkDownload expects a vk::Image input");
-    cc.Emit(0, Download(*image));
+    // 主机缓存的统一内存上,把映射直接交给引擎,省掉整次回读拷贝;其余设备照常拷。
+    if (CanDownloadMapped(*image)) {
+      cc.Emit(0, DownloadMapped(std::move(input)));
+    } else {
+      cc.Emit(0, Download(*image));
+    }
     return Status::Ok();
   }
 };
