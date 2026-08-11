@@ -25,11 +25,14 @@
  *      **Download 的 staging 回读尚未实现** —— 那类设备上 `VkDownload` 会在 **Open 期**
  *      就明确失败,不会跑到出帧时才抛。
  *
- *      ⚠ 别把「否则」读成「独显」。判据只是「**存不存在**这样一个内存类型」,而经典独显
- *      即便没有 Resizable BAR **也照样暴露**一个 —— 就是那个传统 256 MB 的 PCIe BAR
- *      窗口(ReBAR 改变的是它多大,不是它在不在)。实测:18 台移动 GPU 与 llvmpipe 全部
- *      为真。因此 staging 分支的真实触发条件是「设备完全没有 DEVICE_LOCAL|HOST_VISIBLE
- *      类型」,这比「独显」窄得多,**目前没有已验证的实例**(详见 Upload 里的标注)。
+ *      ⚠ 别把「否则」读成「独显」。判据只是「**存不存在**这样一个内存类型」。
+ *      **已实测**:18 台移动 GPU 与 llvmpipe 全部存在,故一律走映射路径。
+ *      **尚属推断**(手头独显驱动坏着,无法在 Vulkan 层面证实):经典独显即便没有
+ *      Resizable BAR 也应暴露一个 —— 那个传统 256 MB 的 PCIe BAR 窗口(ReBAR 改变的是
+ *      它多大,不是它在不在);旁证是本机 RTX 5080 的 BAR1 可调范围为 64 MB…16 GB。
+ *      若该推断成立,staging 分支的触发条件就是「设备完全没有 DEVICE_LOCAL|HOST_VISIBLE
+ *      类型」,比「独显」窄得多;若不成立,则独显会走 staging,那条路的重要性要重估。
+ *      拿到一台驱动正常的独显时,请以实测为准(详见 Upload 里的标注)。
  *
  *      独显上真正要留意的反而是另一件事:既然会挑中那个 host-visible 类型,所有中间
  *      compute buffer 就都落进 BAR 窗口 —— 无 ReBAR 时只有 256 MB(几个 24 MB 的中间
@@ -851,9 +854,10 @@ inline Image Upload(const std::shared_ptr<Context>& context, const LMFlowBuffer&
   // 触发条件是 `host_visible()` 为假,也就是**设备完全没有** DEVICE_LOCAL|HOST_VISIBLE
   // 的内存类型。实测 18 台移动 GPU(Adreno 613/710/722/740/810/812/829/830/840/850 与
   // Mali G52/G57/G615/G625/G720)加 llvmpipe,**全部**存在这样的类型,于是一律走上面的
-  // 映射路径。经典独显也不例外:即便没有 Resizable BAR,它照样暴露那个传统 256 MB 的
-  // PCIe BAR 窗口(ReBAR 只改变窗口大小,不改变它存不存在),所以「关掉 ReBAR」并不能
-  // 造出这个场景。目前没有已验证的触发实例。
+  // 映射路径。**至于独显则尚未证实**:预期它也不例外(即便没有 Resizable BAR,仍应暴露
+  // 那个传统 256 MB 的 PCIe BAR 窗口,故「关掉 ReBAR」造不出这个场景),但手头独显的
+  // Vulkan 驱动版本错配、无法枚举,所以这一条是**推断而非实测**。也就是说:目前既没有
+  // 已验证的触发实例,也不能断言独显一定不触发。
   //
   // 要验证它,需要一台确实没有该内存类型的设备;`adapters/vulkan/benchmarks` 之外还有个
   // 更直接的办法:把 vkGetPhysicalDeviceMemoryProperties 的输出打出来,看有没有同时带
