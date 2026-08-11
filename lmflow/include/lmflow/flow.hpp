@@ -71,6 +71,30 @@ inline LMFlowStatus RegisterType() {
   return status;
 }
 
+/* ---------- LMFlowBuffer 布局工具 ----------
+ * `LMFlowBuffer` 的 strides 以**字节**计,且明确允许非连续布局(见 flow.h)。凡是按
+ * 「一整块连续内存」处理 buffer 的代码(bulk memcpy、上传到设备、交给只认连续布局的库),
+ * 都必须先问一句是否连续 —— 否则带行填充的 cv::Mat、numpy 切片视图会被**静默读错**。 */
+
+/// 元素总数(各维之积)。
+inline int64_t BufferElementCount(const LMFlowBuffer& buffer) {
+  int64_t count = 1;
+  for (int i = 0; i < buffer.ndim; ++i) count *= buffer.shape[i];
+  return count;
+}
+
+/// 行优先连续?最内维步长应 = 元素大小,再逐维外推。未知 dtype / 非法 ndim 一律返回 false。
+inline bool BufferIsContiguous(const LMFlowBuffer& buffer) {
+  const size_t element = lmflow_dtype_size(buffer.dtype);
+  if (element == 0 || buffer.ndim <= 0 || buffer.ndim > LMFLOW_MAX_DIMS) return false;
+  int64_t expected = static_cast<int64_t>(element);
+  for (int i = buffer.ndim - 1; i >= 0; --i) {
+    if (buffer.strides[i] != expected) return false;
+    expected *= buffer.shape[i];
+  }
+  return true;
+}
+
 /* ---------- Status ---------- */
 class Status {
  public:
