@@ -442,3 +442,71 @@ jobs:
         run: |
           python -m pip install -v . --config-settings=cmake.define.LMFLOW_WITH_CV_TEST=ON
           python lmflow/python/tests/test_cv_kernel.py -v
+
+  # ================================ integration (OpenCL) ================================
+
+  # OpenCL adapter 此前**完全没有门禁**:开关默认 OFF,CI 里从未打开,所以连 opencl.hpp
+  # 都没被编译过,tests/ 与 tests/consumer/ 也从未运行。
+  #
+  # 用 POCL(CPU ICD)就能跑:adapter 的设备选择本就写着「优先 GPU,退而求其次接受任意
+  # 设备(便于在无 GPU 的 CI 上用 CPU ICD 跑通)」—— 本 job 让那句话真的被验证。
+  opencl:
+    name: integration · opencl adapter
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y opencl-headers ocl-icd-opencl-dev pocl-opencl-icd
+      - name: 构建并测试 OpenCL adapter
+        run: |
+          cmake -S . -B build-opencl -DCMAKE_BUILD_TYPE=Release \
+            -DLMFLOW_BUILD_SHARED_LIBS=OFF -DLMFLOW_BUILD_KERNELS=ON \
+            -DLMFLOW_BUILD_TESTS=ON -DLMFLOW_BUILD_BENCHMARKS=ON \
+            -DLMFLOW_BUILD_OPENCL_ADAPTER=ON
+          cmake --build build-opencl --parallel
+          ctest --test-dir build-opencl -R lmflow_opencl_test --output-on-failure
+          cmake --install build-opencl --prefix /tmp/lmflow-opencl-sdk
+      - name: 已安装 OpenCL component 可消费
+        run: |
+          cmake -S lmflow/adapters/opencl/tests/consumer -B /tmp/lmflow-opencl-consumer-build \
+            -Dlmflow_DIR=/tmp/lmflow-opencl-sdk/lib/cmake/lmflow
+          cmake --build /tmp/lmflow-opencl-consumer-build
+          /tmp/lmflow-opencl-consumer-build/opencl_sdk_smoke
+      # 基准跑一遍**最小规模**当崩溃冒烟,不作性能门禁(CI 机器的数字没有可比性)。
+      # 理由很实在:Vulkan 侧那个「显存在 dispatch 仍在飞行时被释放」的 use-after-free
+      # 正是被基准的紧循环逼出来的,而既有测试的 buffer 太小、盖不住。
+      - name: 基准冒烟(不比性能,只看不崩)
+        run: ./build-opencl/lmflow/adapters/opencl/lmflow_opencl_bench 0.02
+
+  # ================================ integration (Vulkan) ================================
+
+  # 同上:Vulkan adapter 也一直没有门禁。用 mesa 的 lavapipe(纯软件 ICD)即可跑通 ——
+  # 它报 DEVICE_LOCAL|HOST_VISIBLE|HOST_CACHED,所以统一内存那条路径也会被真的走到。
+  vulkan:
+    name: integration · vulkan adapter
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y libvulkan-dev mesa-vulkan-drivers
+      - name: 构建并测试 Vulkan adapter
+        run: |
+          cmake -S . -B build-vulkan -DCMAKE_BUILD_TYPE=Release \
+            -DLMFLOW_BUILD_SHARED_LIBS=OFF -DLMFLOW_BUILD_KERNELS=ON \
+            -DLMFLOW_BUILD_TESTS=ON -DLMFLOW_BUILD_BENCHMARKS=ON \
+            -DLMFLOW_BUILD_VULKAN_ADAPTER=ON
+          cmake --build build-vulkan --parallel
+          ctest --test-dir build-vulkan -R lmflow_vulkan_test --output-on-failure
+          cmake --install build-vulkan --prefix /tmp/lmflow-vulkan-sdk
+      - name: 已安装 Vulkan component 可消费
+        run: |
+          cmake -S lmflow/adapters/vulkan/tests/consumer -B /tmp/lmflow-vulkan-consumer-build \
+            -Dlmflow_DIR=/tmp/lmflow-vulkan-sdk/lib/cmake/lmflow
+          cmake --build /tmp/lmflow-vulkan-consumer-build
+          /tmp/lmflow-vulkan-consumer-build/vulkan_sdk_smoke
+      - name: 基准冒烟(不比性能,只看不崩)
+        run: ./build-vulkan/lmflow/adapters/vulkan/lmflow_vulkan_bench 0.02
