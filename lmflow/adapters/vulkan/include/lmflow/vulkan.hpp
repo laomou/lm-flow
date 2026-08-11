@@ -52,23 +52,29 @@
  * 其它 Android 产物的基线高:`cross-android` 的 core 构建与 examples/android 的 JNI
  * 示例都用 android-21 —— 那些不含本 adapter,不受影响。
  *
- * 有个看似能降底线的思路值得先否掉:用 1.0 的 `vkGetPhysicalDeviceProperties` 读
- * `apiVersion >= VK_API_VERSION_1_2` 来替代 `vkGetPhysicalDeviceFeatures2` 那次特性查询。
- * 这一步**确实可行**(timeline semaphore 在 1.2 是 core 必备;Adreno 840 与 llvmpipe 上
- * 实测 apiVersion 判定与特性位一致)。反过来,1.0 的 `vkGetPhysicalDeviceFeatures`
- * **无论如何都读不出**它 —— `timelineSemaphore` 只存在于 `...TimelineSemaphoreFeatures` /
- * `...Vulkan12Features`,而这两个结构只能经 `Features2` 的 pNext 链取到。
+ * 这里要分清两件**不同**的事,别混为一谈:
  *
- * 但**换掉查询并不能降低 API 底线**:本 adapter 用到的三个符号里,查询只占一个,另外两个
- * (`vkWaitSemaphores` 在 WaitTimeline、`vkGetSemaphoreCounterValue` 在
- * ReclaimCompletedLocked)是运行期真在干活的时间线 API,没有 1.0 等价物。低版本存根里
- * 照样没有它们,链接照样失败。
+ *   编译期底线 —— 由 NDK 存根导出哪些符号决定,就是上面那张表(≥ android-31)。
+ *   运行期可用 —— 由设备的**驱动**决定,与编译时选的 API level 无关。
  *
- * 真正能降底线的只有**运行期取符号**(`vkGetInstanceProcAddr` / `vkGetDeviceProcAddr`
- * 取全部三个),那样编译期不链接任何 1.1/1.2 入口,能否运行只取决于设备真实驱动 ——
- * Android 12+ 的机器驱动本身都是 1.2+,与编译时选的 API level 无关。这是 Android 上的
- * 常规做法;本 adapter 目前**没有**这么做。走 `VK_KHR_timeline_semaphore` 扩展也不行:
- * `vkWaitSemaphoresKHR` 之类在低版本存根里同样缺席,一样得动态取。
+ * 后者是 `HasTimelineSemaphore` 与构造函数末尾那两道闸门在管的,判据也在那里说明:
+ * `timelineSemaphore` 特性位在 18 台真机上**恒为 TRUE**,一台都没报过 FALSE,所以它
+ * 单独用毫无鉴别力;`apiVersion >= 1.2` 与 `vkGetDeviceProcAddr` 才管用。
+ * 那两道闸门是**为了不崩**(否则会跳空指针),不是为了降低编译期底线 —— 换掉特性查询
+ * 一点也降不了底线:三个符号里查询只占一个,另外两个(`vkWaitSemaphores` 在
+ * WaitTimeline、`vkGetSemaphoreCounterValue` 在 ReclaimCompletedLocked)是运行期真在
+ * 干活的时间线 API,没有 1.0 等价物,低版本存根里照样缺席,链接照样失败。
+ *
+ * 顺带记一条容易走弯路的:1.0 的 `vkGetPhysicalDeviceFeatures`(那个固定结构)**无论
+ * 如何都读不出** timeline 支持 —— `timelineSemaphore` 只存在于
+ * `...TimelineSemaphoreFeatures` / `...Vulkan12Features`,而这两个结构只能经 `Features2`
+ * 的 pNext 链取到。能替代它的是 `vkGetPhysicalDeviceProperties` 的 `apiVersion`。
+ *
+ * 真正能降编译期底线的只有**运行期取符号**(`vkGetInstanceProcAddr` /
+ * `vkGetDeviceProcAddr` 取全部三个并**通过指针调用**),那样编译期不链接任何 1.1/1.2
+ * 入口。本 adapter 目前只用 procAddr 做**检测**,没有改成通过指针调用,所以底线仍是
+ * android-31。走 `VK_KHR_timeline_semaphore` 扩展也不行:`vkWaitSemaphoresKHR` 之类
+ * 在低版本存根里同样缺席,一样得动态取。
  */
 #ifndef LMFLOW_VULKAN_HPP_
 #define LMFLOW_VULKAN_HPP_
