@@ -1,0 +1,53 @@
+#version 450
+// resize.comp —— 双线性 resize,与 adapters/opencl/kernels/resize.cc 同一套约定。
+//
+// 半像素中心(align_corners=false):src = (dst + 0.5) * scale - 0.5
+// 与 OpenCV INTER_LINEAR / PyTorch 默认一致。改这里必须同时改 OpenCL 侧那份,
+// 否则两个后端出的图会差半个像素 —— 那种偏差看起来完全"正常",最难排查。
+//
+// 通道在最内维(HWC)。2D 工作组覆盖 (out_w, out_h),通道在内层循环:C 通常 1~4,
+// 不值得再开一维。
+//
+// binding 0/1 必须是「两个 storage buffer」—— adapter 的 Context::ProgramFor 建的
+// descriptor layout 就是固定的两个,复用它才不必自己建 layout。
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(std430, binding = 0) readonly  buffer SrcBuf { float data[]; } src;
+layout(std430, binding = 1) writeonly buffer DstBuf { float data[]; } dst;
+
+layout(push_constant) uniform Params {
+  int in_h;
+  int in_w;
+  int out_h;
+  int out_w;
+  int channels;
+  float scale_y;
+  float scale_x;
+} params;
+
+void main() {
+  const int x = int(gl_GlobalInvocationID.x);
+  const int y = int(gl_GlobalInvocationID.y);
+  if (x >= params.out_w || y >= params.out_h) return;
+
+  float sy = (float(y) + 0.5) * params.scale_y - 0.5;
+  float sx = (float(x) + 0.5) * params.scale_x - 0.5;
+  sy = max(sy, 0.0);
+  sx = max(sx, 0.0);
+  int y0 = min(int(sy), params.in_h - 1);
+  int x0 = min(int(sx), params.in_w - 1);
+  const int y1 = min(y0 + 1, params.in_h - 1);
+  const int x1 = min(x0 + 1, params.in_w - 1);
+  const float wy = sy - float(y0);
+  const float wx = sx - float(x0);
+
+  for (int c = 0; c < params.channels; ++c) {
+    const float v00 = src.data[(y0 * params.in_w + x0) * params.channels + c];
+    const float v01 = src.data[(y0 * params.in_w + x1) * params.channels + c];
+    const float v10 = src.data[(y1 * params.in_w + x0) * params.channels + c];
+    const float v11 = src.data[(y1 * params.in_w + x1) * params.channels + c];
+    const float top = v00 + (v01 - v00) * wx;
+    const float bottom = v10 + (v11 - v10) * wx;
+    dst.data[(y * params.out_w + x) * params.channels + c] = top + (bottom - top) * wy;
+  }
+}

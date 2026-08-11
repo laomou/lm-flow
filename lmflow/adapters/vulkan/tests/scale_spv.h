@@ -1,6 +1,8 @@
 // 由 scale.comp 生成,勿手改。重新生成:
 //   glslangValidator -V -o /tmp/scale.spv adapters/vulkan/tests/scale.comp
-// 再用 tests/ 下同名脚本重新内嵌(见 PR 说明)。
+//   python3 ../tools/embed_spv.py /tmp/scale.spv \
+//       scale_spv.h kScaleSpv LMFLOW_VULKAN_TESTS_SCALE_SPV_H_
+// (此前这里引用「tests/ 下同名脚本」,而那个脚本从未存在过。)
 //
 // 内嵌而非构建期编译,是为了让 adapter 与它的测试都**不依赖 shader 编译器**。
 #ifndef LMFLOW_VULKAN_TESTS_SCALE_SPV_H_
