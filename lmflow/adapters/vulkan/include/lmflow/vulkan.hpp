@@ -1031,19 +1031,69 @@ inline bool CanDownloadMapped(const Image& image) {
 ///
 /// 生产者的时间线值作为等待值、新值记到输出上 —— **CPU 线程不阻塞**,这就是连续 GPU
 /// 段不落主机的机制。`push_constants` 直接透传给 shader 的 push constant 块。
-inline Image EnqueueUnary(const Image& input, const uint32_t* spirv, size_t spirv_words,
-                          const std::string& entry, const void* push_constants,
-                          uint32_t push_constant_bytes, uint32_t local_size_x = 64) {
+/// 一次 1 输入 1 输出 dispatch 里**因算子而异**的部分。
+///
+/// 各算子之间真正不同的只有两样:输出的形状/类型,以及工作规模 —— 其余(分配命令缓冲与
+/// descriptor set、把 src/dst 写进 binding 0/1、推 push constants、按生产者时间线值提交、
+/// 记录同步点与延迟回收)完全一致。把这两样参数化,算子里就不必再抄一遍那四十来行。
+///
+/// 全部留空即"输出与输入同形同类型、按输出元素数铺 1 维",也就是 `EnqueueUnary` 的行为。
+///
+/// `global` 是**要覆盖的工作项数**,不是工作组数 —— 组数由本函数按 `local_size` 向上取整,
+/// 免得每个算子各自做一遍除法(算错就是覆盖不全或越界)。`local_size` 必须与 shader 里
+/// `layout(local_size_...)` 声明的一致。
+struct DispatchSpec {
+  int32_t dtype = 0;                      ///< 0 = 沿用输入的 dtype
+  int ndim = 0;                           ///< 0 = 沿用输入的 ndim/shape
+  const int64_t* shape = nullptr;         ///< ndim 非 0 时必填
+  int work_dim = 0;                       ///< 0 = 1 维,按输出元素数
+  uint32_t global[3] = {0, 0, 0};         ///< 要覆盖的工作项数
+  uint32_t local_size[3] = {64, 1, 1};    ///< 须与 shader 的 local_size 一致
+};
+
+/// 把一个 compute dispatch 入队,产出新的设备负载。
+///
+/// 生产者的时间线值作为等待值、新值记到输出上 —— **CPU 线程不阻塞**,这就是连续 GPU 段
+/// 不落主机的机制。`push_constants` 直接透传给 shader 的 push constant 块。
+///
+/// 只覆盖「1 输入 1 输出」:`ProgramFor` 建的 descriptor layout 固定是两个 storage buffer,
+/// 多输入算子需要另建 layout,不适用本函数。
+inline Image Enqueue(const Image& input, const DispatchSpec& spec, const uint32_t* spirv,
+                     size_t spirv_words, const std::string& entry, const void* push_constants,
+                     uint32_t push_constant_bytes) {
   const std::shared_ptr<Context>& context = input.context();
   int64_t shape[kMaxNdim] = {0, 0, 0, 0};
-  for (int i = 0; i < input.ndim(); ++i) shape[i] = input.shape(i);
-  Image output = Image::Allocate(context, input.dtype(), input.ndim(), shape);
+  const int out_ndim = spec.ndim != 0 ? spec.ndim : input.ndim();
+  if (spec.ndim != 0) {
+    if (spec.shape == nullptr) {
+      throw std::invalid_argument("flow/vk: DispatchSpec.ndim set but shape is null");
+    }
+    if (spec.ndim < 0 || spec.ndim > kMaxNdim) {
+      throw std::invalid_argument("flow/vk: DispatchSpec.ndim must be within [1, 4]");
+    }
+    for (int i = 0; i < spec.ndim; ++i) shape[i] = spec.shape[i];
+  } else {
+    for (int i = 0; i < input.ndim(); ++i) shape[i] = input.shape(i);
+  }
+  Image output =
+      Image::Allocate(context, spec.dtype != 0 ? spec.dtype : input.dtype(), out_ndim, shape);
 
   const Context::Program& program =
       context->ProgramFor(spirv, spirv_words, entry, push_constant_bytes);
-  const size_t count = input.element_count();
-  const uint32_t groups =
-      static_cast<uint32_t>((count + local_size_x - 1) / local_size_x);
+
+  // 默认按**输出**元素数铺 1 维 —— 写的是输出,输入可能更大或更小。
+  uint32_t global[3] = {static_cast<uint32_t>(output.element_count()), 1, 1};
+  uint32_t local[3] = {spec.local_size[0], spec.local_size[1], spec.local_size[2]};
+  const int work_dim = spec.work_dim != 0 ? spec.work_dim : 1;
+  if (spec.work_dim != 0) {
+    for (int i = 0; i < work_dim; ++i) global[i] = spec.global[i];
+  }
+  uint32_t groups[3] = {1, 1, 1};
+  for (int i = 0; i < 3; ++i) {
+    const uint32_t l = local[i] != 0 ? local[i] : 1;
+    groups[i] = (global[i] + l - 1) / l;
+    if (groups[i] == 0) groups[i] = 1;
+  }
 
   uint64_t signalled = 0;
   VkCommandBuffer command_buffer = VK_NULL_HANDLE;
@@ -1077,10 +1127,10 @@ inline Image EnqueueUnary(const Image& input, const uint32_t* spirv, size_t spir
     vkCmdBindDescriptorSets(command_buffer, VK_PIPELINE_BIND_POINT_COMPUTE,
                             program.pipeline_layout, 0, 1, &descriptor_set, 0, nullptr);
     if (push_constant_bytes) {
-      vkCmdPushConstants(command_buffer, program.pipeline_layout,
-                         VK_SHADER_STAGE_COMPUTE_BIT, 0, push_constant_bytes, push_constants);
+      vkCmdPushConstants(command_buffer, program.pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0,
+                         push_constant_bytes, push_constants);
     }
-    vkCmdDispatch(command_buffer, groups, 1, 1);
+    vkCmdDispatch(command_buffer, groups[0], groups[1], groups[2]);
     Check(vkEndCommandBuffer(command_buffer), "vkEndCommandBuffer");
 
     signalled = context->SubmitLocked(command_buffer, input.ready());
@@ -1088,6 +1138,15 @@ inline Image EnqueueUnary(const Image& input, const uint32_t* spirv, size_t spir
   output.SetReady(signalled);
   output.RetainDispatch(command_buffer, descriptor_set);
   return output;
+}
+
+/// `Enqueue` 的薄封装:输出与输入同形同类型,按元素数铺 1 维。
+inline Image EnqueueUnary(const Image& input, const uint32_t* spirv, size_t spirv_words,
+                          const std::string& entry, const void* push_constants,
+                          uint32_t push_constant_bytes, uint32_t local_size_x = 64) {
+  DispatchSpec spec;
+  spec.local_size[0] = local_size_x;
+  return Enqueue(input, spec, spirv, spirv_words, entry, push_constants, push_constant_bytes);
 }
 
 /// LMFlowBuffer -> Image。注册名建议 "VkUpload"。

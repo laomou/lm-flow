@@ -107,41 +107,32 @@ class OclResizeKernel : public lmflow::Kernel {
     const int out_w = static_cast<int>(out_w_);
 
     int64_t out_shape[3] = {out_h, out_w, channels};
-    const std::shared_ptr<lmflow::ocl::Context>& context = image->context();
-    lmflow::ocl::Image output =
-        lmflow::ocl::Image::Allocate(context, LMFLOW_DTYPE_F32, ndim, out_shape);
-
-    // 输出与输入不同形,故不能用 EnqueueUnary(它按输入形状分配输出);这里自己入队。
-    cl_kernel kernel = context->KernelFor(kResizeSource, "resize_bilinear_f32");
     const float scale_y = static_cast<float>(in_h) / static_cast<float>(out_h);
     const float scale_x = static_cast<float>(in_w) / static_cast<float>(out_w);
-    const size_t global[2] = {static_cast<size_t>(out_w), static_cast<size_t>(out_h)};
 
-    cl_event done = nullptr;
-    {
-      // clSetKernelArg 对同一 cl_kernel 非线程安全,故设参与入队同锁保护(见 adapter)。
-      std::lock_guard<std::mutex> guard(context->enqueue_mutex());
-      cl_mem in_mem = image->mem();
-      cl_mem out_mem = output.mem();
-      int index = 0;
-      lmflow::ocl::Check(clSetKernelArg(kernel, index++, sizeof in_mem, &in_mem), "arg src");
-      lmflow::ocl::Check(clSetKernelArg(kernel, index++, sizeof out_mem, &out_mem), "arg dst");
-      lmflow::ocl::Check(clSetKernelArg(kernel, index++, sizeof in_h, &in_h), "arg in_h");
-      lmflow::ocl::Check(clSetKernelArg(kernel, index++, sizeof in_w, &in_w), "arg in_w");
-      lmflow::ocl::Check(clSetKernelArg(kernel, index++, sizeof out_h, &out_h), "arg out_h");
-      lmflow::ocl::Check(clSetKernelArg(kernel, index++, sizeof out_w, &out_w), "arg out_w");
-      lmflow::ocl::Check(clSetKernelArg(kernel, index++, sizeof channels, &channels),
-                         "arg channels");
-      lmflow::ocl::Check(clSetKernelArg(kernel, index++, sizeof scale_y, &scale_y), "arg scale_y");
-      lmflow::ocl::Check(clSetKernelArg(kernel, index++, sizeof scale_x, &scale_x), "arg scale_x");
-      // 生产者的 event 进 wait list —— 设备侧等待,CPU 线程不阻塞。
-      cl_event wait = image->ready();
-      lmflow::ocl::Check(clEnqueueNDRangeKernel(context->queue(), kernel, 2, nullptr, global,
-                                                nullptr, wait ? 1 : 0, wait ? &wait : nullptr,
-                                                &done),
-                         "clEnqueueNDRangeKernel(resize)");
-    }
-    output.SetReady(done);
+    // 输出与输入不同形,故用 DispatchSpec 指定输出形状与 2 维工作规模;加锁、绑 src/dst、
+    // 等生产者、记同步点这些通用步骤都由 Enqueue 负责,算子只管自己那几个参数。
+    lmflow::ocl::DispatchSpec spec;
+    spec.ndim = ndim;
+    spec.shape = out_shape;
+    spec.work_dim = 2;
+    spec.global[0] = static_cast<size_t>(out_w);
+    spec.global[1] = static_cast<size_t>(out_h);
+
+    lmflow::ocl::Image output = lmflow::ocl::Enqueue(
+        *image, spec, kResizeSource, "resize_bilinear_f32", [&](cl_kernel kernel) {
+          int index = 2;  // 0/1 已由 Enqueue 绑为 src/dst
+          lmflow::ocl::Check(clSetKernelArg(kernel, index++, sizeof in_h, &in_h), "arg in_h");
+          lmflow::ocl::Check(clSetKernelArg(kernel, index++, sizeof in_w, &in_w), "arg in_w");
+          lmflow::ocl::Check(clSetKernelArg(kernel, index++, sizeof out_h, &out_h), "arg out_h");
+          lmflow::ocl::Check(clSetKernelArg(kernel, index++, sizeof out_w, &out_w), "arg out_w");
+          lmflow::ocl::Check(clSetKernelArg(kernel, index++, sizeof channels, &channels),
+                             "arg channels");
+          lmflow::ocl::Check(clSetKernelArg(kernel, index++, sizeof scale_y, &scale_y),
+                             "arg scale_y");
+          lmflow::ocl::Check(clSetKernelArg(kernel, index++, sizeof scale_x, &scale_x),
+                             "arg scale_x");
+        });
 
     cc.Emit(0, lmflow::Packet::Make<lmflow::ocl::Image>(std::move(output)));
     return lmflow::Status::Ok();
