@@ -605,17 +605,33 @@ class Image {
     VkMemoryRequirements requirements{};
     vkGetBufferMemoryRequirements(context->device(), image.buffer_, &requirements);
     VkMemoryPropertyFlags want = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
-    if (context->unified_memory()) want |= VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-                                          VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
-    // 统一内存上**显式优先 HOST_CACHED**,而不是碰运气。零拷贝下载只在缓存内存上划算,
-    // 但内存类型的枚举顺序并不保证缓存的那个在前 —— 实测 Adreno 840 就把未缓存的
-    // HOST_COHERENT 排在缓存版之前(类型 4/5 在 6/7 之前)。只取「第一个匹配」的话,
-    // 一旦某 buffer 的 memoryTypeBits 放行了那些未缓存类型,零拷贝就会**静默失效**:
-    // 分配照样成功、功能照样对,只是白白退回整次回读拷贝,没有任何报错提示。
+    // 统一内存上按三档优先级挑,而不是碰运气,也不要求 cached 与 coherent 兼备:
+    //
+    //   ① cached + coherent —— 最好,零拷贝且无需缓存维护
+    //   ② cached,非 coherent —— 仍可零拷贝,但读写要显式 invalidate / flush
+    //   ③ 只有 coherent(未缓存)—— 退回拷贝路径
+    //
+    // ②这一档是必须的:实测 5 种 Mali(G52/G57/G615/G625/G720)**都没有** cached+coherent
+    // 的类型,只有 cached 非 coherent 的。若像先前那样要求两者兼备,等于在所有 Mali 上
+    // 静默关掉零拷贝下载(分配照样成功、结果照样对,只是白白多一整次回读拷贝)。
+    //
+    // 显式排序同样必要:18 台真机上未缓存的 HOST_VISIBLE|COHERENT 类型**都排在**缓存版
+    // 之前,所以「取第一个匹配」在 memoryTypeBits 放行它时就会选中未缓存的那个。
     uint32_t type_index = Context::kNoMemoryType;
     if (context->unified_memory()) {
+      const VkMemoryPropertyFlags visible = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT;
+      const VkMemoryPropertyFlags coherent = VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+      const VkMemoryPropertyFlags cached = VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
       type_index = context->FindMemoryTypeOrNone(requirements.memoryTypeBits,
-                                                 want | VK_MEMORY_PROPERTY_HOST_CACHED_BIT);
+                                                 want | visible | coherent | cached);
+      if (type_index == Context::kNoMemoryType) {
+        type_index = context->FindMemoryTypeOrNone(requirements.memoryTypeBits,
+                                                  want | visible | cached);
+      }
+      if (type_index == Context::kNoMemoryType) {
+        type_index = context->FindMemoryTypeOrNone(requirements.memoryTypeBits,
+                                                  want | visible | coherent);
+      }
     }
     if (type_index == Context::kNoMemoryType) {
       type_index = context->FindMemoryType(requirements.memoryTypeBits, want);
@@ -628,11 +644,12 @@ class Image {
           "vkAllocateMemory");
     Check(vkBindBufferMemory(context->device(), image.buffer_, image.memory_, 0),
           "vkBindBufferMemory");
-    image.host_visible_ = context->unified_memory();
-    // 记下实际挑中的内存类型是否**主机缓存**:零拷贝下载只在缓存内存上才是划算的。
+    // 三个标志都由**实际挑中的**内存类型推出,而不是由 unified_memory() 推断 ——
+    // 落到第 ④ 档(纯 device-local)时 host_visible 必须是 false。
     const VkMemoryPropertyFlags picked = context->memory_type_flags(type_index);
-    image.host_cached_ = (picked & VK_MEMORY_PROPERTY_HOST_CACHED_BIT) != 0 &&
-                         (picked & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) != 0;
+    image.host_visible_ = (picked & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) != 0;
+    image.host_cached_ = (picked & VK_MEMORY_PROPERTY_HOST_CACHED_BIT) != 0;
+    image.host_coherent_ = (picked & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) != 0;
     image.mapped_bytes_ = requirements.size;
     return image;
   }
@@ -644,6 +661,9 @@ class Image {
   bool host_visible() const { return host_visible_; }
   /// 映射出的内存是否既 HOST_CACHED 又 HOST_COHERENT —— 零拷贝下载的前提。
   bool host_cached() const { return host_cached_; }
+  /// 映射出的内存是否 HOST_COHERENT。false 时主机读写前后必须显式 invalidate / flush
+  /// (Mali 唯一的缓存类型就是非 coherent 的)。
+  bool host_coherent() const { return host_coherent_; }
   /// 生产者签发的时间线值;0 表示无需等待。
   uint64_t ready() const { return ready_; }
   void SetReady(uint64_t value) { ready_ = value; }
@@ -702,6 +722,7 @@ class Image {
     ndim_ = other.ndim_;
     host_visible_ = other.host_visible_;
     host_cached_ = other.host_cached_;
+    host_coherent_ = other.host_coherent_;
     mapped_bytes_ = other.mapped_bytes_;
     for (int i = 0; i < kMaxNdim; ++i) shape_[i] = other.shape_[i];
     other.buffer_ = VK_NULL_HANDLE;
@@ -721,6 +742,7 @@ class Image {
   int ndim_ = 0;
   bool host_visible_ = false;
   bool host_cached_ = false;
+  bool host_coherent_ = false;
   VkDeviceSize mapped_bytes_ = 0;
   int64_t shape_[kMaxNdim] = {0, 0, 0, 0};
 };
@@ -728,13 +750,34 @@ class Image {
 namespace detail {
 
 /// 把主机内存拷进/拷出一块 host-visible 的设备内存。
+/// 把主机内存拷进/拷出一块 host-visible 的设备内存。
+///
+/// `coherent=false` 时(Mali 唯一的缓存类型就是这样)必须按规范显式做缓存维护:写完
+/// flush 才能让设备看见,读前 invalidate 才能让主机看见。漏掉就是静默读到/写出陈旧数据。
+///
+/// 整块映射(VK_WHOLE_SIZE)而非只映射 bytes:这样 VkMappedMemoryRange 用
+/// offset=0 + VK_WHOLE_SIZE 一定落在已映射范围内,也就无需理会 nonCoherentAtomSize
+/// 的对齐约束。
 inline void CopyMapped(const std::shared_ptr<Context>& context, VkDeviceMemory memory,
-                       void* host, size_t bytes, bool to_device) {
+                       void* host, size_t bytes, bool to_device, bool coherent) {
   void* mapped = nullptr;
-  Check(vkMapMemory(context->device(), memory, 0, bytes, 0, &mapped), "vkMapMemory");
+  Check(vkMapMemory(context->device(), memory, 0, VK_WHOLE_SIZE, 0, &mapped), "vkMapMemory");
+  VkMappedMemoryRange range{};
+  range.sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;
+  range.memory = memory;
+  range.offset = 0;
+  range.size = VK_WHOLE_SIZE;
   if (to_device) {
     std::memcpy(mapped, host, bytes);
+    if (!coherent) {
+      Check(vkFlushMappedMemoryRanges(context->device(), 1, &range),
+            "vkFlushMappedMemoryRanges");
+    }
   } else {
+    if (!coherent) {
+      Check(vkInvalidateMappedMemoryRanges(context->device(), 1, &range),
+            "vkInvalidateMappedMemoryRanges");
+    }
     std::memcpy(host, mapped, bytes);
   }
   vkUnmapMemory(context->device(), memory);
@@ -783,7 +826,8 @@ inline Image Upload(const std::shared_ptr<Context>& context, const LMFlowBuffer&
   const size_t bytes = image.byte_size();
 
   if (image.host_visible()) {
-    detail::CopyMapped(context, image.memory(), buffer.data, bytes, /*to_device=*/true);
+    detail::CopyMapped(context, image.memory(), buffer.data, bytes, /*to_device=*/true,
+                       image.host_coherent());
     return image;
   }
 
@@ -807,7 +851,8 @@ inline Image Upload(const std::shared_ptr<Context>& context, const LMFlowBuffer&
   Check(vkAllocateMemory(context->device(), &allocate, nullptr, &staging_memory),
         "vkAllocateMemory");
   Check(vkBindBufferMemory(context->device(), staging, staging_memory, 0), "vkBindBufferMemory");
-  detail::CopyMapped(context, staging_memory, buffer.data, bytes, /*to_device=*/true);
+  detail::CopyMapped(context, staging_memory, buffer.data, bytes, /*to_device=*/true,
+                     /*coherent=*/true);  // staging 就是按 HOST_COHERENT 分配的
 
   uint64_t signalled = 0;
   {
@@ -859,7 +904,8 @@ inline Packet Download(const Image& image) {
   }
 
   context->WaitTimeline(image.ready());
-  detail::CopyMapped(context, image.memory(), out.data, image.byte_size(), /*to_device=*/false);
+  detail::CopyMapped(context, image.memory(), out.data, image.byte_size(), /*to_device=*/false,
+                     image.host_coherent());
   return packet;
 }
 
@@ -892,14 +938,28 @@ inline Packet DownloadMapped(Packet image_packet) {
   const int ndim = image->ndim();
   const int32_t dtype = image->dtype();
   const size_t bytes = image->byte_size();
+  const bool coherent = image->host_coherent();
   int64_t shape[kMaxNdim] = {0, 0, 0, 0};
   for (int i = 0; i < ndim; ++i) shape[i] = image->shape(i);
 
   // 交出去之前必须等生产者写完 —— 之后读的是下游 CPU 算子,引擎不会替我们同步。
   context->WaitTimeline(image->ready());
 
+  // 整块映射,便于下面用 offset=0 + VK_WHOLE_SIZE 做缓存维护(无需管 nonCoherentAtomSize)。
   void* mapped = nullptr;
-  Check(vkMapMemory(context->device(), memory, 0, bytes, 0, &mapped), "vkMapMemory");
+  Check(vkMapMemory(context->device(), memory, 0, VK_WHOLE_SIZE, 0, &mapped), "vkMapMemory");
+  if (!coherent) {
+    // 非 coherent 内存(Mali 唯一的缓存类型)必须先 invalidate,否则主机读到的是陈旧
+    // 缓存行。这里只需做一次:GPU 已经写完(上面等过时间线),而交出的视图是 READONLY,
+    // 此后不会再有设备侧写入。
+    VkMappedMemoryRange range{};
+    range.sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;
+    range.memory = memory;
+    range.offset = 0;
+    range.size = VK_WHOLE_SIZE;
+    Check(vkInvalidateMappedMemoryRanges(context->device(), 1, &range),
+          "vkInvalidateMappedMemoryRanges");
+  }
 
   LMFlowBuffer view{};
   view.data = mapped;
