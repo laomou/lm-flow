@@ -122,4 +122,23 @@ if("opencl" IN_LIST lmflow_FIND_COMPONENTS)
   endif()
 endif()
 
+set(lmflow_vulkan_FOUND FALSE)
+if("vulkan" IN_LIST lmflow_FIND_COMPONENTS)
+  if(@LMFLOW_BUILD_VULKAN_ADAPTER@)
+    find_dependency(Vulkan REQUIRED)
+    if(NOT TARGET lmflow::vulkan)
+      add_library(lmflow::vulkan INTERFACE IMPORTED)
+      set_target_properties(lmflow::vulkan PROPERTIES
+        INTERFACE_INCLUDE_DIRECTORIES
+          "${PACKAGE_PREFIX_DIR}/include"
+        INTERFACE_LINK_LIBRARIES
+          "lmflow::lmflow;Vulkan::Vulkan")
+    endif()
+    set(lmflow_vulkan_FOUND TRUE)
+  else()
+    set(lmflow_vulkan_NOT_FOUND_MESSAGE
+      "This lmflow SDK was built without the optional Vulkan adapter")
+  endif()
+endif()
+
 check_required_components(lmflow)
