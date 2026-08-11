@@ -126,12 +126,25 @@ class Context {
   /// 那是引入多队列/并行记录之后才需要的。这里用一个池并由本锁保护,更简单也更少资源。
   std::mutex& submit_mutex() { return submit_mutex_; }
 
-  uint32_t FindMemoryType(uint32_t type_bits, VkMemoryPropertyFlags want) const {
+  /// 没有匹配类型时的返回值(`FindMemoryTypeOrNone`)。
+  static constexpr uint32_t kNoMemoryType = UINT32_MAX;
+
+  /// 找第一个满足 `want` 的内存类型;没有则返回 `kNoMemoryType`,不抛。
+  /// 用于「优先某属性、允许退而求其次」的两段式选择。
+  uint32_t FindMemoryTypeOrNone(uint32_t type_bits, VkMemoryPropertyFlags want) const {
     for (uint32_t i = 0; i < memory_properties_.memoryTypeCount; ++i) {
       if ((type_bits & (1u << i)) == 0) continue;
       if ((memory_properties_.memoryTypes[i].propertyFlags & want) == want) return i;
     }
-    throw std::runtime_error("flow/vk: no memory type satisfies the requested properties");
+    return kNoMemoryType;
+  }
+
+  uint32_t FindMemoryType(uint32_t type_bits, VkMemoryPropertyFlags want) const {
+    const uint32_t index = FindMemoryTypeOrNone(type_bits, want);
+    if (index == kNoMemoryType) {
+      throw std::runtime_error("flow/vk: no memory type satisfies the requested properties");
+    }
+    return index;
   }
 
   /// 某内存类型的属性位。零拷贝下载要据此判断映射出的内存是否 HOST_CACHED ——
@@ -527,10 +540,22 @@ class Image {
     VkMemoryPropertyFlags want = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
     if (context->unified_memory()) want |= VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
                                           VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+    // 统一内存上**显式优先 HOST_CACHED**,而不是碰运气。零拷贝下载只在缓存内存上划算,
+    // 但内存类型的枚举顺序并不保证缓存的那个在前 —— 实测 Adreno 840 就把未缓存的
+    // HOST_COHERENT 排在缓存版之前(类型 4/5 在 6/7 之前)。只取「第一个匹配」的话,
+    // 一旦某 buffer 的 memoryTypeBits 放行了那些未缓存类型,零拷贝就会**静默失效**:
+    // 分配照样成功、功能照样对,只是白白退回整次回读拷贝,没有任何报错提示。
+    uint32_t type_index = Context::kNoMemoryType;
+    if (context->unified_memory()) {
+      type_index = context->FindMemoryTypeOrNone(requirements.memoryTypeBits,
+                                                 want | VK_MEMORY_PROPERTY_HOST_CACHED_BIT);
+    }
+    if (type_index == Context::kNoMemoryType) {
+      type_index = context->FindMemoryType(requirements.memoryTypeBits, want);
+    }
     VkMemoryAllocateInfo allocate{};
     allocate.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
     allocate.allocationSize = requirements.size;
-    const uint32_t type_index = context->FindMemoryType(requirements.memoryTypeBits, want);
     allocate.memoryTypeIndex = type_index;
     Check(vkAllocateMemory(context->device(), &allocate, nullptr, &image.memory_),
           "vkAllocateMemory");
