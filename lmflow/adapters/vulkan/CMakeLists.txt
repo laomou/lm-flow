@@ -20,6 +20,16 @@ if(LMFLOW_BUILD_VULKAN_ADAPTER AND LMFLOW_BUILD_TESTS
   add_test(NAME lmflow_vulkan_test COMMAND lmflow_vulkan_test)
 endif()
 
+if(LMFLOW_BUILD_VULKAN_ADAPTER AND LMFLOW_BUILD_BENCHMARKS
+   AND NOT LMFLOW_BUILD_PYTHON
+   AND CMAKE_SOURCE_DIR STREQUAL LMFLOW_ROOT)
+  # 分阶段基准(upload / dispatch / download / roundtrip)。输出与
+  # benchmarks/native_throughput.cc 同一 JSON 形状,可直接喂给 compare_reports.py。
+  add_executable(lmflow_vulkan_bench benchmarks/vulkan_bench.cc)
+  target_link_libraries(lmflow_vulkan_bench PRIVATE lmflow::vulkan)
+  add_dependencies(lmflow_vulkan_bench flow_engine)
+endif()
+
 if(LMFLOW_BUILD_VULKAN_ADAPTER AND CMAKE_SOURCE_DIR STREQUAL LMFLOW_ROOT)
   install(FILES include/lmflow/vulkan.hpp DESTINATION include/lmflow)
 endif()

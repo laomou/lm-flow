@@ -21,8 +21,11 @@
  *      **CPU 线程不阻塞**;只有 Download 做主机侧等待。
  *
  *   3. 显存要自己选堆。若存在同时 DEVICE_LOCAL 且 HOST_VISIBLE 的内存类型(ARM 统一内存
- *      与软件实现都是如此),上传/下载直接映射,**零拷贝**;否则退回 staging buffer + 队列
- *      拷贝(独显)。两条路径都实现了。
+ *      与软件实现都是如此),上传/下载直接映射,**零拷贝**。否则(典型是独显)Upload 退回
+ *      staging buffer + 队列拷贝,但 **Download 的 staging 回读尚未实现** —— 这类设备上
+ *      `VkDownload` 会在 **Open 期**就明确失败,而不是跑到出帧时才抛。换句话说:完整的
+ *      GPU→CPU 回路目前只在存在 host-visible 显存的设备上可用;纯 GPU 段(上传 + 计算,
+ *      结果留在设备上)不受此限制。
  *
  * 算子注册:本文件只提供算子**类**,不做注册 —— 在你自己的**某一个** .cc 里写
  *
@@ -56,18 +59,14 @@ namespace vk {
 /// Image 支持的最大维数,与 OpenCL adapter 一致。
 constexpr int kMaxNdim = 4;
 
+/// 单个元素的字节数。直接用 C ABI 自带的表(未知 dtype 返回 0),不在 adapter 里另抄一份
+/// —— 抄的那份此前漏了 LMFLOW_DTYPE_I64 与 LMFLOW_DTYPE_F16,遇到就抛。
 inline size_t DtypeSize(int32_t dtype) {
-  switch (dtype) {
-    case LMFLOW_DTYPE_U8:
-    case LMFLOW_DTYPE_I8: return 1;
-    case LMFLOW_DTYPE_U16:
-    case LMFLOW_DTYPE_I16: return 2;
-    case LMFLOW_DTYPE_I32:
-    case LMFLOW_DTYPE_F32: return 4;
-    case LMFLOW_DTYPE_F64: return 8;
-    default:
-      throw std::invalid_argument("flow/vk: dtype has no known element size");
+  const size_t size = lmflow_dtype_size(dtype);
+  if (size == 0) {
+    throw std::invalid_argument("flow/vk: dtype has no known element size");
   }
+  return size;
 }
 
 inline void Check(VkResult status, const char* what) {
@@ -75,6 +74,22 @@ inline void Check(VkResult status, const char* what) {
     throw std::runtime_error(std::string("flow/vk: ") + what + " failed with VkResult " +
                              std::to_string(static_cast<int>(status)));
   }
+}
+
+/// 行优先连续?strides 按**字节**计,最内维步长应 = 元素大小,再逐维外推。
+///
+/// LMFlowBuffer 明确允许非连续布局(见 flow.h),而 Upload 是整块拷贝 —— 带行填充的
+/// cv::Mat、numpy 切片视图这类输入若不拦住,会**静默上传错数据**。语义与
+/// cpp/kernels/buffer_util.hpp 的 is_contiguous 一致(那个头不随 SDK 安装,故此处重述)。
+inline bool IsContiguous(const LMFlowBuffer& buffer) {
+  const size_t element = lmflow_dtype_size(buffer.dtype);
+  if (element == 0 || buffer.ndim <= 0) return false;
+  int64_t expected = static_cast<int64_t>(element);
+  for (int i = buffer.ndim - 1; i >= 0; --i) {
+    if (buffer.strides[i] != expected) return false;
+    expected *= buffer.shape[i];
+  }
+  return true;
 }
 
 class Image;
@@ -259,6 +274,11 @@ class Context {
     Check(vkAllocateDescriptorSets(device_, &set_alloc, descriptor_set),
           "vkAllocateDescriptorSets");
   }
+
+  /// 已签发的最大时间线值。任何**可能**引用某块显存的提交,其签发值都 ≤ 本值
+  /// (提交与 Reset 同受 submit_mutex 保护,不会并发),故按本值登记延迟回收,
+  /// 就能保证「归还晚于所有在途工作」。调用方须持有 submit_mutex()。
+  uint64_t last_issued_locked() const { return timeline_value_; }
 
   /// 提交一个已记录好的命令缓冲:等待上一个时间线值,签发新值。
   /// 调用方须持有 submit_mutex()。返回本次签发的值。
@@ -555,14 +575,19 @@ class Image {
   void Reset() {
     if (!context_) return;
     // 不做主机等待:把资源登记到延迟回收表,由后续提交顺带回收。
+    //
+    // 登记值必须是**已签发的最大时间线值**,而不是本 Image 自己的 ready_:统一内存路径的
+    // Upload 只做主机 memcpy、不提交,ready_ 保持 0,而读它的 dispatch 却可能仍在飞行 ——
+    // 若按 ready_=0 登记,ReclaimUpTo 会立刻 vkDestroyBuffer/vkFreeMemory,GPU 便读到已
+    // 释放的显存(表现为驱动 worker 线程段错误)。按最大签发值登记才覆盖所有在途引用。
     Context::Retired retired;
-    retired.value = ready_;
     retired.command_buffer = command_buffer_;
     retired.descriptor_set = descriptor_set_;
     retired.buffer = buffer_;
     retired.memory = memory_;
     {
       std::lock_guard<std::mutex> guard(context_->submit_mutex());
+      retired.value = context_->last_issued_locked();
       context_->RetireLocked(retired);
       context_->ReclaimCompletedLocked();
     }
@@ -628,6 +653,11 @@ inline Image Upload(const std::shared_ptr<Context>& context, const LMFlowBuffer&
   if (buffer.ndim <= 0 || buffer.ndim > kMaxNdim) {
     throw std::invalid_argument("flow/vk: Upload supports buffers with ndim within [1, 4]");
   }
+  if (!IsContiguous(buffer)) {
+    throw std::invalid_argument(
+        "flow/vk: Upload needs a row-major contiguous buffer, but the descriptor is strided "
+        "(a padded cv::Mat row or a sliced numpy view looks like this); pack it first");
+  }
   Image image = Image::Allocate(context, buffer.dtype, buffer.ndim, buffer.shape);
   const size_t bytes = image.byte_size();
 
@@ -688,22 +718,28 @@ inline Image Upload(const std::shared_ptr<Context>& context, const LMFlowBuffer&
 ///
 /// 这是整条链上唯一需要主机等待的地方 —— 先等生产者的时间线值,再读回。
 inline Packet Download(const Image& image) {
+  const std::shared_ptr<Context>& context = image.context();
+  // 先判设备能力、再分配输出包:device-only 显存没有回读路径,提前失败也省掉一次白分配。
+  if (!image.host_visible()) {
+    throw std::runtime_error(
+        "flow/vk: Download needs a DEVICE_LOCAL|HOST_VISIBLE memory type; this device has none "
+        "(typical for a discrete GPU) and the staging read-back path is not implemented");
+  }
+
   int64_t shape[kMaxNdim] = {0, 0, 0, 0};
   for (int i = 0; i < image.ndim(); ++i) shape[i] = image.shape(i);
+  // 免初始化分配:回读会把整块写满 —— 输出包按同一 ndim/shape/dtype 分配,其字节数就等于
+  // image.byte_size(),而下面的 CopyMapped 正好拷这么多字节,故满足「emit 前写满」的契约。
+  // 用保证清零的 new_buffer 等于每帧白做一次全缓冲 memset(24 MB 量级约 0.4 ms 起)。
   LMFlowBuffer out{};
-  Packet packet = Packet::Adopt(
-      lmflow_packet_new_buffer(image.ndim(), shape, image.dtype(), LMFLOW_TS_UNSET, &out));
-  if (packet.IsEmpty()) throw std::runtime_error("flow/vk: lmflow_packet_new_buffer failed");
-
-  const std::shared_ptr<Context>& context = image.context();
-  context->WaitTimeline(image.ready());
-  if (image.host_visible()) {
-    detail::CopyMapped(context, image.memory(), out.data, image.byte_size(),
-                       /*to_device=*/false);
-    return packet;
+  Packet packet = Packet::NewBufferUninitialized(image.ndim(), shape, image.dtype(), &out);
+  if (packet.IsEmpty()) {
+    throw std::runtime_error("flow/vk: lmflow_packet_new_buffer_uninit failed");
   }
-  throw std::runtime_error(
-      "flow/vk: Download from device-only memory needs a staging path; not implemented");
+
+  context->WaitTimeline(image.ready());
+  detail::CopyMapped(context, image.memory(), out.data, image.byte_size(), /*to_device=*/false);
+  return packet;
 }
 
 /// 把一个一维 dispatch 入队,产出新的设备负载。
@@ -792,6 +828,17 @@ class DownloadKernel : public Kernel {
   static void GetContract(Contract& c) {
     c.InputSet<Image>(0);
     c.OutputSetBuiltin(0, LMFLOW_TYPE_BUFFER);
+  }
+
+  /// 不支持的设备在 **Open 期**就失败:device-only 显存没有 staging 回读路径,与其跑到
+  /// 出帧时才抛,不如让 `graph.start()` 直接报错(「算子应在 Open 里直接失败」见 flow.hpp)。
+  Status Open(lmflow::Context& cc) override {
+    if (!Context::Shared()->unified_memory()) {
+      return cc.Fail(
+          "VkDownload: this device has no DEVICE_LOCAL|HOST_VISIBLE memory type (typical for a "
+          "discrete GPU); the staging read-back path is not implemented");
+    }
+    return Status::Ok();
   }
 
   Status Process(lmflow::Context& cc) override {

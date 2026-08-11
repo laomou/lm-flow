@@ -20,6 +20,16 @@ if(LMFLOW_BUILD_OPENCL_ADAPTER AND LMFLOW_BUILD_TESTS
   add_test(NAME lmflow_opencl_test COMMAND lmflow_opencl_test)
 endif()
 
+if(LMFLOW_BUILD_OPENCL_ADAPTER AND LMFLOW_BUILD_BENCHMARKS
+   AND NOT LMFLOW_BUILD_PYTHON
+   AND CMAKE_SOURCE_DIR STREQUAL LMFLOW_ROOT)
+  # 分阶段基准(upload / dispatch / download / roundtrip)。输出与
+  # benchmarks/native_throughput.cc 同一 JSON 形状,可直接喂给 compare_reports.py。
+  add_executable(lmflow_opencl_bench benchmarks/opencl_bench.cc)
+  target_link_libraries(lmflow_opencl_bench PRIVATE lmflow::opencl)
+  add_dependencies(lmflow_opencl_bench flow_engine)
+endif()
+
 if(LMFLOW_BUILD_OPENCL_ADAPTER AND CMAKE_SOURCE_DIR STREQUAL LMFLOW_ROOT)
   install(FILES include/lmflow/opencl.hpp DESTINATION include/lmflow)
 endif()

@@ -57,18 +57,14 @@ namespace ocl {
 /// Image 支持的最大维数。图像类负载 2~3 维足够,留 4 以便带 batch。
 constexpr int kMaxNdim = 4;
 
+/// 单个元素的字节数。直接用 C ABI 自带的表(未知 dtype 返回 0),不在 adapter 里另抄一份
+/// —— 抄的那份此前漏了 LMFLOW_DTYPE_I64 与 LMFLOW_DTYPE_F16,遇到就抛。
 inline size_t DtypeSize(int32_t dtype) {
-  switch (dtype) {
-    case LMFLOW_DTYPE_U8:
-    case LMFLOW_DTYPE_I8: return 1;
-    case LMFLOW_DTYPE_U16:
-    case LMFLOW_DTYPE_I16: return 2;
-    case LMFLOW_DTYPE_I32:
-    case LMFLOW_DTYPE_F32: return 4;
-    case LMFLOW_DTYPE_F64: return 8;
-    default:
-      throw std::invalid_argument("flow/ocl: dtype has no known element size");
+  const size_t size = lmflow_dtype_size(dtype);
+  if (size == 0) {
+    throw std::invalid_argument("flow/ocl: dtype has no known element size");
   }
+  return size;
 }
 
 inline void Check(cl_int status, const char* what) {
@@ -76,6 +72,22 @@ inline void Check(cl_int status, const char* what) {
     throw std::runtime_error(std::string("flow/ocl: ") + what + " failed with " +
                              std::to_string(status));
   }
+}
+
+/// 行优先连续?strides 按**字节**计,最内维步长应 = 元素大小,再逐维外推。
+///
+/// LMFlowBuffer 明确允许非连续布局(见 flow.h),而 Upload 是整块拷贝 —— 带行填充的
+/// cv::Mat、numpy 切片视图这类输入若不拦住,会**静默上传错数据**。语义与
+/// cpp/kernels/buffer_util.hpp 的 is_contiguous 一致(那个头不随 SDK 安装,故此处重述)。
+inline bool IsContiguous(const LMFlowBuffer& buffer) {
+  const size_t element = lmflow_dtype_size(buffer.dtype);
+  if (element == 0 || buffer.ndim <= 0) return false;
+  int64_t expected = static_cast<int64_t>(element);
+  for (int i = buffer.ndim - 1; i >= 0; --i) {
+    if (buffer.strides[i] != expected) return false;
+    expected *= buffer.shape[i];
+  }
+  return true;
 }
 
 /// 进程级共享的设备上下文。
@@ -315,6 +327,11 @@ inline Image Upload(const std::shared_ptr<Context>& context, const LMFlowBuffer&
   if (buffer.ndim <= 0 || buffer.ndim > kMaxNdim) {
     throw std::invalid_argument("flow/ocl: Upload supports buffers with ndim within [1, 4]");
   }
+  if (!IsContiguous(buffer)) {
+    throw std::invalid_argument(
+        "flow/ocl: Upload needs a row-major contiguous buffer, but the descriptor is strided "
+        "(a padded cv::Mat row or a sliced numpy view looks like this); pack it first");
+  }
   Image image = Image::Allocate(context, buffer.dtype, buffer.ndim, buffer.shape);
   Check(clEnqueueWriteBuffer(context->queue(), image.mem(), CL_TRUE, 0, image.byte_size(),
                              buffer.data, 0, nullptr, nullptr),
@@ -328,10 +345,14 @@ inline Image Upload(const std::shared_ptr<Context>& context, const LMFlowBuffer&
 inline Packet Download(const Image& image) {
   int64_t shape[kMaxNdim] = {0, 0, 0, 0};
   for (int i = 0; i < image.ndim(); ++i) shape[i] = image.shape(i);
+  // 免初始化分配:回读会把整块写满 —— 输出包按同一 ndim/shape/dtype 分配,其字节数就等于
+  // image.byte_size(),而下面的 clEnqueueReadBuffer 正好读这么多字节,故满足「emit 前写满」
+  // 的契约。用保证清零的 new_buffer 等于每帧白做一次全缓冲 memset。
   LMFlowBuffer out{};
-  Packet packet = Packet::Adopt(
-      lmflow_packet_new_buffer(image.ndim(), shape, image.dtype(), LMFLOW_TS_UNSET, &out));
-  if (packet.IsEmpty()) throw std::runtime_error("flow/ocl: lmflow_packet_new_buffer failed");
+  Packet packet = Packet::NewBufferUninitialized(image.ndim(), shape, image.dtype(), &out);
+  if (packet.IsEmpty()) {
+    throw std::runtime_error("flow/ocl: lmflow_packet_new_buffer_uninit failed");
+  }
   cl_event wait = image.ready();
   Check(clEnqueueReadBuffer(image.context()->queue(), image.mem(), CL_TRUE, 0, image.byte_size(),
                             out.data, wait ? 1 : 0, wait ? &wait : nullptr, nullptr),
