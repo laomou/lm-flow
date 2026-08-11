@@ -12,6 +12,11 @@
  * 与 Vulkan 版的一个实质差别:本 adapter 的 Upload/Download 都是**阻塞式**
  * (clEnqueueWriteBuffer / clEnqueueReadBuffer 传 CL_TRUE),而 EnqueueUnary 是异步的,
  * 故 dispatch_enqueue 测到的是 CPU 侧的设参 + 入队成本,不含 GPU 执行时间。
+ *
+ * ⚠ 本二进制由 CMake 单独打开了 LMFLOW_OCL_PROFILING(dispatch_gpu 那一行需要它)。
+ * 代价实测:每次 dispatch 多约 5µs,于是这里的 dispatch_enqueue 比**默认构建**偏高
+ * (小 buffer 上 +56%、整条回路 +6%;大 buffer 因传输占主导只 1~3%)。要拿默认构建的
+ * 主机侧数字,请把 LMFLOW_OCL_PROFILING 关掉重编。
  */
 #ifndef CL_TARGET_OPENCL_VERSION
 #define CL_TARGET_OPENCL_VERSION 120
@@ -154,6 +159,31 @@ int main(int argc, char** argv) {
                                      input, kScaleSource, "scale", set_factor);
                                  (void)output;
                                })));
+      }
+
+      // dispatch_gpu:同一次 dispatch 的 **GPU 执行**耗时(靠 CL_QUEUE_PROFILING_ENABLE)。
+      // 与 dispatch_enqueue 对照才能把「CPU 入队」和「GPU 执行」分开 —— 只看 enqueue
+      // 会误以为那就是纯 CPU 成本,而它其实会被队列背压拖长。
+      {
+        lmflow::ocl::Image input = lmflow::ocl::Upload(context, source.view());
+        std::vector<double> gpu_ns;
+        gpu_ns.reserve(iterations);
+        for (std::size_t i = 0; i < iterations; ++i) {
+          lmflow::ocl::Image out =
+              lmflow::ocl::EnqueueUnary(input, kScaleSource, "scale", set_factor);
+          cl_event event = out.ready();
+          if (event) clWaitForEvents(1, &event);
+          gpu_ns.push_back(static_cast<double>(out.gpu_duration_ns()));
+        }
+        std::sort(gpu_ns.begin(), gpu_ns.end());
+        Result gpu;
+        gpu.name = "ocl/dispatch_gpu" + suffix;
+        gpu.iterations = iterations;
+        gpu.payload_bytes = source.bytes();
+        gpu.nanoseconds_per_packet = gpu_ns[gpu_ns.size() / 2];
+        gpu.packets_per_second =
+            gpu.nanoseconds_per_packet > 0 ? 1e9 / gpu.nanoseconds_per_packet : 0.0;
+        results.push_back(gpu);
       }
 
       // download:阻塞式回读。含输出包分配 + 等生产者 event + 拷回主机

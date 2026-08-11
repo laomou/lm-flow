@@ -40,6 +40,12 @@
 #endif
 #include <CL/cl.h>
 
+/// GPU 执行耗时采集开关(默认关)。开启会让每次 dispatch 多约 5µs —— 见 Context 构造处
+/// 的实测数据。仅在需要 Image::gpu_duration_ns() 时定义为 1。
+#ifndef LMFLOW_OCL_PROFILING
+#define LMFLOW_OCL_PROFILING 0
+#endif
+
 #include <cstring>
 #include <memory>
 #include <mutex>
@@ -168,7 +174,13 @@ class Context {
     cl_int status = CL_SUCCESS;
     context_ = clCreateContext(nullptr, 1, &device_, nullptr, nullptr, &status);
     Check(status, "clCreateContext");
-    queue_ = clCreateCommandQueue(context_, device_, 0, &status);
+    // GPU 执行耗时默认**不采集**。开 CL_QUEUE_PROFILING_ENABLE 实测每次 dispatch 要多
+    // 约 5µs:小 buffer 的 enqueue 路径 +56%、小 buffer 整条回路 +6%(大 buffer 因传输
+    // 占主导只有 1~3%)。对小张量流水线这不可忽略,所以做成编译期开关而非默认开。
+    // 想看 GPU 时间:编译时 -DLMFLOW_OCL_PROFILING=1,再用 Image::gpu_duration_ns()。
+    const cl_command_queue_properties queue_properties =
+        LMFLOW_OCL_PROFILING ? CL_QUEUE_PROFILING_ENABLE : 0;
+    queue_ = clCreateCommandQueue(context_, device_, queue_properties, &status);
     Check(status, "clCreateCommandQueue");
   }
 
@@ -254,6 +266,26 @@ class Image {
   cl_mem mem() const { return mem_; }
   /// 生产者同步点;可能为 null(表示无需等待)。
   cl_event ready() const { return ready_; }
+
+  /// 生产这个 Image 的那次 GPU 命令的**执行**耗时(纳秒)。
+  ///
+  /// 用来把「CPU 入队」和「GPU 执行」分开 —— 引擎的节点耗时是在主机侧测的,设备上花的
+  /// 时间它看不见。需要编译时 -DLMFLOW_OCL_PROFILING=1(默认关,因为开着每次 dispatch
+  /// 多约 5µs)。⚠ 只有事件**已完成**时才可读(否则驱动返回
+  /// CL_PROFILING_INFO_NOT_AVAILABLE):先 `clWaitForEvents(1, &image.ready())` 或在
+  /// `Download` 之后再问。未开开关 / 无同步点 / 读不到时返回 0,不抛。
+  uint64_t gpu_duration_ns() const {
+    if (!ready_) return 0;
+    cl_ulong start = 0;
+    cl_ulong end = 0;
+    if (clGetEventProfilingInfo(ready_, CL_PROFILING_COMMAND_START, sizeof start, &start,
+                                nullptr) != CL_SUCCESS ||
+        clGetEventProfilingInfo(ready_, CL_PROFILING_COMMAND_END, sizeof end, &end, nullptr) !=
+            CL_SUCCESS) {
+      return 0;
+    }
+    return end >= start ? static_cast<uint64_t>(end - start) : 0;
+  }
   int32_t dtype() const { return dtype_; }
   int ndim() const { return ndim_; }
   int64_t shape(int index) const { return shape_[index]; }
