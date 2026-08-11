@@ -180,6 +180,30 @@ int main(int argc, char** argv) {
               (void)packet;
             })));
       }
+
+      // 拷贝式 vs 零拷贝下载的对比。两者都含一次 Upload(DownloadMapped 会消耗掉持有
+      // Image 的包,没法像上面那样复用同一个 Image),故差值即零拷贝省下的部分。
+      {
+        lmflow::vk::Image probe = lmflow::vk::Upload(context, source.view());
+        const bool mapped_ok = lmflow::vk::CanDownloadMapped(probe);
+        results.push_back(Make("vk/upload_download" + suffix, iterations, source.bytes(),
+                               TimeSeconds(warmup, iterations, [&] {
+                                 lmflow::vk::Image image =
+                                     lmflow::vk::Upload(context, source.view());
+                                 lmflow::Packet packet = lmflow::vk::Download(image);
+                                 (void)packet;
+                               })));
+        if (mapped_ok) {
+          results.push_back(Make(
+              "vk/upload_download_mapped" + suffix, iterations, source.bytes(),
+              TimeSeconds(warmup, iterations, [&] {
+                lmflow::Packet held = lmflow::Packet::Make<lmflow::vk::Image>(
+                    lmflow::vk::Upload(context, source.view()));
+                lmflow::Packet packet = lmflow::vk::DownloadMapped(std::move(held));
+                (void)packet;
+              })));
+        }
+      }
     }
 
     if (json) {
