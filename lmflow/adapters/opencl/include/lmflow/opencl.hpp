@@ -107,6 +107,13 @@ class Context {
   cl_device_id device() const { return device_; }
   cl_command_queue queue() const { return queue_; }
 
+  /// 设备是否与主机共享内存(ARM/Adreno/Mali 等集成 GPU 为真)。
+  ///
+  /// 决定 Image 是否用 CL_MEM_ALLOC_HOST_PTR 分配,从而决定 DownloadMapped 能不能省掉
+  /// 整次回读拷贝。查的是 CL_DEVICE_HOST_UNIFIED_MEMORY —— 它在 OpenCL 2.0 起标记为
+  /// 弃用,但本 adapter 以 1.2 为下限,且移动端厂商实现都还报这个值。
+  bool host_unified() const { return host_unified_; }
+
   /// 队列默认 in-order,且 clSetKernelArg 对同一 cl_kernel 不是线程安全的 ——
   /// 故「设参 + 入队」整段由这把锁保护。GPU 算子跑在普通线程池上,可能并发进入。
   std::mutex& enqueue_mutex() { return enqueue_mutex_; }
@@ -182,6 +189,13 @@ class Context {
         LMFLOW_OCL_PROFILING ? CL_QUEUE_PROFILING_ENABLE : 0;
     queue_ = clCreateCommandQueue(context_, device_, queue_properties, &status);
     Check(status, "clCreateCommandQueue");
+
+    cl_bool unified = CL_FALSE;
+    if (clGetDeviceInfo(device_, CL_DEVICE_HOST_UNIFIED_MEMORY, sizeof unified, &unified,
+                        nullptr) != CL_SUCCESS) {
+      unified = CL_FALSE;  // 读不到就按「非统一」处理:退回拷贝路径永远是安全的那一侧
+    }
+    host_unified_ = unified == CL_TRUE;
   }
 
   static std::string BuildLog(cl_program program) {
@@ -201,6 +215,7 @@ class Context {
   cl_device_id device_ = nullptr;
   cl_context context_ = nullptr;
   cl_command_queue queue_ = nullptr;
+  bool host_unified_ = false;
   std::mutex enqueue_mutex_;
   std::mutex cache_mutex_;
   std::unordered_map<std::string, cl_program> programs_;
@@ -241,9 +256,11 @@ class Image {
 
   /// 按元素数与 dtype 在设备上分配一块新缓冲。
   ///
-  /// `flags` 默认 CL_MEM_READ_WRITE。ARM 统一内存上若要主机零拷贝访问,应改用
-  /// CL_MEM_ALLOC_HOST_PTR 并配合 clEnqueueMapBuffer —— 注意 CL_MEM_USE_HOST_PTR
-  /// 在 Mali 上若对齐/缓存要求不满足会**静默复制**。
+  /// **统一内存设备上会自动追加 `CL_MEM_ALLOC_HOST_PTR`**,让驱动在主机可访问的存储上
+  /// 分配 —— 这是 `DownloadMapped` 能把映射直接交给引擎、省掉整次回读拷贝的前提。
+  /// 不用 `CL_MEM_USE_HOST_PTR`:它在 Mali 上若对齐/缓存要求不满足会**静默复制**。
+  /// 独显上**绝不追加**:那会把 compute buffer 钉在 pinned host memory,GPU 每次访存
+  /// 都过 PCIe,比一次回读拷贝糟得多。调用方自己传了 host-ptr 类 flag 时按调用方的来。
   static Image Allocate(const std::shared_ptr<Context>& context, int32_t dtype, int ndim,
                         const int64_t* shape, cl_mem_flags flags = CL_MEM_READ_WRITE) {
     if (ndim <= 0 || ndim > kMaxNdim) {
@@ -254,16 +271,26 @@ class Image {
       if (shape[i] <= 0) throw std::invalid_argument("flow/ocl: Image shape must be positive");
       count *= static_cast<size_t>(shape[i]);
     }
+    cl_mem_flags effective = flags;
+    const bool caller_chose_host_ptr =
+        (flags & (CL_MEM_ALLOC_HOST_PTR | CL_MEM_USE_HOST_PTR)) != 0;
+    if (context->host_unified() && !caller_chose_host_ptr) {
+      effective |= CL_MEM_ALLOC_HOST_PTR;
+    }
     cl_int status = CL_SUCCESS;
     cl_mem mem =
-        clCreateBuffer(context->context(), flags, count * DtypeSize(dtype), nullptr, &status);
+        clCreateBuffer(context->context(), effective, count * DtypeSize(dtype), nullptr, &status);
     Check(status, "clCreateBuffer");
-    return Image(context, mem, nullptr, dtype, ndim, shape);
+    Image image(context, mem, nullptr, dtype, ndim, shape);
+    image.host_mapped_ = (effective & CL_MEM_ALLOC_HOST_PTR) != 0;
+    return image;
   }
 
   bool valid() const { return mem_ != nullptr; }
   const std::shared_ptr<Context>& context() const { return context_; }
   cl_mem mem() const { return mem_; }
+  /// 本 buffer 是否以 CL_MEM_ALLOC_HOST_PTR 分配(即可走零拷贝下载)。
+  bool host_mapped() const { return host_mapped_; }
   /// 生产者同步点;可能为 null(表示无需等待)。
   cl_event ready() const { return ready_; }
 
@@ -321,6 +348,7 @@ class Image {
     ready_ = other.ready_;
     dtype_ = other.dtype_;
     ndim_ = other.ndim_;
+    host_mapped_ = other.host_mapped_;
     for (int i = 0; i < kMaxNdim; ++i) shape_[i] = other.shape_[i];
     other.mem_ = nullptr;
     other.ready_ = nullptr;
@@ -332,6 +360,7 @@ class Image {
   cl_event ready_ = nullptr;
   int32_t dtype_ = 0;
   int ndim_ = 0;
+  bool host_mapped_ = false;
   int64_t shape_[kMaxNdim] = {0, 0, 0, 0};
 };
 
@@ -374,6 +403,103 @@ inline Packet Download(const Image& image) {
                             out.data, wait ? 1 : 0, wait ? &wait : nullptr, nullptr),
         "clEnqueueReadBuffer");
   return packet;
+}
+
+namespace detail {
+
+/// 零拷贝下载交给引擎的释放状态。
+///
+/// 输出包**可能比产生它的 Image 活得久**(扇出、下游缓存),所以这里连**持有 Image 的那个
+/// 输入包**一起留住:它析构才会 clReleaseMemObject。unmap 必须先于那次析构,故两件事在
+/// 同一个回调里按序做。
+struct MappedHandoff {
+  std::shared_ptr<Context> context;
+  cl_mem mem = nullptr;
+  void* mapped = nullptr;
+  Packet owner;
+};
+
+/// 引擎在最后一个包引用消失时调用一次;可能落在任意工作线程上。
+inline void ReleaseMappedHandoff(void* user_data) {
+  auto* state = static_cast<MappedHandoff*>(user_data);
+  if (state->context && state->mem && state->mapped) {
+    // 不等它完成:OpenCL 对 cl_mem 引用计数,已入队的 unmap 自己持有引用,
+    // 所以紧随其后的 clReleaseMemObject(owner 析构时)是安全的。
+    clEnqueueUnmapMemObject(state->context->queue(), state->mem, state->mapped, 0, nullptr,
+                            nullptr);
+  }
+  delete state;  // owner 在此析构 —— cl_mem / cl_event 随之释放
+}
+
+}  // namespace detail
+
+/// 本 Image 能否走零拷贝下载。见 `DownloadMapped` 的条件说明。
+inline bool CanDownloadMapped(const Image& image) {
+  return image.valid() && image.host_mapped();
+}
+
+/// 零拷贝下载:把已映射的设备内存**直接交给引擎**,不再拷进一个新包。
+///
+/// 前提是 buffer 以 `CL_MEM_ALLOC_HOST_PTR` 分配 —— 只有统一内存设备会这么分配
+/// (见 `Image::Allocate`),用 `CanDownloadMapped` 先问。独显上不适用:那里的 compute
+/// buffer 是纯设备内存,`Download()` 的回读拷贝才是对的。
+///
+/// `image_packet` 是持有 ocl::Image 的包,并在此**移交所有权**:引擎会一直持有它,直到
+/// 下游放掉最后一个引用,才 unmap 并释放 cl_mem。
+///
+/// 交出的视图标了 READONLY —— 它是设备内存的视图,扇出时多个下游共享同一份;想就地改写
+/// 的下游会照常走 CoW 复制一份,不会写穿到设备内存上。
+inline Packet DownloadMapped(Packet image_packet) {
+  const Image* image = image_packet.TryGet<Image>();
+  if (!image || !image->valid()) {
+    throw std::invalid_argument("flow/ocl: DownloadMapped needs a valid ocl::Image packet");
+  }
+  if (!image->host_mapped()) {
+    throw std::invalid_argument(
+        "flow/ocl: DownloadMapped needs a buffer allocated with CL_MEM_ALLOC_HOST_PTR, which "
+        "only happens on unified-memory devices; check CanDownloadMapped() first and fall back "
+        "to Download()");
+  }
+
+  // 先把要用的东西取成值,后面 image_packet 会被移走,不再依赖 image 指针。
+  std::shared_ptr<Context> context = image->context();
+  cl_mem mem = image->mem();
+  const int ndim = image->ndim();
+  const int32_t dtype = image->dtype();
+  const size_t bytes = image->byte_size();
+  int64_t shape[kMaxNdim] = {0, 0, 0, 0};
+  for (int i = 0; i < ndim; ++i) shape[i] = image->shape(i);
+  cl_event wait = image->ready();
+
+  // 阻塞映射,并把生产者事件放进 wait list:返回时 GPU 已写完、主机可读。
+  // 这同时就是本条链上唯一的主机侧同步点,与 Download() 的语义一致。
+  cl_int status = CL_SUCCESS;
+  void* mapped = clEnqueueMapBuffer(context->queue(), mem, CL_TRUE, CL_MAP_READ, 0, bytes,
+                                    wait ? 1 : 0, wait ? &wait : nullptr, nullptr, &status);
+  Check(status, "clEnqueueMapBuffer");
+
+  LMFlowBuffer view{};
+  view.data = mapped;
+  view.ndim = ndim;
+  view.dtype = dtype;
+  int64_t stride = static_cast<int64_t>(DtypeSize(dtype));
+  for (int i = ndim - 1; i >= 0; --i) {
+    view.shape[i] = shape[i];
+    view.strides[i] = stride;
+    stride *= shape[i];
+  }
+  view.flags = LMFLOW_BUF_FLAG_READONLY;
+
+  auto* state = new detail::MappedHandoff{context, mem, mapped, std::move(image_packet)};
+  Packet adopted = Packet::AdoptBuffer(view, detail::ReleaseMappedHandoff, state);
+  if (adopted.IsEmpty()) {
+    // 契约:失败时 release_fn 不会被调用,所有权仍归我们,自己收拾干净。
+    clEnqueueUnmapMemObject(context->queue(), mem, mapped, 0, nullptr, nullptr);
+    state->mapped = nullptr;
+    delete state;
+    throw std::runtime_error("flow/ocl: lmflow_packet_adopt_buffer rejected the mapped view");
+  }
+  return adopted;
 }
 
 /// 把一个一维 NDRange kernel 入队,产出新的设备图像。
@@ -438,7 +564,12 @@ class DownloadKernel : public Kernel {
     Packet input = cc.TakeInput(0);
     const Image* image = input.TryGet<Image>();
     if (!image || !image->valid()) return cc.Fail("OclDownload expects an ocl::Image input");
-    cc.Emit(0, Download(*image));
+    // 统一内存上把映射直接交给引擎,省掉整次回读拷贝;独显照常拷。
+    if (CanDownloadMapped(*image)) {
+      cc.Emit(0, DownloadMapped(std::move(input)));
+    } else {
+      cc.Emit(0, Download(*image));
+    }
     return Status::Ok();
   }
 };

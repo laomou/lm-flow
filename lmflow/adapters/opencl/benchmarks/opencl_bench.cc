@@ -206,6 +206,30 @@ int main(int argc, char** argv) {
             lmflow::Packet packet = lmflow::ocl::Download(scaled);
             (void)packet;
           })));
+
+      // 拷贝式 vs 零拷贝下载的对比。两者都含一次 Upload(DownloadMapped 会消耗掉持有
+      // Image 的包,没法复用同一个 Image),故差值即零拷贝省下的部分。
+      {
+        lmflow::ocl::Image probe = lmflow::ocl::Upload(context, source.view());
+        const bool mapped_ok = lmflow::ocl::CanDownloadMapped(probe);
+        results.push_back(Make("ocl/upload_download" + suffix, iterations, source.bytes(),
+                               TimeSeconds(warmup, iterations, [&] {
+                                 lmflow::ocl::Image image =
+                                     lmflow::ocl::Upload(context, source.view());
+                                 lmflow::Packet packet = lmflow::ocl::Download(image);
+                                 (void)packet;
+                               })));
+        if (mapped_ok) {
+          results.push_back(Make(
+              "ocl/upload_download_mapped" + suffix, iterations, source.bytes(),
+              TimeSeconds(warmup, iterations, [&] {
+                lmflow::Packet held = lmflow::Packet::Make<lmflow::ocl::Image>(
+                    lmflow::ocl::Upload(context, source.view()));
+                lmflow::Packet packet = lmflow::ocl::DownloadMapped(std::move(held));
+                (void)packet;
+              })));
+        }
+      }
     }
 
     if (json) {
