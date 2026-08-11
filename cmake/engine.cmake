@@ -83,8 +83,16 @@ function(_lmflow_interface_whole_archive target library)
     target_link_options(${target} INTERFACE
       "SHELL:-Wl,-force_load,$<TARGET_FILE:${library}>")
   else()
-    target_link_libraries(${target} INTERFACE
-      "-Wl,--whole-archive" ${library} "-Wl,--no-whole-archive")
+    # 括号必须是**原子**的:把 --whole-archive / 档案 / --no-whole-archive 作为
+    # target_link_libraries 的三个独立条目时,CMake 不保证它们在命令行上相邻,而且会把
+    # 重复的裸标志去重。于是**两个**这样的 INTERFACE 目标出现在同一链接闭包里就会塌:
+    # 实测 Android 上出现过「档案被提到括号外、括号变空」,静态注册随之静默消失
+    # (症状是 `kernel ... not registered`,而 x86 上同一份 CMake 恰好排对、看不出问题)。
+    # 用 SHELL: 把三个 token 连同 $<TARGET_FILE:> 放进一条 link option,它们就不可分离,
+    # 也不会被跨目标去重 —— 与上面 MSVC / APPLE 两支同一思路。
+    target_link_libraries(${target} INTERFACE ${library})
+    target_link_options(${target} INTERFACE
+      "SHELL:-Wl,--whole-archive $<TARGET_FILE:${library}> -Wl,--no-whole-archive")
   endif()
 endfunction()
 

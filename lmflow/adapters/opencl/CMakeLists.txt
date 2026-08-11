@@ -11,6 +11,31 @@ add_library(lmflow::opencl ALIAS lmflow_opencl)
 set_target_properties(lmflow_opencl PROPERTIES EXPORT_NAME opencl)
 target_link_libraries(lmflow_opencl INTERFACE lmflow::lmflow lmflow_opencl_support)
 
+# 随 adapter 提供的 GPU 算子。与 cpp/kernels/ 同构:一个算子一个 .cc,`.cc` 里静态自注册,
+# 所以图里直接写 `kernel: OclResize` 即可,宿主不必手写注册。
+#
+# ⚠ whole-archive 是**必需**的,不是优化:静态注册靠全局对象构造,普通静态链接会把
+# 「没人引用」的目标文件整个丢掉,注册就静默消失(与 lmflow_kernels 同一处理)。
+#
+# 与 adapter 头分开成独立 target:头是纯 plumbing(Context/Image/Upload/Download),
+# 算子是内容;只想用管道自己写算子的宿主链 lmflow::opencl 就够,不必背上这些算子。
+if(LMFLOW_BUILD_OPENCL_ADAPTER)
+  file(GLOB _lmflow_opencl_kernel_sources CONFIGURE_DEPENDS
+       "${CMAKE_CURRENT_SOURCE_DIR}/kernels/*.cc")
+  add_library(lmflow_opencl_kernels_archive STATIC ${_lmflow_opencl_kernel_sources})
+  set_target_properties(lmflow_opencl_kernels_archive PROPERTIES
+    OUTPUT_NAME lmflow_opencl_kernels
+    POSITION_INDEPENDENT_CODE ON)
+  target_link_libraries(lmflow_opencl_kernels_archive PUBLIC lmflow_opencl)
+  add_dependencies(lmflow_opencl_kernels_archive flow_engine)
+
+  add_library(lmflow_opencl_kernels INTERFACE)
+  _lmflow_interface_whole_archive(lmflow_opencl_kernels lmflow_opencl_kernels_archive)
+  target_link_libraries(lmflow_opencl_kernels INTERFACE lmflow_opencl)
+  add_library(lmflow::opencl_kernels ALIAS lmflow_opencl_kernels)
+  set_target_properties(lmflow_opencl_kernels PROPERTIES EXPORT_NAME opencl_kernels)
+endif()
+
 if(LMFLOW_BUILD_OPENCL_ADAPTER AND LMFLOW_BUILD_TESTS
    AND NOT LMFLOW_BUILD_PYTHON
    AND CMAKE_SOURCE_DIR STREQUAL LMFLOW_ROOT)
@@ -18,6 +43,13 @@ if(LMFLOW_BUILD_OPENCL_ADAPTER AND LMFLOW_BUILD_TESTS
   target_link_libraries(lmflow_opencl_test PRIVATE lmflow::opencl)
   add_dependencies(lmflow_opencl_test flow_engine)
   add_test(NAME lmflow_opencl_test COMMAND lmflow_opencl_test)
+
+  # 随 adapter 的算子:链 lmflow::opencl_kernels(OclResize 由该档案静态自注册),
+  # 数值逐点对照测试内的 CPU 参考实现。
+  add_executable(lmflow_opencl_resize_test tests/resize_test.cc)
+  target_link_libraries(lmflow_opencl_resize_test PRIVATE lmflow::opencl_kernels)
+  add_dependencies(lmflow_opencl_resize_test flow_engine)
+  add_test(NAME lmflow_opencl_resize_test COMMAND lmflow_opencl_resize_test)
 endif()
 
 if(LMFLOW_BUILD_OPENCL_ADAPTER AND LMFLOW_BUILD_BENCHMARKS
