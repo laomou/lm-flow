@@ -21,8 +21,11 @@
  *      **CPU 线程不阻塞**;只有 Download 做主机侧等待。
  *
  *   3. 显存要自己选堆。若存在同时 DEVICE_LOCAL 且 HOST_VISIBLE 的内存类型(ARM 统一内存
- *      与软件实现都是如此),上传/下载直接映射,**零拷贝**;否则退回 staging buffer + 队列
- *      拷贝(独显)。两条路径都实现了。
+ *      与软件实现都是如此),上传/下载直接映射,**零拷贝**。否则(典型是独显)Upload 退回
+ *      staging buffer + 队列拷贝,但 **Download 的 staging 回读尚未实现** —— 这类设备上
+ *      `VkDownload` 会在 **Open 期**就明确失败,而不是跑到出帧时才抛。换句话说:完整的
+ *      GPU→CPU 回路目前只在存在 host-visible 显存的设备上可用;纯 GPU 段(上传 + 计算,
+ *      结果留在设备上)不受此限制。
  *
  * 算子注册:本文件只提供算子**类**,不做注册 —— 在你自己的**某一个** .cc 里写
  *
@@ -688,6 +691,14 @@ inline Image Upload(const std::shared_ptr<Context>& context, const LMFlowBuffer&
 ///
 /// 这是整条链上唯一需要主机等待的地方 —— 先等生产者的时间线值,再读回。
 inline Packet Download(const Image& image) {
+  const std::shared_ptr<Context>& context = image.context();
+  // 先判设备能力、再分配输出包:device-only 显存没有回读路径,提前失败也省掉一次白分配。
+  if (!image.host_visible()) {
+    throw std::runtime_error(
+        "flow/vk: Download needs a DEVICE_LOCAL|HOST_VISIBLE memory type; this device has none "
+        "(typical for a discrete GPU) and the staging read-back path is not implemented");
+  }
+
   int64_t shape[kMaxNdim] = {0, 0, 0, 0};
   for (int i = 0; i < image.ndim(); ++i) shape[i] = image.shape(i);
   LMFlowBuffer out{};
@@ -695,15 +706,9 @@ inline Packet Download(const Image& image) {
       lmflow_packet_new_buffer(image.ndim(), shape, image.dtype(), LMFLOW_TS_UNSET, &out));
   if (packet.IsEmpty()) throw std::runtime_error("flow/vk: lmflow_packet_new_buffer failed");
 
-  const std::shared_ptr<Context>& context = image.context();
   context->WaitTimeline(image.ready());
-  if (image.host_visible()) {
-    detail::CopyMapped(context, image.memory(), out.data, image.byte_size(),
-                       /*to_device=*/false);
-    return packet;
-  }
-  throw std::runtime_error(
-      "flow/vk: Download from device-only memory needs a staging path; not implemented");
+  detail::CopyMapped(context, image.memory(), out.data, image.byte_size(), /*to_device=*/false);
+  return packet;
 }
 
 /// 把一个一维 dispatch 入队,产出新的设备负载。
@@ -792,6 +797,17 @@ class DownloadKernel : public Kernel {
   static void GetContract(Contract& c) {
     c.InputSet<Image>(0);
     c.OutputSetBuiltin(0, LMFLOW_TYPE_BUFFER);
+  }
+
+  /// 不支持的设备在 **Open 期**就失败:device-only 显存没有 staging 回读路径,与其跑到
+  /// 出帧时才抛,不如让 `graph.start()` 直接报错(「算子应在 Open 里直接失败」见 flow.hpp)。
+  Status Open(lmflow::Context& cc) override {
+    if (!Context::Shared()->unified_memory()) {
+      return cc.Fail(
+          "VkDownload: this device has no DEVICE_LOCAL|HOST_VISIBLE memory type (typical for a "
+          "discrete GPU); the staging read-back path is not implemented");
+    }
+    return Status::Ok();
   }
 
   Status Process(lmflow::Context& cc) override {
