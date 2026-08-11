@@ -20,12 +20,21 @@
  *      时间线:每次提交等待上一个值、签发下一个值,于是 GPU→GPU 由设备侧串联,
  *      **CPU 线程不阻塞**;只有 Download 做主机侧等待。
  *
- *   3. 显存要自己选堆。若存在同时 DEVICE_LOCAL 且 HOST_VISIBLE 的内存类型(ARM 统一内存
- *      与软件实现都是如此),上传/下载直接映射,**零拷贝**。否则(典型是独显)Upload 退回
- *      staging buffer + 队列拷贝,但 **Download 的 staging 回读尚未实现** —— 这类设备上
- *      `VkDownload` 会在 **Open 期**就明确失败,而不是跑到出帧时才抛。换句话说:完整的
- *      GPU→CPU 回路目前只在存在 host-visible 显存的设备上可用;纯 GPU 段(上传 + 计算,
- *      结果留在设备上)不受此限制。
+ *   3. 显存要自己选堆。若存在同时 DEVICE_LOCAL 且 HOST_VISIBLE 的内存类型,上传/下载
+ *      直接映射,**零拷贝**;否则 Upload 退回 staging buffer + 队列拷贝,而
+ *      **Download 的 staging 回读尚未实现** —— 那类设备上 `VkDownload` 会在 **Open 期**
+ *      就明确失败,不会跑到出帧时才抛。
+ *
+ *      ⚠ 别把「否则」读成「独显」。判据只是「**存不存在**这样一个内存类型」,而经典独显
+ *      即便没有 Resizable BAR **也照样暴露**一个 —— 就是那个传统 256 MB 的 PCIe BAR
+ *      窗口(ReBAR 改变的是它多大,不是它在不在)。实测:18 台移动 GPU 与 llvmpipe 全部
+ *      为真。因此 staging 分支的真实触发条件是「设备完全没有 DEVICE_LOCAL|HOST_VISIBLE
+ *      类型」,这比「独显」窄得多,**目前没有已验证的实例**(详见 Upload 里的标注)。
+ *
+ *      独显上真正要留意的反而是另一件事:既然会挑中那个 host-visible 类型,所有中间
+ *      compute buffer 就都落进 BAR 窗口 —— 无 ReBAR 时只有 256 MB(几个 24 MB 的中间
+ *      buffer 就能吃满),而且 compute 读写它要过 PCIe,比纯 VRAM 慢。这一条**尚未在
+ *      真独显上测过**。
  *
  * 算子注册:本文件只提供算子**类**,不做注册 —— 在你自己的**某一个** .cc 里写
  *
@@ -837,7 +846,25 @@ inline Image Upload(const std::shared_ptr<Context>& context, const LMFlowBuffer&
     return image;
   }
 
-  // 独显路径:staging buffer -> vkCmdCopyBuffer。staging 随本次提交延迟回收。
+  // ⚠ 以下 staging 路径**从未在任何测试过的设备上执行过** —— 未验证代码,改动请当心。
+  //
+  // 触发条件是 `host_visible()` 为假,也就是**设备完全没有** DEVICE_LOCAL|HOST_VISIBLE
+  // 的内存类型。实测 18 台移动 GPU(Adreno 613/710/722/740/810/812/829/830/840/850 与
+  // Mali G52/G57/G615/G625/G720)加 llvmpipe,**全部**存在这样的类型,于是一律走上面的
+  // 映射路径。经典独显也不例外:即便没有 Resizable BAR,它照样暴露那个传统 256 MB 的
+  // PCIe BAR 窗口(ReBAR 只改变窗口大小,不改变它存不存在),所以「关掉 ReBAR」并不能
+  // 造出这个场景。目前没有已验证的触发实例。
+  //
+  // 要验证它,需要一台确实没有该内存类型的设备;`adapters/vulkan/benchmarks` 之外还有个
+  // 更直接的办法:把 vkGetPhysicalDeviceMemoryProperties 的输出打出来,看有没有同时带
+  // 这两个位的类型。在拿到这样一台设备之前,这段代码保留但**不应被信任**:它含一次内存
+  // 分配、一个命令缓冲、一次队列提交和一次延迟回收登记 —— 而本 adapter 历史上的
+  // use-after-free 正是出在同一套延迟回收机制里。
+  //
+  // 另需注意:即使它被执行,`Download` 在这类设备上也会在 Open 期就被拒(staging 回读
+  // 未实现),故完整 GPU→CPU 回路仍不可用;只有纯 GPU 段(上传 + 计算)用得到它。
+  //
+  // staging buffer -> vkCmdCopyBuffer。staging 随本次提交延迟回收。
   VkBuffer staging = VK_NULL_HANDLE;
   VkDeviceMemory staging_memory = VK_NULL_HANDLE;
   VkBufferCreateInfo staging_info{};
