@@ -412,6 +412,22 @@ class Context {
     Check(vkCreateDevice(physical_, &device_info, nullptr, &device_), "vkCreateDevice");
     vkGetDeviceQueue(device_, queue_family_, 0, &queue_);
 
+    // 最后一道闸门,也是**权威**判据:特性位与 apiVersion 都过了,仍要确认入口点真的接上。
+    // 驱动只报告支持而不实现是真实存在的(见 HasTimelineSemaphore 的实测记录),而那种
+    // 情况下继续跑就是在第一次 vkWaitSemaphores / vkGetSemaphoreCounterValue 时跳空指针。
+    // 宁可在构造期带着可操作的消息失败。
+    //
+    // 注:改成**通过这些指针调用**还能顺带降低编译期 API 底线(见文件头 Android 一节),
+    // 但那是另一件事;这里只做检测,不改调用方式。
+    if (vkGetDeviceProcAddr(device_, "vkGetSemaphoreCounterValue") == nullptr ||
+        vkGetDeviceProcAddr(device_, "vkWaitSemaphores") == nullptr) {
+      vkDestroyDevice(device_, nullptr);
+      device_ = VK_NULL_HANDLE;
+      throw std::runtime_error(
+          "flow/vk: the driver reports timeline semaphore support but does not provide "
+          "vkWaitSemaphores / vkGetSemaphoreCounterValue; this adapter cannot run on it");
+    }
+
     vkGetPhysicalDeviceMemoryProperties(physical_, &memory_properties_);
     unified_memory_ = false;
     for (uint32_t i = 0; i < memory_properties_.memoryTypeCount; ++i) {
@@ -466,7 +482,25 @@ class Context {
     return false;
   }
 
+  /// 设备是否**真的**能用时间线信号量。
+  ///
+  /// ⚠ 不能只看特性位。18 台真机实测:`timelineSemaphore` 特性位**恒为 TRUE**,
+  /// 一台都没报 FALSE —— 包括一台 `apiVersion` 只有 1.1、且
+  /// `vkGetDeviceProcAddr("vkWaitSemaphores")` 返回 **NULL** 的 Adreno 710(SM6450)。
+  /// 在那台机器上 `vkCreateDevice` 带着该特性也会**成功**,于是崩溃被推迟到第一次真调用:
+  /// 平台 libvulkan 导出了符号、但派发表那一项是空的,于是跳到地址 0 → SIGSEGV
+  /// (栈:vkGetSemaphoreCounterValue+16 ← Image::Reset)。
+  ///
+  /// 所以这里加 `apiVersion >= 1.2` 这道闸门:timeline semaphore 是 Vulkan 1.2 的 core
+  /// 必备特性,实测在那 18 台上该判定与 procAddr 的可用性**完全一致**(唯一失败的机型
+  /// 也正是唯一 apiVersion < 1.2 的)。构造函数末尾还会再验一次函数指针,那是权威判据。
+  ///
+  /// 同型号并不等价:SM6450 上的 Adreno 710 是 api 1.1(不可用),SM6435 上的同款是
+  /// api 1.3(可用)—— 决定因素是驱动/平台版本,故机型白名单不可行,必须运行期判。
   static bool HasTimelineSemaphore(VkPhysicalDevice device) {
+    VkPhysicalDeviceProperties properties{};
+    vkGetPhysicalDeviceProperties(device, &properties);
+    if (properties.apiVersion < VK_API_VERSION_1_2) return false;
     VkPhysicalDeviceTimelineSemaphoreFeatures timeline{};
     timeline.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES;
     VkPhysicalDeviceFeatures2 features{};
