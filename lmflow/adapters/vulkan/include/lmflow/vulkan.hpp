@@ -707,10 +707,14 @@ inline Packet Download(const Image& image) {
 
   int64_t shape[kMaxNdim] = {0, 0, 0, 0};
   for (int i = 0; i < image.ndim(); ++i) shape[i] = image.shape(i);
+  // 免初始化分配:回读会把整块写满 —— 输出包按同一 ndim/shape/dtype 分配,其字节数就等于
+  // image.byte_size(),而下面的 CopyMapped 正好拷这么多字节,故满足「emit 前写满」的契约。
+  // 用保证清零的 new_buffer 等于每帧白做一次全缓冲 memset(24 MB 量级约 0.4 ms 起)。
   LMFlowBuffer out{};
-  Packet packet = Packet::Adopt(
-      lmflow_packet_new_buffer(image.ndim(), shape, image.dtype(), LMFLOW_TS_UNSET, &out));
-  if (packet.IsEmpty()) throw std::runtime_error("flow/vk: lmflow_packet_new_buffer failed");
+  Packet packet = Packet::NewBufferUninitialized(image.ndim(), shape, image.dtype(), &out);
+  if (packet.IsEmpty()) {
+    throw std::runtime_error("flow/vk: lmflow_packet_new_buffer_uninit failed");
+  }
 
   context->WaitTimeline(image.ready());
   detail::CopyMapped(context, image.memory(), out.data, image.byte_size(), /*to_device=*/false);
