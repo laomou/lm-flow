@@ -57,18 +57,14 @@ namespace ocl {
 /// Image 支持的最大维数。图像类负载 2~3 维足够,留 4 以便带 batch。
 constexpr int kMaxNdim = 4;
 
+/// 单个元素的字节数。直接用 C ABI 自带的表(未知 dtype 返回 0),不在 adapter 里另抄一份
+/// —— 抄的那份此前漏了 LMFLOW_DTYPE_I64 与 LMFLOW_DTYPE_F16,遇到就抛。
 inline size_t DtypeSize(int32_t dtype) {
-  switch (dtype) {
-    case LMFLOW_DTYPE_U8:
-    case LMFLOW_DTYPE_I8: return 1;
-    case LMFLOW_DTYPE_U16:
-    case LMFLOW_DTYPE_I16: return 2;
-    case LMFLOW_DTYPE_I32:
-    case LMFLOW_DTYPE_F32: return 4;
-    case LMFLOW_DTYPE_F64: return 8;
-    default:
-      throw std::invalid_argument("flow/ocl: dtype has no known element size");
+  const size_t size = lmflow_dtype_size(dtype);
+  if (size == 0) {
+    throw std::invalid_argument("flow/ocl: dtype has no known element size");
   }
+  return size;
 }
 
 inline void Check(cl_int status, const char* what) {
