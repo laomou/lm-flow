@@ -259,6 +259,11 @@ class Context {
           "vkAllocateDescriptorSets");
   }
 
+  /// 已签发的最大时间线值。任何**可能**引用某块显存的提交,其签发值都 ≤ 本值
+  /// (提交与 Reset 同受 submit_mutex 保护,不会并发),故按本值登记延迟回收,
+  /// 就能保证「归还晚于所有在途工作」。调用方须持有 submit_mutex()。
+  uint64_t last_issued_locked() const { return timeline_value_; }
+
   /// 提交一个已记录好的命令缓冲:等待上一个时间线值,签发新值。
   /// 调用方须持有 submit_mutex()。返回本次签发的值。
   uint64_t SubmitLocked(VkCommandBuffer command_buffer, uint64_t wait_value) {
@@ -554,14 +559,19 @@ class Image {
   void Reset() {
     if (!context_) return;
     // 不做主机等待:把资源登记到延迟回收表,由后续提交顺带回收。
+    //
+    // 登记值必须是**已签发的最大时间线值**,而不是本 Image 自己的 ready_:统一内存路径的
+    // Upload 只做主机 memcpy、不提交,ready_ 保持 0,而读它的 dispatch 却可能仍在飞行 ——
+    // 若按 ready_=0 登记,ReclaimUpTo 会立刻 vkDestroyBuffer/vkFreeMemory,GPU 便读到已
+    // 释放的显存(表现为驱动 worker 线程段错误)。按最大签发值登记才覆盖所有在途引用。
     Context::Retired retired;
-    retired.value = ready_;
     retired.command_buffer = command_buffer_;
     retired.descriptor_set = descriptor_set_;
     retired.buffer = buffer_;
     retired.memory = memory_;
     {
       std::lock_guard<std::mutex> guard(context_->submit_mutex());
+      retired.value = context_->last_issued_locked();
       context_->RetireLocked(retired);
       context_->ReclaimCompletedLocked();
     }
