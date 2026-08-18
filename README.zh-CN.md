@@ -177,7 +177,7 @@ C/C++ 或移动端宿主不走 pip —— 直接用**头文件 + 库**。每个 
 `lmflow-<版本>-<平台>.tar.gz`(Linux x86_64/aarch64、macOS arm64、iOS arm64、Android arm64):
 
 ```text
-lmflow-v0.3.0-linux-x86_64/
+lmflow-v0.3.1-linux-x86_64/
 ├── include/lmflow/   flow.h · flow.hpp · flow_platform_log.hpp
 └── lib/       liblmflow_core.a · liblmflow_kernels.a · liblmflow.so
 ```
