@@ -703,6 +703,62 @@ class Poller {
   LMFlowPoller* h_;
 };
 
+class KernelRunner {
+ public:
+  KernelRunner(const std::string& kernel, std::size_t input_ports,
+               std::size_t output_ports, const py::object& options,
+               const py::dict& side_packets) {
+    h_ = lmflow_kernel_runner_new(kernel.c_str(), input_ports, output_ports);
+    if (!h_) throw std::runtime_error(std::string("KernelRunner failed: ") + lmflow_last_error());
+    try {
+      if (!options.is_none()) {
+        const std::string json =
+            py::module_::import("json").attr("dumps")(options).cast<std::string>();
+        check(lmflow_kernel_runner_set_options_json(h_, json.c_str()),
+              "KernelRunner.set_options");
+      }
+      for (auto item : side_packets) {
+        const std::string name = py::cast<std::string>(item.first);
+        check(lmflow_kernel_runner_set_side_packet(
+                  h_, name.c_str(), to_flow_packet(item.second, LMFLOW_TS_UNSET)),
+              "KernelRunner.set_side_packet");
+      }
+    } catch (...) {
+      lmflow_kernel_runner_free(h_);
+      h_ = nullptr;
+      throw;
+    }
+  }
+  ~KernelRunner() {
+    if (h_) lmflow_kernel_runner_free(h_);
+  }
+  KernelRunner(const KernelRunner&) = delete;
+  KernelRunner& operator=(const KernelRunner&) = delete;
+
+  KernelRunner& enter() { return *this; }
+  void exit(const py::args&) { close(); }
+  void start() { check(lmflow_kernel_runner_start(h_), "KernelRunner.start"); }
+  void add_input(std::size_t port, const py::object& value, std::optional<int64_t> ts) {
+    check(lmflow_kernel_runner_add_input(
+              h_, port, to_flow_packet(value, ts.value_or(LMFLOW_TS_UNSET))),
+          "KernelRunner.add_input");
+  }
+  void process(int64_t timestamp) {
+    check(lmflow_kernel_runner_process(h_, timestamp), "KernelRunner.process");
+  }
+  py::object try_next(std::size_t port) {
+    LMFlowPacket out{};
+    const LMFlowStatus status = lmflow_kernel_runner_try_next(h_, port, &out);
+    if (status == LMFLOW_ERR_WOULD_BLOCK) return py::none();
+    check(status, "KernelRunner.try_next");
+    return py::cast(new Packet(out, true), py::return_value_policy::take_ownership);
+  }
+  void close() { check(lmflow_kernel_runner_close(h_), "KernelRunner.close"); }
+
+ private:
+  LMFlowKernelRunner* h_ = nullptr;
+};
+
 /// 图。**必须在解释器销毁前关闭** —— 用 with 语句,或显式 close()。
 class Graph {
  public:
@@ -1137,6 +1193,22 @@ PYBIND11_MODULE(_lmflow, m) {
            "Releases the GIL while waiting.")
       .def("try_next", &Poller::try_next,
            "Non-blocking get; returns None if empty or closed, raises KernelError if the graph failed.");
+
+  py::class_<KernelRunner>(m, "KernelRunner",
+                           "Single-kernel test harness; does not create a Graph.")
+      .def(py::init<const std::string&, std::size_t, std::size_t, const py::object&,
+                    const py::dict&>(),
+           py::arg("kernel"), py::arg("input_ports") = 1,
+           py::arg("output_ports") = 1, py::arg("options") = py::none(),
+           py::arg("side_packets") = py::dict())
+      .def("start", &KernelRunner::start)
+      .def("__enter__", &KernelRunner::enter, py::return_value_policy::reference_internal)
+      .def("__exit__", &KernelRunner::exit)
+      .def("add_input", &KernelRunner::add_input, py::arg("port"), py::arg("value"),
+           py::arg("ts") = std::nullopt)
+      .def("process", &KernelRunner::process, py::arg("timestamp"))
+      .def("try_next", &KernelRunner::try_next, py::arg("port") = 0)
+      .def("close", &KernelRunner::close);
 
   py::class_<Graph>(m, "Graph")
       .def(py::init<>())

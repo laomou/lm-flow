@@ -83,6 +83,7 @@ void lmflow_set_log_callback(void (*cb)(void* user, LMFlowLogLevel level, const 
 typedef struct LMFlowGraph LMFlowGraph;
 typedef struct LMFlowInput LMFlowInput;       /* 图输入口句柄(热路径免查表)*/
 typedef struct LMFlowPoller LMFlowPoller;
+typedef struct LMFlowKernelRunner LMFlowKernelRunner;
 typedef struct LMFlowContext LMFlowContext;   /* 回调期借用 */
 typedef struct LMFlowContract LMFlowContract; /* get_contract 期借用 */
 
@@ -696,6 +697,28 @@ uint64_t lmflow_poller_dropped_count(LMFlowPoller*);
  * 图 free 后仍安全。释放会注销该订阅、丢弃并扣减其剩余队列,并唤醒可能阻塞在
  * bounded BLOCK poller 上的生产者。不释放会泄漏引擎。可传 NULL。 */
 void lmflow_poller_free(LMFlowPoller*);
+
+/* ---------- 单算子测试驱动 ----------
+ * 不解析 Graph YAML、不启动 executor，直接执行 kernel 的
+ * get_contract/open/process/close 生命周期。Rust/C++/Python 注册的 kernel
+ * 都可以用同一套接口测试。 */
+LMFlowKernelRunner* lmflow_kernel_runner_new(
+    const char* kernel, size_t input_ports, size_t output_ports);
+void lmflow_kernel_runner_free(LMFlowKernelRunner*);
+LMFlowStatus lmflow_kernel_runner_set_options_json(
+    LMFlowKernelRunner*, const char* options_json);
+LMFlowStatus lmflow_kernel_runner_set_side_packet(
+    LMFlowKernelRunner*, const char* name, LMFlowPacket packet);
+LMFlowStatus lmflow_kernel_runner_start(LMFlowKernelRunner*);
+/* 调用即消费 packet 所有权，无论返回成功或错误。 */
+LMFlowStatus lmflow_kernel_runner_add_input(
+    LMFlowKernelRunner*, size_t port, LMFlowPacket packet);
+/* 运行一次 process，使用 timestamp 作为本次调用的 input_timestamp。 */
+LMFlowStatus lmflow_kernel_runner_process(LMFlowKernelRunner*, int64_t timestamp);
+/* 非阻塞读取 process/close 产生的输出；暂无输出返回 LMFLOW_ERR_WOULD_BLOCK。 */
+LMFlowStatus lmflow_kernel_runner_try_next(
+    LMFlowKernelRunner*, size_t port, LMFlowPacket* out);
+LMFlowStatus lmflow_kernel_runner_close(LMFlowKernelRunner*);
 /* 同一端口上可以同时挂多个 poller 与多个 observer,各自**独立收到一份**
  * (引擎按订阅者数递增引用计数,不复制 payload)。poller_free 可移除 poller;
  * observer 注册后不支持移除。

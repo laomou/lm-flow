@@ -21,6 +21,23 @@ output_ports: [out]
 )";
 
   try {
+    {
+      lmflow::KernelRunner runner("PassThroughKernel");
+      if (!runner.start().ok() ||
+          !runner.add_input(0, lmflow::Packet::FromI64(17).At(9)).ok() ||
+          !runner.process(9).ok()) {
+        std::fprintf(stderr, "kernel runner failed: %s\n", lmflow_last_error());
+        return 1;
+      }
+      auto packet = runner.try_next();
+      int64_t value = 0;
+      if (!packet || !packet->AsI64(&value) || value != 17 || packet->Timestamp() != 9) {
+        std::fprintf(stderr, "unexpected kernel runner output\n");
+        return 2;
+      }
+      if (!runner.close().ok()) return 3;
+    }
+
     lmflow::Graph graph = lmflow::Graph::from_yaml(yaml);
     lmflow::Poller poller = graph.add_poller("out");
     lmflow::Input input = graph.input("in");

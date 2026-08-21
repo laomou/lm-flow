@@ -573,6 +573,73 @@ class Poller {
   friend class Graph;
 };
 
+class KernelRunner {
+ public:
+  KernelRunner(const char* kernel, size_t input_ports = 1, size_t output_ports = 1)
+      : handle_(lmflow_kernel_runner_new(kernel, input_ports, output_ports)) {
+    if (!handle_) throw std::runtime_error(lmflow_last_error());
+  }
+  ~KernelRunner() { reset(); }
+  KernelRunner(const KernelRunner&) = delete;
+  KernelRunner& operator=(const KernelRunner&) = delete;
+  KernelRunner(KernelRunner&& other) noexcept : handle_(other.handle_) {
+    other.handle_ = nullptr;
+  }
+  KernelRunner& operator=(KernelRunner&& other) noexcept {
+    if (this != &other) {
+      reset();
+      handle_ = other.handle_;
+      other.handle_ = nullptr;
+    }
+    return *this;
+  }
+
+  Status set_options_json(const char* json) {
+    ensure_handle();
+    return Status(lmflow_kernel_runner_set_options_json(handle_, json));
+  }
+  Status set_side_packet(const char* name, Packet packet) {
+    ensure_handle();
+    return Status(lmflow_kernel_runner_set_side_packet(handle_, name, packet.release()));
+  }
+  Status start() {
+    ensure_handle();
+    return Status(lmflow_kernel_runner_start(handle_));
+  }
+  Status add_input(size_t port, Packet packet) {
+    ensure_handle();
+    return Status(lmflow_kernel_runner_add_input(handle_, port, packet.release()));
+  }
+  Status process(int64_t timestamp) {
+    ensure_handle();
+    return Status(lmflow_kernel_runner_process(handle_, timestamp));
+  }
+  std::optional<Packet> try_next(size_t port = 0) {
+    ensure_handle();
+    LMFlowPacket raw{};
+    const LMFlowStatus status = lmflow_kernel_runner_try_next(handle_, port, &raw);
+    if (status == LMFLOW_ERR_WOULD_BLOCK) return std::nullopt;
+    if (status != LMFLOW_OK) throw std::runtime_error(lmflow_last_error());
+    return Packet::Adopt(raw);
+  }
+  Status close() {
+    ensure_handle();
+    return Status(lmflow_kernel_runner_close(handle_));
+  }
+
+ private:
+  void ensure_handle() const {
+    if (!handle_) throw std::logic_error("lmflow::KernelRunner is empty");
+  }
+  void reset() {
+    if (handle_) {
+      lmflow_kernel_runner_free(handle_);
+      handle_ = nullptr;
+    }
+  }
+  LMFlowKernelRunner* handle_ = nullptr;
+};
+
 inline Input Graph::input(const char* port) {
   ensure_handle();
   LMFlowInput* handle = lmflow_graph_input(handle_, port);
