@@ -140,7 +140,7 @@ class Packet {
     return p;
   }
 
-  /* 接管 lmflow_poller_next 移交的包,析构时归还引擎引用 */
+  /* 接管 lmflow_poller_next_status 移交的包,析构时归还引擎引用 */
   static Packet Adopt(LMFlowPacket raw) {
     Packet p;
     p.raw_ = raw;
@@ -528,13 +528,19 @@ class Poller {
   std::optional<Packet> next() {
     ensure_handle();
     LMFlowPacket raw{};
-    if (!lmflow_poller_next(handle_, &raw)) return std::nullopt;
+    const LMFlowStatus status = lmflow_poller_next_status(handle_, &raw);
+    if (status == LMFLOW_ERR_CLOSED) return std::nullopt;
+    if (status != LMFLOW_OK) throw std::runtime_error(lmflow_last_error());
     return Packet::Adopt(raw);
   }
   std::optional<Packet> try_next() {
     ensure_handle();
     LMFlowPacket raw{};
-    if (!lmflow_poller_try_next(handle_, &raw)) return std::nullopt;
+    const LMFlowStatus status = lmflow_poller_try_next_status(handle_, &raw);
+    if (status == LMFLOW_ERR_WOULD_BLOCK || status == LMFLOW_ERR_CLOSED) {
+      return std::nullopt;
+    }
+    if (status != LMFLOW_OK) throw std::runtime_error(lmflow_last_error());
     return Packet::Adopt(raw);
   }
   /* Returns an empty optional on timeout or closed poller. Other failures

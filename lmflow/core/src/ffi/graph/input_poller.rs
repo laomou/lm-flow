@@ -227,34 +227,52 @@ pub unsafe extern "C" fn lmflow_poller_dropped_count(p: *mut LMFlowPoller) -> u6
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn lmflow_poller_next(p: *mut LMFlowPoller, out: *mut LMFlowPacket) -> bool {
-    guard_val(false, || match poller_ref(p) {
-        Some(poller) => match poller.next() {
-            Some(pkt) => {
+pub unsafe extern "C" fn lmflow_poller_next_status(
+    p: *mut LMFlowPoller,
+    out: *mut LMFlowPacket,
+) -> i32 {
+    guard(|| {
+        let Some(poller) = poller_ref(p) else {
+            return fail(Error::InvalidArg("poller handle is null".into()));
+        };
+        match poller.next_result() {
+            Ok(Some(pkt)) => {
                 if !out.is_null() {
                     *out = own_packet(pkt);
                 }
-                true
+                code::OK
             }
-            None => false,
-        },
-        None => false,
+            Ok(None) => code::CLOSED,
+            Err(error) => fail(error),
+        }
     })
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn lmflow_poller_try_next(
+pub unsafe extern "C" fn lmflow_poller_try_next_status(
     p: *mut LMFlowPoller,
     out: *mut LMFlowPacket,
-) -> bool {
-    guard_val(false, || match poller_ref(p).and_then(|x| x.try_next()) {
-        Some(pkt) => {
-            if !out.is_null() {
-                *out = own_packet(pkt);
+) -> i32 {
+    guard(|| {
+        let Some(poller) = poller_ref(p) else {
+            return fail(Error::InvalidArg("poller handle is null".into()));
+        };
+        match poller.try_next_result() {
+            Ok(Some(pkt)) => {
+                if !out.is_null() {
+                    *out = own_packet(pkt);
+                }
+                code::OK
             }
-            true
+            Ok(None) => {
+                if poller.is_closed() {
+                    code::CLOSED
+                } else {
+                    code::WOULD_BLOCK
+                }
+            }
+            Err(error) => fail(error),
         }
-        None => false,
     })
 }
 

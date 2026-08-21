@@ -373,6 +373,10 @@ impl Poller {
         self.next_deadline(None).ok().flatten()
     }
 
+    pub fn next_result(&self) -> Result<Option<Packet>> {
+        self.next_deadline(None)
+    }
+
     /// 带超时：`Ok(Some)` 取到，`Ok(None)` 图已结束，`Err(Timeout)` 超时。
     pub fn next_timeout(&self, timeout: std::time::Duration) -> Result<Option<Packet>> {
         self.next_deadline(Some(std::time::Instant::now() + timeout))
@@ -383,8 +387,11 @@ impl Poller {
             if let Some(packet) = self.inner.pop(&self.graph) {
                 return Ok(Some(packet));
             }
-            if self.inner.closed.load(Ordering::SeqCst) || self.graph.shared.has_error() {
-                return Ok(self.inner.pop(&self.graph));
+            if let Some(error) = self.graph.shared.first_error() {
+                return Err(error);
+            }
+            if self.inner.closed.load(Ordering::SeqCst) {
+                return Ok(None);
             }
             if self.graph.pump_step() {
                 continue;
@@ -403,6 +410,23 @@ impl Poller {
     /// 非阻塞：仅看现有队列。
     pub fn try_next(&self) -> Option<Packet> {
         self.inner.pop(&self.graph)
+    }
+
+    pub fn try_next_result(&self) -> Result<Option<Packet>> {
+        if let Some(packet) = self.inner.pop(&self.graph) {
+            return Ok(Some(packet));
+        }
+        if let Some(error) = self.graph.shared.first_error() {
+            return Err(error);
+        }
+        if self.inner.closed.load(Ordering::SeqCst) {
+            return Ok(None);
+        }
+        Ok(None)
+    }
+
+    pub fn is_closed(&self) -> bool {
+        self.inner.closed.load(Ordering::SeqCst)
     }
 
     pub fn is_empty(&self) -> bool {

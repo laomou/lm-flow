@@ -676,24 +676,26 @@ class Poller {
       if (st == LMFLOW_ERR_CLOSED) return py::none();
       check(st, "poller.next");
     } else {
-      bool ok;
+      LMFlowStatus st;
       {
         py::gil_scoped_release unlock;
-        ok = lmflow_poller_next(h_, &out);
+        st = lmflow_poller_next_status(h_, &out);
       }
-      if (!ok) return py::none();
+      if (st == LMFLOW_ERR_CLOSED) return py::none();
+      check(st, "poller.next");
     }
     return py::cast(new Packet(out, true), py::return_value_policy::take_ownership);
   }
 
   py::object try_next() {
     LMFlowPacket out{};
-    bool ok;
+    LMFlowStatus st;
     {
       py::gil_scoped_release unlock;
-      ok = lmflow_poller_try_next(h_, &out);
+      st = lmflow_poller_try_next_status(h_, &out);
     }
-    if (!ok) return py::none();
+    if (st == LMFLOW_ERR_WOULD_BLOCK || st == LMFLOW_ERR_CLOSED) return py::none();
+    check(st, "poller.try_next");
     return py::cast(new Packet(out, true), py::return_value_policy::take_ownership);
   }
 
@@ -819,6 +821,10 @@ class Graph {
   bool pump_step() {
     py::gil_scoped_release unlock;
     return lmflow_graph_pump_step(g_);
+  }
+  std::size_t pump_steps(std::size_t max_steps) {
+    py::gil_scoped_release unlock;
+    return lmflow_graph_pump_steps(g_, max_steps);
   }
 
   void set_wakeup_callback(const py::object& callback) {
@@ -1129,7 +1135,8 @@ PYBIND11_MODULE(_lmflow, m) {
       .def("next", &Poller::next, py::arg("timeout") = std::nullopt,
            "Get the next output packet; None when the graph ends, raises Timeout on timeout. "
            "Releases the GIL while waiting.")
-      .def("try_next", &Poller::try_next, "Non-blocking get; returns None if empty.");
+      .def("try_next", &Poller::try_next,
+           "Non-blocking get; returns None if empty or closed, raises KernelError if the graph failed.");
 
   py::class_<Graph>(m, "Graph")
       .def(py::init<>())
@@ -1151,6 +1158,8 @@ PYBIND11_MODULE(_lmflow, m) {
       .def("wait_done", &Graph::wait_done, py::arg("timeout") = std::nullopt)
       .def("wait_until_idle", &Graph::wait_until_idle, py::arg("timeout") = std::nullopt)
       .def("pump_step", &Graph::pump_step)
+      .def("pump_steps", &Graph::pump_steps, py::arg("max_steps"),
+           "Run at most max_steps delegated tasks or close-progress steps.")
       .def("set_wakeup_callback", &Graph::set_wakeup_callback, py::arg("callback"),
            "Install a thread-safe event-loop wakeup callback; pass None to remove it.\n\n"
            "There is only ONE slot per graph: installing again replaces the previous callback, "

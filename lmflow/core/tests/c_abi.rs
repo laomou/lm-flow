@@ -344,7 +344,7 @@ output_ports: [out]
         assert_eq!(lmflow_graph_total_queued(graph), 1);
         assert_eq!(lmflow_poller_dropped_count(poller), 1);
         let mut packet = LMFlowPacket::default();
-        assert!(lmflow_poller_next(poller, &mut packet));
+        assert_eq!(lmflow_poller_next_status(poller, &mut packet), 0);
         assert_eq!(*(packet.payload as *const i32), 2);
         lmflow_packet_drop(&mut packet);
         assert_eq!(lmflow_graph_total_queued(graph), 0);
@@ -398,8 +398,9 @@ fn full_pipeline_through_c_abi() {
                 owner: std::ptr::null_mut(),
                 drop_fn: None,
             };
-            assert!(
-                lmflow_poller_next(poller, &mut out),
+            assert_eq!(
+                lmflow_poller_next_status(poller, &mut out),
+                0,
                 "packet #{i} should be retrievable"
             );
             assert!(!out.payload.is_null());
@@ -457,9 +458,9 @@ output_ports: [out]
         assert_eq!(lmflow_input_send(input, make_int_packet(7, 0)), 0);
 
         let mut packet = LMFlowPacket::default();
-        assert!(!lmflow_poller_try_next(poller, &mut packet));
+        assert_eq!(lmflow_poller_try_next_status(poller, &mut packet), 5);
         assert!(lmflow_graph_pump_step(graph));
-        assert!(lmflow_poller_try_next(poller, &mut packet));
+        assert_eq!(lmflow_poller_try_next_status(poller, &mut packet), 0);
         assert_eq!(*(packet.payload as *const i32), 7);
         lmflow_packet_drop(&mut packet);
 
@@ -1285,10 +1286,10 @@ fn null_pointers_do_not_crash() {
         assert!(!lmflow_graph_pump_step(std::ptr::null_mut()));
         assert!(lmflow_graph_input(std::ptr::null_mut(), std::ptr::null()).is_null());
         assert!(lmflow_graph_add_poller(std::ptr::null_mut(), std::ptr::null()).is_null());
-        assert!(!lmflow_poller_next(
-            std::ptr::null_mut(),
-            std::ptr::null_mut()
-        ));
+        assert_eq!(
+            lmflow_poller_next_status(std::ptr::null_mut(), std::ptr::null_mut()),
+            1
+        );
         assert_eq!(lmflow_graph_num_nodes(std::ptr::null_mut()), 0);
         assert_eq!(lmflow_ctx_num_inputs(std::ptr::null()), 0);
         assert_eq!(lmflow_ctx_input_timestamp(std::ptr::null()), i64::MIN);
@@ -1339,9 +1340,10 @@ fn handles_stay_safe_after_graph_free() {
             owner: std::ptr::null_mut(),
             drop_fn: None,
         };
-        assert!(
-            !lmflow_poller_next(poller, &mut out),
-            "a finished graph's poller should return false"
+        assert_eq!(
+            lmflow_poller_next_status(poller, &mut out),
+            8,
+            "a finished graph's poller should report closed"
         );
 
         // 归还句柄(此刻才真正释放引擎)
@@ -1636,7 +1638,7 @@ fn timestamp_bound_subscriptions_receive_empty_packets_and_done() {
 
         let mut events = Vec::new();
         let mut packet = LMFlowPacket::default();
-        while lmflow_poller_next(poller, &mut packet) {
+        while lmflow_poller_next_status(poller, &mut packet) == 0 {
             events.push((packet.payload.is_null(), packet.timestamp));
             lmflow_packet_drop(&mut packet);
         }

@@ -95,3 +95,46 @@ fn included_yaml_parse_error_reports_file_and_path() {
     assert!(message.contains("subgraphs.Broken.nodes[0]"), "{message}");
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn subgraph_topology_error_reports_source_and_instance_path() {
+    common::register_test_kernels();
+    let error = Graph::from_yaml(
+        r#"
+subgraphs:
+  Broken:
+    input_ports: [in]
+    nodes:
+      - { name: sink, kernel: Sink, input_ports: [missing] }
+nodes:
+  - { name: stage, type: Broken, input_ports: [outer] }
+input_ports: [outer]
+"#,
+    )
+    .unwrap_err();
+    let message = error.to_string();
+    assert!(message.contains("subgraphs.Broken.nodes[0]"), "{message}");
+    assert!(message.contains("stage/sink"), "{message}");
+}
+
+#[test]
+fn subgraph_unknown_kernel_reports_source_and_instance_path() {
+    common::register_test_kernels();
+    let error = Graph::from_yaml(
+        r#"
+subgraphs:
+  Broken:
+    input_ports: [in]
+    nodes:
+      - { name: bad, kernel: NoSuchKernelXYZ, input_ports: [in] }
+nodes:
+  - { name: stage, type: Broken, input_ports: [outer] }
+input_ports: [outer]
+"#,
+    )
+    .unwrap_err();
+    let message = error.to_string();
+    assert!(message.contains("subgraphs.Broken.nodes[0]"), "{message}");
+    assert!(message.contains("stage/bad"), "{message}");
+    assert!(message.contains("NoSuchKernelXYZ"), "{message}");
+}

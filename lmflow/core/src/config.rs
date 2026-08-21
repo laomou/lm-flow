@@ -151,6 +151,9 @@ pub struct InputQueuesConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NodeConfig {
+    /// 展开前的配置来源路径，仅用于诊断；不参与 YAML 序列化。
+    #[serde(skip)]
+    pub(crate) source_path: String,
     #[serde(default)]
     pub name: String,
     /// 算子名。与 `type` 二选一:算子节点填 `kernel`,子图实例节点填 `type`(见 expand)。
@@ -283,6 +286,7 @@ impl Default for GraphConfig {
 impl Default for NodeConfig {
     fn default() -> Self {
         Self {
+            source_path: String::new(),
             name: String::new(),
             kernel: String::new(),
             input_ports: Vec::new(),
@@ -712,24 +716,26 @@ impl GraphPlan {
         }
         let mut port_tables = Vec::with_capacity(config.nodes.len());
         for (index, node) in config.nodes.iter().enumerate() {
+            let node_path = diagnostic_node_path(node, index);
             let inputs = Arc::new(
-                PortTable::build(&node.input_ports, &format!("nodes[{index}].input_ports"))
-                    .map_err(|error| error.context(format!("nodes[{index}].input_ports")))?,
+                PortTable::build(&node.input_ports, &format!("{node_path}.input_ports"))
+                    .map_err(|error| error.context(format!("{node_path}.input_ports")))?,
             );
             let outputs = Arc::new(
-                PortTable::build(&node.output_ports, &format!("nodes[{index}].output_ports"))
-                    .map_err(|error| error.context(format!("nodes[{index}].output_ports")))?,
+                PortTable::build(&node.output_ports, &format!("{node_path}.output_ports"))
+                    .map_err(|error| error.context(format!("{node_path}.output_ports")))?,
             );
             for name in outputs.names() {
                 if graph_input_names.contains(name) {
                     return Err(Error::InvalidArg(format!(
-                        "nodes[{index}].output_ports: port `{name}` is also a graph input"
+                        "{node_path}.output_ports: port `{name}` is also a graph input"
                     )));
                 }
                 if let Some(previous) = producers.insert(name.clone(), index) {
+                    let previous_path = diagnostic_node_path(&config.nodes[previous], previous);
                     return Err(Error::InvalidArg(format!(
-                        "nodes[{index}].output_ports: port `{name}` has multiple producers \
-                         (nodes[{previous}] and nodes[{index}])"
+                        "{node_path}.output_ports: port `{name}` has multiple producers \
+                         ({previous_path} and {node_path})"
                     )));
                 }
                 known_edges.insert(name.clone());
@@ -738,6 +744,7 @@ impl GraphPlan {
         }
         let mut adjacency = vec![Vec::new(); config.nodes.len()];
         for (index, (inputs, _)) in port_tables.iter().enumerate() {
+            let node_path = diagnostic_node_path(&config.nodes[index], index);
             for (port, name) in inputs.names().iter().enumerate() {
                 if !graph_input_names.contains(name) && !producers.contains_key(name) {
                     let suggestion = crate::diagnostic::did_you_mean(
@@ -745,7 +752,7 @@ impl GraphPlan {
                         known_edges.iter().map(String::as_str),
                     );
                     return Err(Error::InvalidArg(format!(
-                        "nodes[{index}].input_ports[{port}]: port `{name}` has no producer{suggestion}"
+                        "{node_path}.input_ports[{port}]: port `{name}` has no producer{suggestion}"
                     )));
                 }
                 if let Some(&producer) = producers.get(name) {
@@ -1054,13 +1061,14 @@ fn validate_preflight_executors(config: &GraphConfig) -> Result<()> {
         }
     }
     for (index, node) in config.nodes.iter().enumerate() {
+        let node_path = diagnostic_node_path(node, index);
         if !node.executor.is_empty() && !names.contains(&node.executor) {
             let suggestion = crate::diagnostic::did_you_mean(
                 &node.executor,
                 names.iter().map(|name| name.as_str()),
             );
             return Err(Error::InvalidArg(format!(
-                "nodes[{index}].executor: undefined executor `{}`{suggestion}",
+                "{node_path}.executor: undefined executor `{}`{suggestion}",
                 node.executor,
             )));
         }
@@ -1079,7 +1087,7 @@ fn validate_preflight_executors(config: &GraphConfig) -> Result<()> {
             };
             if threads < 2 {
                 return Err(Error::InvalidArg(format!(
-                    "nodes[{index}].max_in_flight={} needs an executor with more than one thread, \
+                    "{node_path}.max_in_flight={} needs an executor with more than one thread, \
                      but the selected executor provides {} -- there would be no parallelism",
                     node.max_in_flight, threads
                 )));
@@ -1087,6 +1095,7 @@ fn validate_preflight_executors(config: &GraphConfig) -> Result<()> {
         }
     }
     for (index, node) in config.nodes.iter().enumerate() {
+        let node_path = diagnostic_node_path(node, index);
         if node.input_ports.is_empty()
             && !node.executor.is_empty()
             && config.executors.iter().any(|executor| {
@@ -1094,7 +1103,7 @@ fn validate_preflight_executors(config: &GraphConfig) -> Result<()> {
             })
         {
             return Err(Error::InvalidArg(format!(
-                "nodes[{index}].executor: source nodes cannot run on DelegatingExecutor"
+                "{node_path}.executor: source nodes cannot run on DelegatingExecutor"
             )));
         }
         if node.input_policy.r#type == "sync_set" {
@@ -1107,30 +1116,40 @@ fn validate_preflight_executors(config: &GraphConfig) -> Result<()> {
             for (group_index, group) in node.input_policy.sets.iter().enumerate() {
                 if group.is_empty() {
                     return Err(Error::InvalidArg(format!(
-                        "nodes[{index}].input_policy.sets[{group_index}]: group must not be empty"
+                        "{node_path}.input_policy.sets[{group_index}]: group must not be empty"
                     )));
                 }
                 for name in group {
                     if !ports.contains(name) {
                         return Err(Error::InvalidArg(format!(
-                                "nodes[{index}].input_policy.sets[{group_index}]: unknown input port `{name}`"
+                                "{node_path}.input_policy.sets[{group_index}]: unknown input port `{name}`"
                             )));
                     }
                     if !seen.insert(name) {
                         return Err(Error::InvalidArg(format!(
-                                "nodes[{index}].input_policy.sets[{group_index}]: input port `{name}` appears in multiple groups"
+                                "{node_path}.input_policy.sets[{group_index}]: input port `{name}` appears in multiple groups"
                             )));
                     }
                 }
             }
             if let Some(name) = ports.iter().find(|name| !seen.contains(*name)) {
                 return Err(Error::InvalidArg(format!(
-                        "nodes[{index}].input_policy.sets: input port `{name}` is not assigned to a group"
-                    )));
+                    "{node_path}.input_policy.sets: input port `{name}` is not assigned to a group"
+                )));
             }
         }
     }
     Ok(())
+}
+
+pub(crate) fn diagnostic_node_path(node: &NodeConfig, index: usize) -> String {
+    if node.source_path.is_empty() {
+        format!("nodes[{index}]")
+    } else if node.name.is_empty() {
+        node.source_path.clone()
+    } else {
+        format!("{} (expanded node `{}`)", node.source_path, node.name)
+    }
 }
 
 fn check_preflight_acyclic(adjacency: &[Vec<usize>], config: &GraphConfig) -> Result<()> {

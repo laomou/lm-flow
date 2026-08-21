@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Instant;
 
-use crate::config::{GraphConfig, GraphPlan, StatsLevel};
+use crate::config::{diagnostic_node_path, GraphConfig, GraphPlan, StatsLevel};
 use crate::context::{Context, Options};
 use crate::executor::{DelegatingExecutor, Executor, ThreadPool, DEFAULT_EXECUTOR_NAME};
 use crate::kernel::{Contract, KernelInstance, PortTable};
@@ -99,6 +99,7 @@ impl GraphInner {
         let mut kernels = Vec::with_capacity(cfg.nodes.len());
         for (idx, n) in cfg.nodes.iter().enumerate() {
             let name = node_label(n, idx);
+            let node_path = diagnostic_node_path(n, idx);
             let (ins, outs) = node_port_tables[idx].clone();
             let mut contract = Contract::new(ins, outs);
             if n.r#type != "route" {
@@ -109,14 +110,14 @@ impl GraphInner {
                         &mut contract as *mut Contract as *mut c_void,
                     )
                 };
-                contract_result.map_err(|error| error.context(format!("nodes[{idx}].kernel")))?;
+                contract_result.map_err(|error| error.context(format!("{node_path}.kernel")))?;
             }
             if let Some(error) = contract.take_error() {
                 return Err(Error::InvalidArg(format!(
-                    "nodes[{idx}].kernel (node `{name}`): GetContract failed: {error}"
+                    "{node_path}.kernel (node `{name}`): GetContract failed: {error}"
                 )));
             }
-            validate_contract(&format!("nodes[{idx}]"), &name, &contract)?;
+            validate_contract(&node_path, &name, &contract)?;
             contracts.push(contract);
             // 保持历史顺序:每个节点都是 get_contract 后立刻 create,而不是先询问完
             // 所有契约再统一创建。静态检查失败时这些实例随局部 Vec 正常析构。
@@ -128,7 +129,7 @@ impl GraphInner {
                 )
             } else {
                 KernelInstance::create(&n.kernel)
-                    .map_err(|error| error.context(format!("nodes[{idx}].kernel")))?
+                    .map_err(|error| error.context(format!("{node_path}.kernel")))?
             });
         }
         check_edge_type_compatibility(&cfg, &edges, &contracts)?;

@@ -85,6 +85,62 @@ output_ports: ["out"]
     drive_passthrough(&graph);
 }
 
+#[test]
+fn subgraph_remaps_input_policy_and_queue_port_names() {
+    init();
+    let graph = Graph::from_yaml(
+        r#"
+subgraphs:
+  Sub:
+    nodes:
+      - name: inner
+        kernel: PassThrough
+        input_ports: [a]
+        output_ports: [o]
+        input_policy: { type: sync_set, sets: [[a]] }
+        input_queues: { ports: { a: { packets: 2 } } }
+    input_ports: [a]
+    output_ports: [o]
+nodes:
+  - { name: inst, type: Sub, input_ports: [outer], output_ports: [out] }
+input_ports: [outer]
+output_ports: [out]
+"#,
+    )
+    .expect("all input-port-name references must follow subgraph boundary remapping");
+    let poller = graph.add_poller("out").unwrap();
+    graph.start().unwrap();
+    graph
+        .input("outer")
+        .unwrap()
+        .send(Packet::new(7i32).at(Timestamp(3)))
+        .unwrap();
+    assert_eq!(*poller.next().unwrap().get::<i32>().unwrap(), 7);
+}
+
+#[test]
+fn subgraph_validation_reports_source_and_instance_path() {
+    let error = Graph::from_yaml(
+        r#"
+subgraphs:
+  Broken:
+    nodes:
+      - name: inner
+        kernel: PassThrough
+        input_ports: [a]
+        input_policy: { type: sync_set, sets: [[missing]] }
+    input_ports: [a]
+nodes:
+  - { name: inst, type: Broken, input_ports: [outer] }
+input_ports: [outer]
+"#,
+    )
+    .unwrap_err();
+    let message = error.to_string();
+    assert!(message.contains("subgraphs.Broken.nodes[0]"), "{message}");
+    assert!(message.contains("inst/inner"), "{message}");
+}
+
 /// 同一子图实例化两次:命名空间隔离各自的内部边,两条链独立跑通。
 #[test]
 fn subgraph_instantiated_twice_is_namespaced() {
