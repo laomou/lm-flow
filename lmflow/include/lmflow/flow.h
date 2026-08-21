@@ -919,7 +919,7 @@ uint64_t lmflow_graph_dropped_count(LMFlowGraph*, const char* port);
  *                组间互不等待。仅当确实需要「组间互不等待」时使用;
  *                单个 set 覆盖全部输入口与默认 sync 等价,应直接省略。
  *                某组触发时只填充该组的输入口,其它组为空且包留在队列中等待后续调用。
- *   "batch"      攒够 capacity 个包再一次性交给算子(本版本仅支持单输入口)。
+ *   "batch"      攒够 capacity 个**按时间戳对齐元组**再一次性交给算子,支持多个输入口。
  *                算子里用 lmflow_ctx_input_count / _input_at 遍历这一批。
  *
  * 注意 fixed_size 是**有意的有损**策略,且不会阻塞上游 ——
