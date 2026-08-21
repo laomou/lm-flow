@@ -92,7 +92,7 @@ typedef struct LMFlowContract LMFlowContract; /* get_contract 期借用 */
  *     内部以引用计数持有,引用归零时调用一次 drop_fn。
  *  2) 引擎借出(lmflow_ctx_input / observer 回调):owner 非空,**借用**,
  *     调用方不得 drop、不得在回调结束后继续使用。
- *  3) 引擎移交(lmflow_poller_next*):owner 非空且已为宿主递增引用,
+ *  3) 引擎移交(lmflow_poller_next_status/timeout):owner 非空且已为宿主递增引用,
  *     宿主**必须**调 lmflow_packet_drop,否则泄漏。
  * payload==NULL 表示空包(仅携带时间戳,用于时间戳边界 / 关流)。
  *
@@ -572,7 +572,7 @@ const char* lmflow_ctx_options_json(const LMFlowContext*);
  *   因此挂在 DelegatingExecutor 上的节点,其任务在宿主调用下列**阻塞接口**期间被抽取执行:
  *       lmflow_graph_wait_done / _timeout
  *       lmflow_graph_wait_until_idle / _timeout
- *       lmflow_poller_next / _timeout
+ *       lmflow_poller_next_status / _timeout
  *       lmflow_input_send(阻塞等待空位时)
  *   若宿主只 send 而从不调用上述任一接口,委托执行器上的节点将**不会推进**。
  *   事件循环宿主应安装 lmflow_graph_set_wakeup_callback:收到通知后在事件循环线程
@@ -607,10 +607,11 @@ LMFlowGraph* lmflow_graph_new(void); /* 失败返回 NULL(见 lmflow_last_error)
  *   - 端口名引用不到上游生产者;
  *   - 同一端口名有多个生产者;
  *   - 图输入口与某节点的输出口同名;
- *   - 拓扑成环(本版本不支持 back-edge,成环会死锁,故直接拒绝);
+ *   - 拓扑成环但没有用 back_edges 标记反馈输入;
  *   - 节点的 executor 名未在 executors 中定义;
- *   - 零输入口节点(本版本不支持,见设计文档 §6.4);
- *   - 用到本版本尚未实现的字段(如 max_in_flight > 1)→ LMFLOW_ERR_UNSUPPORTED。
+ *   - 零输入口节点挂到 DelegatingExecutor;
+ *   - max_in_flight > 1 但所属执行器不足两个工作线程;
+ *   - 用到本版本尚未实现的字段 → LMFLOW_ERR_UNSUPPORTED。
  * 最后一条尤其重要:**宁可报错也不静默忽略** —— 否则用户以为开了并行,实际没有。 */
 LMFlowStatus lmflow_graph_init_from_yaml(LMFlowGraph*, const char* yaml);
 /* 同上,从文件读取(读文件失败亦返回错误并置 lmflow_last_error)。 */
@@ -667,7 +668,7 @@ LMFlowPoller* lmflow_graph_add_poller_ex(LMFlowGraph*, const char* port, bool ob
  * DROP_OLDEST / DROP_NEWEST / LATEST 有损且**永不阻塞生产线程** —— 单线程宿主请用这三种。
  * BLOCK 无损,但**要求宿主在另一个线程里持续排水**:它是在派发路径内部原地等的,而派发
  * 可能就跑在宿主自己的线程上(委托执行器 / send 直接派发)。那时宿主既是生产者又是唯一
- * 消费者 —— 卡住就永远走不到 lmflow_poller_next,wait_done 也永不返回。
+ * 消费者 —— 卡住就永远走不到 lmflow_poller_next_status,wait_done 也永不返回。
  * 故 BLOCK 带**5 秒等待上界**(经 C ABI 创建时不可改):到点仍无进展则记录图错误并放弃该包,
  * wait_done / wait_until_idle 会返回该错误 —— 宁可响亮失败,不可静默挂死。 */
 #define LMFLOW_POLLER_BLOCK 0
@@ -676,10 +677,17 @@ LMFlowPoller* lmflow_graph_add_poller_ex(LMFlowGraph*, const char* port, bool ob
 #define LMFLOW_POLLER_LATEST 3
 LMFlowPoller* lmflow_graph_add_poller_bounded(
     LMFlowGraph*, const char* port, size_t capacity, int overflow_policy);
-/* 阻塞取下一包;图结束且队空返回 false。取得的包须 lmflow_packet_drop。 */
-bool lmflow_poller_next(LMFlowPoller*, LMFlowPacket* out);
-/* 非阻塞:无数据返回 false(用 lmflow_last_error 区分「暂无」与「已结束」)*/
-bool lmflow_poller_try_next(LMFlowPoller*, LMFlowPacket* out);
+/* 阻塞取下一包:
+ *   LMFLOW_OK = 写入一个包;
+ *   LMFLOW_ERR_CLOSED = poller 已结束且队列为空;
+ *   其它错误 = 图失败或句柄无效。 */
+LMFlowStatus lmflow_poller_next_status(LMFlowPoller*, LMFlowPacket* out);
+/* 非阻塞取下一包:
+ *   LMFLOW_OK = 写入一个包;
+ *   LMFLOW_ERR_WOULD_BLOCK = 当前暂无包,图仍在运行;
+ *   LMFLOW_ERR_CLOSED = 此 poller 已结束且队列为空;
+ *   其它错误 = 图失败或句柄无效。 */
+LMFlowStatus lmflow_poller_try_next_status(LMFlowPoller*, LMFlowPacket* out);
 /* 带超时:LMFLOW_OK / LMFLOW_ERR_TIMEOUT / LMFLOW_ERR_CLOSED。
  * 仅返回 LMFLOW_OK 时写入 out；其它返回码不会转移包所有权。 */
 LMFlowStatus lmflow_poller_next_timeout(LMFlowPoller*, LMFlowPacket* out, int64_t timeout_ms);
@@ -722,6 +730,8 @@ LMFlowStatus lmflow_graph_wait_until_idle_timeout(LMFlowGraph*, int64_t timeout_
  * 事件循环型宿主可反复调用它主动推进委托节点,而不必进入阻塞接口。
  * 有实际进展返回 true;当前无事可做返回 false。同一张图的委托任务始终串行执行。 */
 bool lmflow_graph_pump_step(LMFlowGraph*);
+/* 有预算地推进宿主任务,最多执行 max_steps 步;返回实际推进步数。 */
+size_t lmflow_graph_pump_steps(LMFlowGraph*, size_t max_steps);
 /* 事件循环集成：引擎有新活动需要宿主关注时调用 cb(user)。
  * 回调可能来自任意引擎线程，只能做线程安全的“投递到事件循环”动作，不得直接调用
  * lmflow_graph_*。通知为合并的边沿触发：收到后应在事件循环线程反复调用 pump_step，
@@ -906,7 +916,9 @@ uint64_t lmflow_graph_dropped_count(LMFlowGraph*, const char* port);
  *                实时场景必备:摄像头 30fps 而算子只跑 10fps 时,
  *                无界队列会让内存无限增长,丢旧帧才是正确取舍。
  *   "sync_set"   分组对齐:用 sets 把输入口分成若干组,**组内**按时间戳对齐,
- *                组间互不等待。适合一个节点同时收几路互不相干的流。
+ *                组间互不等待。仅当确实需要「组间互不等待」时使用;
+ *                单个 set 覆盖全部输入口与默认 sync 等价,应直接省略。
+ *                某组触发时只填充该组的输入口,其它组为空且包留在队列中等待后续调用。
  *   "batch"      攒够 capacity 个包再一次性交给算子(本版本仅支持单输入口)。
  *                算子里用 lmflow_ctx_input_count / _input_at 遍历这一批。
  *

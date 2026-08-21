@@ -71,6 +71,12 @@ array is marked read-only while any Packet reference retains it, then its origin
 writeability is restored. Do not mutate the same allocation through another alias
 while the graph owns it. Kernels that request a writable packet view use copy-on-write,
 so Python-owned input storage is never modified by the engine.
+
+**Kernel-side API** — ``lmflow/__init__.pyi`` declares the methods available inside
+``process(cc)``. Notably, ``cc.side_packet(name)`` reads host-injected constants, while
+``cc.input_timestamp`` and ``cc.input(i).timestamp`` expose timestamps for correlating
+multiple in-flight data units. The default ``sync`` policy aligns all inputs; use
+``sync_set`` only when independent groups must not wait for each other.
 """
 
 from __future__ import annotations
@@ -623,6 +629,12 @@ class Graph:
         nodes without entering a blocking wait.
         """
         return bool(self._g.pump_step())
+
+    def pump_steps(self, max_steps: int) -> int:
+        """Run at most ``max_steps`` delegated tasks or close-progress steps."""
+        if max_steps < 0:
+            raise ValueError("max_steps must be non-negative")
+        return int(self._g.pump_steps(max_steps))
 
     async def run_async(
         self,

@@ -97,7 +97,7 @@ Java_com_lmflow_demo_LmFlow_runScale(JNIEnv* env, jclass, jlongArray inputs, jlo
       return nullptr;
     }
     LMFlowPacket pkt;
-    if (lmflow_poller_next(poller, &pkt)) {
+    if (lmflow_poller_next_status(poller, &pkt) == LMFLOW_OK) {
       int64_t v = 0;
       if (lmflow_packet_as_i64(&pkt, &v)) out.push_back(v);
       lmflow_packet_drop(&pkt);  // 语义 3:poller 移交所有权,必须释放

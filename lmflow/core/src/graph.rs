@@ -281,6 +281,11 @@ impl Graph {
         self.inner.pump_step_pub()
     }
 
+    /// 在当前宿主线程最多推进 `max_steps` 个委托任务或关流步骤。
+    pub fn pump_steps(&self, max_steps: usize) -> usize {
+        (0..max_steps).take_while(|_| self.pump_step()).count()
+    }
+
     /// Install an edge-triggered event-loop wakeup callback.
     ///
     /// The callback may run on any engine thread and must return quickly. It should only schedule

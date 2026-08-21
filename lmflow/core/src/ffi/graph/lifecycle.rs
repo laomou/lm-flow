@@ -163,6 +163,21 @@ pub unsafe extern "C" fn lmflow_graph_pump_step(g: *mut LMFlowGraph) -> bool {
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn lmflow_graph_pump_steps(g: *mut LMFlowGraph, max_steps: usize) -> usize {
+    guard_val(0, || {
+        let Some(slot) = slot_mut(g) else {
+            last_error::set("graph handle is null");
+            return 0;
+        };
+        let Some(graph) = slot.graph.as_ref() else {
+            last_error::set("graph not yet initialized");
+            return 0;
+        };
+        graph.pump_steps(max_steps)
+    })
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn lmflow_graph_set_wakeup_callback(
     g: *mut LMFlowGraph,
     cb: Option<unsafe extern "C" fn(*mut c_void)>,

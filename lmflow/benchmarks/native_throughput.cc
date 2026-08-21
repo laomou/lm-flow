@@ -102,7 +102,7 @@ struct GraphRun {
   void RoundTrip(LMFlowPacket packet) {
     Check(lmflow_input_send(input, packet), "send");
     LMFlowPacket output{};
-    if (!lmflow_poller_next(poller, &output)) {
+    if (lmflow_poller_next_status(poller, &output) != LMFLOW_OK) {
       throw std::runtime_error(std::string("poller.next: ") + lmflow_last_error());
     }
     lmflow_packet_drop(&output);

@@ -198,9 +198,7 @@ impl Context {
         for s in &mut self.staging {
             s.clear();
         }
-        for b in &mut self.next_bounds {
-            *b = None;
-        }
+        self.next_bounds.fill(None);
         self.input_ts = Timestamp::unset();
         self.error_msg = None;
         self.source_done = false;
@@ -208,9 +206,7 @@ impl Context {
         // 下面两项在正常流程里使用前会被重写(claim 时写 inputs_done、进 close 前写
         // close_reason),故单次调用不清也不出错;但 `reset` 要能用于「彻底静态复位」
         // (图 reset 重跑),所以这里一并归位,不留任何上一轮残留。
-        for d in &mut self.inputs_done {
-            *d = false;
-        }
+        self.inputs_done.fill(false);
         self.close_reason = crate::runtime::CLOSE_NORMAL;
     }
 
@@ -234,9 +230,7 @@ impl Context {
         for s in &mut self.staging {
             s.clear();
         }
-        for b in &mut self.next_bounds {
-            *b = None;
-        }
+        self.next_bounds.fill(None);
     }
 
     pub fn node_name_cstr(&self) -> *const c_char {

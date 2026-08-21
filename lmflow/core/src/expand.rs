@@ -119,6 +119,11 @@ fn inline(
                 )));
             }
             let mut nn = n.clone();
+            nn.source_path = if prefix.is_empty() {
+                String::new()
+            } else {
+                node_path.clone()
+            };
             // 顶层名字保持原样(空名交给 build 的 node_label 处理);子图内部才加前缀。
             if !prefix.is_empty() {
                 nn.name = format!("{prefix}{}", node_label(n));
@@ -132,6 +137,7 @@ fn inline(
                 .iter()
                 .map(|b| remap_name(b, prefix, rename))
                 .collect();
+            remap_input_named_fields(&mut nn, prefix, rename);
             out.push(nn);
         } else if n.r#type == "route" {
             if !n.kernel.is_empty() {
@@ -141,6 +147,11 @@ fn inline(
                 )));
             }
             let mut nn = n.clone();
+            nn.source_path = if prefix.is_empty() {
+                String::new()
+            } else {
+                node_path.clone()
+            };
             if !prefix.is_empty() {
                 nn.name = format!("{prefix}{}", node_label(n));
             }
@@ -159,6 +170,7 @@ fn inline(
                 .iter()
                 .map(|b| remap_name(b, prefix, rename))
                 .collect();
+            remap_input_named_fields(&mut nn, prefix, rename);
             out.push(nn);
         } else {
             // 子图实例节点:递归内联。
@@ -252,6 +264,22 @@ fn remap_name(name: &str, prefix: &str, rename: &BTreeMap<String, String>) -> St
         Some(edge) => edge.clone(),
         None => format!("{prefix}{name}"),
     }
+}
+
+fn remap_input_named_fields(
+    node: &mut NodeConfig,
+    prefix: &str,
+    rename: &BTreeMap<String, String>,
+) {
+    for group in &mut node.input_policy.sets {
+        for name in group {
+            *name = remap_name(name, prefix, rename);
+        }
+    }
+    node.input_queues.ports = std::mem::take(&mut node.input_queues.ports)
+        .into_iter()
+        .map(|(name, limits)| (remap_name(&name, prefix, rename), limits))
+        .collect();
 }
 
 /// 把边界口声明与实例节点已重映射的外部口声明按位置绑定:边界 name → 外部 name。

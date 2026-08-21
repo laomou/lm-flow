@@ -118,7 +118,13 @@ int main() {
     CHECK(lmflow_input_send(input, lmflow::Packet::FromI64(i).At(i).release()));
 
     LMFlowPacket out;
-    if (!lmflow_poller_next(poller, &out)) break;
+    const LMFlowStatus status = lmflow_poller_next_status(poller, &out);
+    if (status == LMFLOW_ERR_CLOSED) break;
+    if (status != LMFLOW_OK) {
+      fprintf(stderr, "poller failed: %s\n", lmflow_last_error());
+      rc = 1;
+      break;
+    }
     int64_t got = 0;
     lmflow_packet_as_i64(&out, &got);
     printf("out: %lld @ ts=%lld\n", (long long)got, (long long)out.timestamp);

@@ -1151,6 +1151,29 @@ output_ports: [out]
             g.close_all_inputs()
             g.wait_done(timeout=5.0)
 
+    def test_delegating_executor_can_be_pumped_with_budget(self):
+        with graph(
+            """
+executors:
+  - { name: host, type: DelegatingExecutor }
+nodes:
+  - { name: p, kernel: TDouble, executor: host, input_ports: [in], output_ports: [out] }
+input_ports: [in]
+output_ports: [out]
+"""
+        ) as g:
+            out = g.add_poller("out")
+            g.start()
+            inp = g.input("in")
+            for i in range(5):
+                inp.send(i, ts=i)
+            self.assertEqual(g.pump_steps(2), 2)
+            self.assertEqual([out.try_next().as_int() for _ in range(2)], [0, 2])
+            self.assertEqual(g.pump_steps(16), 3)
+            self.assertEqual([out.try_next().as_int() for _ in range(3)], [4, 6, 8])
+            g.close_all_inputs()
+            g.wait_done(timeout=5.0)
+
     def test_python_kernel_on_thread_pool_does_not_deadlock(self):
         with graph(
             """
@@ -1251,6 +1274,17 @@ class TestErrors(unittest.TestCase):
                 g.wait_done(timeout=5.0)
             # 异常文本必须能拿到 —— 否则算子失败无从诊断
             self.assertIn("deliberately raised an exception", g.last_error())
+
+    def test_poller_surfaces_graph_failure(self):
+        with graph(one_node("TBoom")) as g:
+            poller = g.add_poller("out")
+            g.start()
+            g.input("in").send(1, ts=0)
+            g.close_all_inputs()
+            with self.assertRaises(lmflow.KernelError):
+                poller.next(timeout=5.0)
+            with self.assertRaises(lmflow.KernelError):
+                poller.try_next()
 
     def test_kernel_error_still_caught_as_runtime_error(self):
         # KernelError 派生自 RuntimeError,所以本次改动前写的 `except RuntimeError` 不能失效。
@@ -1541,6 +1575,33 @@ output_ports: [out]
             g.close_all_inputs()
             g.wait_done(timeout=10.0)
             self.assertEqual([p.as_int() for p in out], [0b011, 0b100])
+
+    def test_sync_set_never_reuses_inputs_from_another_group(self):
+        seen = []
+
+        @lmflow.kernel("SyncSetNoResidual")
+        class SyncSetNoResidual(lmflow.Kernel):
+            def process(self, cc):
+                seen.append(
+                    tuple(None if cc.input(i).is_empty else cc.input(i).as_int() for i in range(3))
+                )
+
+        with graph(
+            """
+nodes:
+  - { name: n, kernel: SyncSetNoResidual, input_ports: [x, y, z],
+      input_policy: { type: sync_set, sets: [[x, y], [z]] } }
+input_ports: [x, y, z]
+"""
+        ) as g:
+            g.start()
+            g.input("x").send(10, ts=0)
+            g.input("y").send(20, ts=0)
+            g.input("z").send(30, ts=1)
+            g.close_all_inputs()
+            g.wait_done(timeout=10.0)
+
+        self.assertEqual(seen, [(10, 20, None), (None, None, 30)])
 
     def test_mux_kernel_selects_data_port(self):
         # MuxKernel:输入 0=控制(选择器),1..=数据口。默认 sync 全对齐。
