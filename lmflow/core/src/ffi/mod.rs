@@ -24,6 +24,7 @@ use std::sync::Arc;
 use crate::context::Context;
 use crate::graph::GraphInner;
 use crate::kernel::Contract;
+use crate::kernel_runner::KernelRunner;
 use crate::runtime::last_error;
 use crate::status::{code, Error};
 
@@ -115,6 +116,10 @@ pub struct LMFlowPoller {
     _private: [u8; 0],
 }
 #[repr(C)]
+pub struct LMFlowKernelRunner {
+    _private: [u8; 0],
+}
+#[repr(C)]
 pub struct LMFlowContext {
     _private: [u8; 0],
 }
@@ -129,13 +134,19 @@ pub struct InputHandle {
     edge: usize,
 }
 
+pub struct KernelRunnerHandle {
+    pub runner: KernelRunner,
+}
+
 // 按 API 域拆成子模块;`pub use` 把条目原样再导出,故 `lmflow::ffi::X` 路径不变。
 mod context;
 mod graph;
 mod kernel;
+mod kernel_runner;
 mod packet;
 
 pub use context::*;
 pub use graph::*;
 pub use kernel::*;
+pub use kernel_runner::*;
 pub use packet::*;

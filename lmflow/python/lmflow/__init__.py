@@ -99,6 +99,7 @@ __all__ = [
     "Kernel",
     "kernel",
     "Graph",
+    "KernelRunner",
     "Packet",
     "Context",
     "Contract",
@@ -133,6 +134,7 @@ Context = _native.Context
 Contract = _native.Contract
 Input = _native.Input
 Poller = _native.Poller
+KernelRunner = _native.KernelRunner
 
 TS_UNSET = _native.TS_UNSET
 TS_PRE_STREAM = _native.TS_PRE_STREAM

@@ -102,6 +102,7 @@ pub mod ffi;
 pub mod graph;
 pub mod kernel;
 pub mod kernel_api;
+pub mod kernel_runner;
 pub mod metadata;
 pub mod packet;
 pub mod runtime;
@@ -113,6 +114,7 @@ pub use graph::{
     PollerOverflow, State, WatermarkBackpressureStatsSnapshot,
 };
 pub use kernel_api::{register_kernel, Kernel, KernelContract, KernelCtx};
+pub use kernel_runner::KernelRunner;
 pub use metadata::{Metadata, MetadataPredicate, MetadataValue};
 pub use packet::{BufferData, Builtin, InteropType, Packet};
 pub use status::{Error, Result};

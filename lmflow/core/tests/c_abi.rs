@@ -318,6 +318,29 @@ fn custom_type_descriptor_rejects_noncanonical_id() {
 }
 
 #[test]
+fn kernel_runner_drives_registered_kernel_through_c_abi() {
+    register_test_kernels();
+    unsafe {
+        let name = cs("CAbiI64Pass");
+        let runner = lmflow_kernel_runner_new(name.as_ptr(), 1, 1);
+        assert!(!runner.is_null(), "{}", last_error());
+        assert_eq!(lmflow_kernel_runner_start(runner), 0);
+        assert_eq!(
+            lmflow_kernel_runner_add_input(runner, 0, lmflow_packet_from_i64(12, 9)),
+            0
+        );
+        assert_eq!(lmflow_kernel_runner_process(runner, 9), 0);
+        let mut output = LMFlowPacket::default();
+        assert_eq!(lmflow_kernel_runner_try_next(runner, 0, &mut output), 0);
+        assert_eq!(*(output.payload as *const i64), 12);
+        assert_eq!(output.timestamp, 9);
+        lmflow_packet_drop(&mut output);
+        assert_eq!(lmflow_kernel_runner_close(runner), 0);
+        lmflow_kernel_runner_free(runner);
+    }
+}
+
+#[test]
 fn bounded_poller_exposes_drop_policy_and_watermark_accounting() {
     common::register_test_kernels();
     unsafe {

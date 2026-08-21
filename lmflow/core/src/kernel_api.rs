@@ -185,6 +185,14 @@ impl KernelCtx<'_> {
     pub fn option_str<'s>(&'s self, key: &str, def: &'s str) -> &'s str {
         self.inner.options.str(key).unwrap_or(def)
     }
+    /// Whether a host-injected constant input exists.
+    pub fn has_side_packet(&self, name: &str) -> bool {
+        self.inner.side_packets.contains_key(name)
+    }
+    /// Borrow a host-injected constant input.
+    pub fn side_packet(&self, name: &str) -> Option<&Packet> {
+        self.inner.side_packets.get(name)
+    }
 }
 
 /// The port-contract declaration handed to [`Kernel::get_contract`] — a safe wrapper around the

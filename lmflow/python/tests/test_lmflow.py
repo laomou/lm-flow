@@ -116,6 +116,36 @@ output_ports: [out]
         self.assertIn("did you mean `metadata`", message)
 
 
+class KernelRunnerTests(unittest.TestCase):
+    def test_directly_drives_python_kernel_without_graph(self):
+        @lmflow.kernel("TRunnerScale")
+        class TRunnerScale(lmflow.Kernel):
+            @staticmethod
+            def get_contract(c):
+                c.require_side_packet("bias")
+
+            def open(self, cc):
+                self.factor = cc.option_int("factor", 1)
+
+            def process(self, cc):
+                value = cc.input(0).as_int()
+                bias = cc.side_packet("bias").as_int()
+                cc.emit(0, value * self.factor + bias)
+
+        runner = lmflow.KernelRunner(
+            "TRunnerScale",
+            options={"factor": 3},
+            side_packets={"bias": 2},
+        )
+        runner.add_input(0, 7, ts=11)
+        runner.process(11)
+        packet = runner.try_next()
+        self.assertEqual(packet.as_int(), 23)
+        self.assertEqual(packet.timestamp, 11)
+        self.assertIsNone(runner.try_next())
+        runner.close()
+
+
 class PacketMetadataTests(unittest.TestCase):
     def test_metadata_management(self):
         packet = lmflow.Packet.from_int(7)
