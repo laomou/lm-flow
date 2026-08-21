@@ -199,7 +199,12 @@ int main(void) {
     CHECK(lmflow_input_send(in, lmflow_packet_from_i64(i, i)));
 
     LMFlowPacket out;
-    if (!lmflow_poller_next(poller, &out)) break;          /* false = stream ended */
+    LMFlowStatus poll_status = lmflow_poller_next_status(poller, &out);
+    if (poll_status == LMFLOW_ERR_CLOSED) break;          /* normal stream end */
+    if (poll_status != LMFLOW_OK) {
+      fprintf(stderr, "poller failed: %s\n", lmflow_last_error());
+      break;
+    }
     int64_t v = 0;
     if (lmflow_packet_as_i64(&out, &v)) printf("out: %lld\n", (long long)v);
     lmflow_packet_drop(&out);                              /* transferred to you — must drop */
@@ -284,8 +289,8 @@ LMFlowPoller* lmflow_graph_add_poller(LMFlowGraph*, const char* port);
 LMFlowPoller* lmflow_graph_add_poller_ex(LMFlowGraph*, const char* port, bool observe_timestamp_bounds);
 LMFlowPoller* lmflow_graph_add_poller_bounded(
     LMFlowGraph*, const char* port, size_t capacity, int overflow_policy);
-bool          lmflow_poller_next(LMFlowPoller*, LMFlowPacket* out);       /* blocking */
-bool          lmflow_poller_try_next(LMFlowPoller*, LMFlowPacket* out);   /* non-blocking */
+LMFlowStatus  lmflow_poller_next_status(LMFlowPoller*, LMFlowPacket* out); /* blocking */
+LMFlowStatus  lmflow_poller_try_next_status(LMFlowPoller*, LMFlowPacket* out); /* non-blocking */
 LMFlowStatus  lmflow_poller_next_timeout(LMFlowPoller*, LMFlowPacket* out, int64_t timeout_ms);
 uint64_t      lmflow_poller_dropped_count(LMFlowPoller*);
 void          lmflow_poller_free(LMFlowPoller*);
@@ -312,7 +317,7 @@ pollers remain data-only so overflow policies such as `LATEST` cannot replace da
 ```c
 LMFlowPoller* events = lmflow_graph_add_poller_ex(graph, "out", true);
 LMFlowPacket event;
-while (lmflow_poller_next(events, &event)) {
+while (lmflow_poller_next_status(events, &event) == LMFLOW_OK) {
   if (event.payload == NULL) {
     printf("timestamp bound advanced to %lld\n", (long long)event.timestamp);
   } else {
@@ -322,8 +327,8 @@ while (lmflow_poller_next(events, &event)) {
 }
 ```
 
-Poller queues contribute to the graph's packet watermark and packet/byte diagnostic counters. The legacy
-`lmflow_graph_add_poller` remains unbounded for compatibility. A bounded Poller supports:
+Poller queues contribute to the graph's packet watermark and packet/byte diagnostic counters.
+`lmflow_graph_add_poller` creates an unbounded poller. A bounded Poller supports:
 
 | Policy | Behavior at capacity |
 |---|---|
@@ -352,8 +357,8 @@ nodes:
 ```
 
 A delegating executor owns no threads, so its tasks are only pumped while a host thread is inside a
-blocking call such as `lmflow_poller_next` or `lmflow_graph_wait_done`, or calls
-`lmflow_graph_pump_step`. Delegated tasks are serialized per graph even if several host threads
+blocking call such as `lmflow_poller_next_status` or `lmflow_graph_wait_done`, or calls
+`lmflow_graph_pump_step` / `lmflow_graph_pump_steps`. Delegated tasks are serialized per graph even if several host threads
 enter concurrently, and multiple delegating executors are pumped fairly. Send without ever
 entering the engine and those nodes will not advance.
 
@@ -420,7 +425,7 @@ three forms, and what you must do differs in each:
 |---|---|---|
 | **Host-created** (`owner == NULL`) | you filled the struct in yourself, or a `lmflow_packet_from_*` constructor | the engine adopts it when you submit it; if you never submit it, `lmflow_packet_drop` it |
 | **Borrowed** | `lmflow_ctx_input`, `lmflow_ctx_input_at`, an observer callback argument, `lmflow_ctx_side_packet` | **never** drop it, and never let it outlive the callback |
-| **Transferred** | `lmflow_poller_next`, `_try_next`, `_next_timeout`, `lmflow_ctx_take_input` | you **must** `lmflow_packet_drop` it, or it leaks |
+| **Transferred** | `lmflow_poller_next_status`, `_try_next_status`, `_next_timeout`, `lmflow_ctx_take_input` | you **must** `lmflow_packet_drop` it, or it leaks |
 
 ```c
 void lmflow_packet_drop(LMFlowPacket* pkt);
@@ -893,8 +898,8 @@ Graph fields: `executors`, `nodes`, `subgraphs`, `include`, `input_ports`, `outp
 | `sync` | default — fire when every input port has a packet, aligned by timestamp |
 | `immediate` | each input port fires independently, waiting for no one |
 | `fixed_size` | bounded, **dropping the oldest** when full; `capacity` required |
-| `sync_set` | grouped alignment: `sets` partitions the ports; aligned within a group, independent across groups |
-| `batch` | accumulate `capacity` packets and deliver them in one activation (single input port in this version) |
+| `sync_set` | grouped alignment: `sets` partitions the ports; aligned within a group, independent across groups; use it only when groups must not wait for one another, since one set covering all ports is equivalent to default `sync` |
+| `batch` | accumulate `capacity` timestamp-aligned packets and deliver them in one activation; multiple input ports are supported |
 
 `fixed_size` is **deliberately lossy** and does not block upstream, which is what makes it the
 memory-bounding companion to unbounded internal edges. It is never silent: the first drop logs a

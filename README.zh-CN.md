@@ -135,6 +135,11 @@ print(out.next(timeout=5.0).as_int())   # 42
 g.close_all_inputs(); g.wait_done(timeout=5.0)
 ```
 
+Python 算子侧 API 已在 `lmflow/python/lmflow/__init__.pyi` 中声明，IDE 和类型检查器可以发现
+`Context.side_packet`、`Context.input_timestamp`、`Packet.timestamp` 等 pybind11 方法。
+使用 `DelegatingExecutor` 的事件循环宿主可以调用 `Graph.pump_steps(max_steps)`，
+以有界方式推进委托任务，避免无限循环调用 `Graph.pump_step()`。
+
 > 只发布预编译 wheel —— 装不到匹配平台的 wheel 时,`pip install` 直接失败,而**不会**在你机器上编译源码。
 > 想本地从源码构建,就带子模块克隆再装(需要 Rust 工具链 + CMake):
 >

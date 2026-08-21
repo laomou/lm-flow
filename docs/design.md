@@ -160,7 +160,7 @@ pub struct Packet {
 |---|---|---|
 | 宿主/算子新建 | NULL | 提交(`send`/`emit`)后引擎接管;不提交须 `lmflow_packet_drop` |
 | 引擎借出(`lmflow_ctx_input`、observer 回调) | 非空 | **借用**,不得 drop、不得跨回调留存 |
-| 引擎移交(`poller_next`、内建构造、`clone`) | 非空 | **调用方持有一份引用**,须 `emit`/`send` 或 `lmflow_packet_drop` |
+| 引擎移交(`poller_next_status`、内建构造、`clone`) | 非空 | **调用方持有一份引用**,须 `emit`/`send` 或 `lmflow_packet_drop` |
 
 多路分发(`Forward`/扇出)= `Arc::clone`,**不拷贝数据**。
 
@@ -293,7 +293,7 @@ bool       lmflow_ctx_has_side_packet(const LMFlowContext*, const char* name);
 | Context 参数 | `lmflow_ctx_option_i64/f64/bool/str` + `lmflow_ctx_options_json` |
 | 图 | `lmflow_graph_new` `…_init_from_yaml` `…_start` `…_free` |
 | 输入 | `lmflow_graph_input` → `lmflow_input_send/try_send/close`;便捷 `lmflow_graph_add_packet` |
-| 输出 | `lmflow_graph_add_poller(_ex)` → `lmflow_poller_next/try_next/next_timeout`;`lmflow_graph_observe(_ex)` |
+| 输出 | `lmflow_graph_add_poller(_ex)` → `lmflow_poller_next_status/try_next_status/next_timeout`;`lmflow_graph_observe(_ex)` |
 | 终止 | `lmflow_graph_cancel` `…_close_input` `…_close_all_inputs` `…_wait_done` `…_wait_done_timeout` |
 | Side packet | `lmflow_graph_set_side_packet` `lmflow_ctx_side_packet` `lmflow_ctx_has_side_packet` |
 | 类型描述符 | `lmflow_type_id` `lmflow_register_type_descriptor` `lmflow_type_name` `lmflow_type_size` `lmflow_type_align` |
@@ -516,7 +516,7 @@ pub struct Graph {
 |---|---|
 | `Created` | `init_from_yaml`、`free` |
 | `Initialized` | `add_poller`、`observe`、`input`(取句柄)、`start`、`free` |
-| `Running` | `send`/`try_send`、`poller_next*`、`close_input`、`close_all_inputs`、`cancel`、`wait_done*`、`dump`、`queue_depth` |
+| `Running` | `send`/`try_send`、`poller_next_status*`、`close_input`、`close_all_inputs`、`cancel`、`wait_done*`、`dump`、`queue_depth` |
 | `Draining` | 同 `Running`,但 `send` 返回 `LMFLOW_ERR_CLOSED` |
 | `Terminated` | `wait_done*`(立即返回)、`last_error`、`dump`、`free` |
 
@@ -821,7 +821,7 @@ Graphviz 生成 SVG 的完整循环。
 - 检查点:`finish(node)` 末尾 **和** 上游关流事件 —— 两处都要查,否则末尾节点可能永不关闭。
 - **终止判定**:`GraphState{ open_nodes, err }` + `Condvar`;节点关闭时 `open_nodes -= 1`,
   归零则 `notify_all`。`wait_done` 等这个条件。
-- `poller_next`:所在边 `closed` 且队空 → 返回 false;否则阻塞在 poller 自己的 condvar 上。
+- `poller_next_status`:所在边 `closed` 且队空 → 返回 `LMFLOW_ERR_CLOSED`;否则阻塞在 poller 自己的 condvar 上。
 - **`cancel` 不是抢占**:停止调度新任务、丢弃在途包、唤醒所有等待者,但**已在执行中的
   算子回调不会被中断**。故 `cancel` 返回后可能仍有一个算子在跑,须 `wait_done` 确认静止。
 
@@ -971,7 +971,7 @@ nodes:
 ```
 lmflow_graph_wait_done / _timeout
 lmflow_graph_wait_until_idle / _timeout
-lmflow_poller_next / _timeout
+lmflow_poller_next_status / _timeout
 lmflow_input_send(阻塞等待空位时)
 ```
 

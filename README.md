@@ -134,6 +134,12 @@ print(out.next(timeout=5.0).as_int())   # 42
 g.close_all_inputs(); g.wait_done(timeout=5.0)
 ```
 
+Python kernel-side APIs are declared in `lmflow/python/lmflow/__init__.pyi`,
+so IDEs and type checkers can discover `Context.side_packet`,
+`Context.input_timestamp`, `Packet.timestamp`, and the other pybind11 methods.
+For `DelegatingExecutor` event-loop hosts, `Graph.pump_steps(max_steps)` provides
+a bounded alternative to repeatedly calling `Graph.pump_step()`.
+
 > Only prebuilt wheels are published — if no wheel matches your platform, `pip install` fails rather than compiling on your machine. To build locally instead, clone with submodules and build the wheel from source (needs a Rust toolchain + CMake):
 >
 > ```bash
