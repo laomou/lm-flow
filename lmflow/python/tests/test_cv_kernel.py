@@ -20,45 +20,31 @@ import lmflow
     "extension not built with --with-cv-test (no CvInvertTest; production extension has zero OpenCV)",
 )
 class TestPythonNumpyThroughCppCvKernel(unittest.TestCase):
-    YAML = """
-nodes:
-  - { name: inv, kernel: CvInvertTest, input_ports: [in], output_ports: [out] }
-input_ports: [in]
-output_ports: [out]
-"""
-
     def test_invert_roundtrip(self):
         lmflow.register_cv_test_kernels()  # 注册 C++ 侧 CvInvertTest
-        with lmflow.Graph.from_yaml(self.YAML) as g:
-            out = g.add_poller("out")
-            g.start()
+        with lmflow.KernelRunner("CvInvertTest") as runner:
             # 一张已知 2x3 U8 图(cv2.imread 返回的也是这种 numpy ndarray)
             img = np.array([[0, 10, 20], [30, 40, 50]], dtype=np.uint8)
-            g.input("in").send(img, ts=0)
+            runner.add_input(0, img, ts=0)
+            runner.process(0)
 
-            res = out.next(timeout=5.0).as_numpy()
+            res = runner.try_next().as_numpy()
             # C++ 侧 cv::bitwise_not 逐像素 255-x。逐字节相等 ⟹ Python 送的 numpy
             # 与 C++ 读到的 cv::Mat 是同一块内存、同一 pattern(直接证明)。
             self.assertEqual(res.shape, img.shape)
             self.assertEqual(res.dtype, np.uint8)
             self.assertTrue(np.array_equal(res, 255 - img), f"expected {255 - img}, got {res}")
 
-            g.close_all_inputs()
-            g.wait_done(timeout=5.0)
-
     def test_larger_image_channels(self):
         """多通道 + 更大尺寸也逐字节对上(排除 shape/stride/通道错位)。"""
         lmflow.register_cv_test_kernels()
-        with lmflow.Graph.from_yaml(self.YAML) as g:
-            out = g.add_poller("out")
-            g.start()
+        with lmflow.KernelRunner("CvInvertTest") as runner:
             rng = np.arange(4 * 5 * 3, dtype=np.uint8).reshape(4, 5, 3)  # HWC 彩色图
-            g.input("in").send(rng, ts=0)
-            res = out.next(timeout=5.0).as_numpy()
+            runner.add_input(0, rng, ts=0)
+            runner.process(0)
+            res = runner.try_next().as_numpy()
             self.assertEqual(res.shape, (4, 5, 3))
             self.assertTrue(np.array_equal(res, 255 - rng))
-            g.close_all_inputs()
-            g.wait_done(timeout=5.0)
 
 
 if __name__ == "__main__":
