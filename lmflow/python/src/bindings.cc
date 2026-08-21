@@ -719,8 +719,9 @@ class KernelRunner {
       }
       for (auto item : side_packets) {
         const std::string name = py::cast<std::string>(item.first);
+        const py::object value = py::reinterpret_borrow<py::object>(item.second);
         check(lmflow_kernel_runner_set_side_packet(
-                  h_, name.c_str(), to_flow_packet(item.second, LMFLOW_TS_UNSET)),
+                  h_, name.c_str(), to_flow_packet(value, LMFLOW_TS_UNSET)),
               "KernelRunner.set_side_packet");
       }
     } catch (...) {
