@@ -28,6 +28,17 @@ to each GitHub Release.
 
 ### Changed
 
+- **Vulkan adapter: staging buffers are pooled and reused instead of allocated per transfer.**
+  On the staging upload/read-back paths (the discrete-GPU case, and any run with
+  `LMFLOW_VK_FORCE_STAGING=1`), each `Upload`/`Download` previously created a host-visible buffer
+  with its own `vkAllocateMemory` and destroyed it after the copy. Staging buffers are now drawn
+  from a best-fit pool on the `Context` (usage `TRANSFER_SRC|TRANSFER_DST`, so one pool serves both
+  directions) and returned to it once the transfer's timeline value completes — the *same* deferred
+  reclamation that already made destruction safe now makes recycling safe, so there is no host wait
+  and no new use-after-free surface. A steady-state fixed-size resize allocates staging once and
+  then reuses it every frame (measured on lavapipe: 10 staging transfers → 2 allocations + 8
+  reuses), keeping `vkAllocateMemory` clear of `maxMemoryAllocationCount`. Byte-for-byte output is
+  unchanged — `lmflow_vulkan_resize_test_staging` still validates against the same CPU oracle.
 - **Vulkan adapter: `VkDownload` no longer fails at `Open` on device-only memory.** With staging
   read-back implemented — and guaranteed feasible, since the Vulkan spec requires at least one
   `HOST_VISIBLE|HOST_COHERENT` memory type — the previous "staging read-back path is not
