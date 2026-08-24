@@ -149,6 +149,12 @@ class Context {
     if (device_) {
       vkDeviceWaitIdle(device_);
       ReclaimUpTo(UINT64_MAX);
+      // ReclaimUpTo 刚把所有过期 staging 归还了池;设备已 idle,这里把池清空销毁。
+      for (StagingSlot& slot : staging_pool_) {
+        if (slot.buffer) vkDestroyBuffer(device_, slot.buffer, nullptr);
+        if (slot.memory) vkFreeMemory(device_, slot.memory, nullptr);
+      }
+      staging_pool_.clear();
       for (auto& entry : programs_) {
         vkDestroyPipeline(device_, entry.second.pipeline, nullptr);
         vkDestroyPipelineLayout(device_, entry.second.pipeline_layout, nullptr);
@@ -213,6 +219,15 @@ class Context {
                : 0;
   }
 
+  /// 一个可复用的 host-visible staging buffer。usage 同时含 TRANSFER_SRC|TRANSFER_DST,
+  /// 故**一个池同时服务 Upload(host→staging→device)与 Download(device→staging→host)**。
+  /// `capacity` 是创建时的字节大小;复用要求 `capacity >= 请求字节数`。
+  struct StagingSlot {
+    VkBuffer buffer = VK_NULL_HANDLE;
+    VkDeviceMemory memory = VK_NULL_HANDLE;
+    VkDeviceSize capacity = 0;
+  };
+
   /// 一次 dispatch 用完就要回收的资源。按时间线值延迟回收,**不做主机等待**。
   struct Retired {
     uint64_t value = 0;
@@ -220,10 +235,61 @@ class Context {
     VkDescriptorSet descriptor_set = VK_NULL_HANDLE;
     VkBuffer buffer = VK_NULL_HANDLE;
     VkDeviceMemory memory = VK_NULL_HANDLE;
+    /// staging 池化:置位时,过了 `value` 不销毁 `staging`,而是**归还 staging 池**复用。
+    /// 复用安全性与销毁同源 —— 都由「时间线值已过 ⇒ GPU 用完」保证,不会 use-after-free。
+    StagingSlot staging;
+    bool recycle_staging = false;
   };
 
   /// 登记「等这个时间线值过了就能释放」。调用方须持有 submit_mutex()。
   void RetireLocked(const Retired& retired) { retired_.push_back(retired); }
+
+  /// 取一个容量 >= `bytes` 的 host-visible|coherent staging buffer:优先从池里 best-fit
+  /// 复用一个空闲项,没有合适的才新建(usage = TRANSFER_SRC|TRANSFER_DST)。这样在真独显 /
+  /// `LMFLOW_VK_FORCE_STAGING` 下,稳态尺寸的上传/回读不再每帧 `vkCreateBuffer +
+  /// vkAllocateMemory`(后者受 `maxMemoryAllocationCount` 限制)。调用方须持有 submit_mutex()。
+  StagingSlot AcquireStagingLocked(VkDeviceSize bytes) {
+    size_t best = SIZE_MAX;
+    for (size_t i = 0; i < staging_pool_.size(); ++i) {
+      if (staging_pool_[i].capacity < bytes) continue;
+      if (best == SIZE_MAX || staging_pool_[i].capacity < staging_pool_[best].capacity) best = i;
+    }
+    if (best != SIZE_MAX) {
+      StagingSlot slot = staging_pool_[best];
+      staging_pool_[best] = staging_pool_.back();
+      staging_pool_.pop_back();
+      return slot;
+    }
+    StagingSlot slot;
+    slot.capacity = bytes;
+    VkBufferCreateInfo info{};
+    info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    info.size = bytes;
+    info.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    Check(vkCreateBuffer(device_, &info, nullptr, &slot.buffer), "vkCreateBuffer");
+    VkMemoryRequirements requirements{};
+    vkGetBufferMemoryRequirements(device_, slot.buffer, &requirements);
+    VkMemoryAllocateInfo allocate{};
+    allocate.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    allocate.allocationSize = requirements.size;
+    allocate.memoryTypeIndex = FindMemoryType(
+        requirements.memoryTypeBits,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    Check(vkAllocateMemory(device_, &allocate, nullptr, &slot.memory), "vkAllocateMemory");
+    Check(vkBindBufferMemory(device_, slot.buffer, slot.memory, 0), "vkBindBufferMemory");
+    return slot;
+  }
+
+  /// 登记「等 `value` 过了就把这块 staging **归还池**」(而非销毁),连同其一次性命令缓冲。
+  /// 与 `RetireLocked` 同一套延迟回收,故归还也晚于所有在途工作。调用方须持有 submit_mutex()。
+  void RetireStagingLocked(uint64_t value, VkCommandBuffer command_buffer, const StagingSlot& slot) {
+    Retired retired;
+    retired.value = value;
+    retired.command_buffer = command_buffer;
+    retired.staging = slot;
+    retired.recycle_staging = true;
+    retired_.push_back(retired);
+  }
 
   /// 回收所有已完成的登记项。调用方须持有 submit_mutex()。
   void ReclaimCompletedLocked() {
@@ -551,6 +617,16 @@ class Context {
       if (entry.descriptor_set) vkFreeDescriptorSets(device_, descriptor_pool_, 1, &entry.descriptor_set);
       if (entry.buffer) vkDestroyBuffer(device_, entry.buffer, nullptr);
       if (entry.memory) vkFreeMemory(device_, entry.memory, nullptr);
+      // 时间线已过 ⇒ GPU 用完这块 staging:归还池以复用,而非销毁。池有上限以免病态增长
+      // (尺寸单调增长的工作负载会留下旧的小 buffer);超限则照旧销毁。
+      if (entry.recycle_staging && entry.staging.buffer) {
+        if (staging_pool_.size() < kMaxPooledStaging) {
+          staging_pool_.push_back(entry.staging);
+        } else {
+          vkDestroyBuffer(device_, entry.staging.buffer, nullptr);
+          if (entry.staging.memory) vkFreeMemory(device_, entry.staging.memory, nullptr);
+        }
+      }
     }
     retired_.resize(keep);
   }
@@ -569,6 +645,9 @@ class Context {
   VkCommandPool command_pool_ = VK_NULL_HANDLE;
   VkDescriptorPool descriptor_pool_ = VK_NULL_HANDLE;
   std::vector<Retired> retired_;
+  /// 空闲 staging buffer 池(受 submit_mutex_ 保护,同 retired_)。上限见 kMaxPooledStaging。
+  std::vector<StagingSlot> staging_pool_;
+  static constexpr size_t kMaxPooledStaging = 8;
   std::mutex submit_mutex_;
   std::mutex cache_mutex_;
   std::unordered_map<std::string, Program> programs_;
@@ -930,38 +1009,24 @@ inline Image Upload(const std::shared_ptr<Context>& context, const LMFlowBuffer&
   // 对称地,`Download` 也有 staging 回读分支(device→staging→host),故完整 GPU→CPU 回路
   // 在这类设备上同样可用,`VkDownload` 不再有 Open 期门禁。
   //
-  // staging buffer -> vkCmdCopyBuffer。staging 随本次提交延迟回收。
-  //
-  // 池化候选:这里每帧都新建 buffer + vkAllocateMemory 再丢掉。Download 的 staging 分支
-  // 同样如此。此前这条路不可达、无所谓;现在它在真独显与 FORCE_STAGING 下会真的每帧执行,
-  // 于是每帧多一次驱动分配(且 vkAllocateMemory 受 maxMemoryAllocationCount 限制)。
-  // 按字节大小分档复用 staging、或持久映射一条 staging ring,都是自然的下一步。
-  VkBuffer staging = VK_NULL_HANDLE;
-  VkDeviceMemory staging_memory = VK_NULL_HANDLE;
-  VkBufferCreateInfo staging_info{};
-  staging_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-  staging_info.size = bytes;
-  staging_info.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
-  Check(vkCreateBuffer(context->device(), &staging_info, nullptr, &staging), "vkCreateBuffer");
-  VkMemoryRequirements requirements{};
-  vkGetBufferMemoryRequirements(context->device(), staging, &requirements);
-  VkMemoryAllocateInfo allocate{};
-  allocate.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-  allocate.allocationSize = requirements.size;
-  allocate.memoryTypeIndex =
-      context->FindMemoryType(requirements.memoryTypeBits,
-                              VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-                                  VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-  Check(vkAllocateMemory(context->device(), &allocate, nullptr, &staging_memory),
-        "vkAllocateMemory");
-  Check(vkBindBufferMemory(context->device(), staging, staging_memory, 0), "vkBindBufferMemory");
-  detail::CopyMapped(context, staging_memory, buffer.data, bytes, /*to_device=*/true,
+  // staging buffer -> vkCmdCopyBuffer;提交后 staging **归还池复用**而非销毁(见
+  // Context::AcquireStagingLocked / RetireStagingLocked)。此前这条路不可达、无所谓;现在它
+  // 在真独显与 FORCE_STAGING 下每帧执行,池化避免每帧 vkCreateBuffer + vkAllocateMemory
+  // (后者受 maxMemoryAllocationCount 限制),尺寸稳态时稳态零新分配。
+  Context::StagingSlot staging;
+  {
+    std::lock_guard<std::mutex> guard(context->submit_mutex());
+    context->ReclaimCompletedLocked();  // 先回收:把已完成的 staging 归还池,便于下面复用
+    staging = context->AcquireStagingLocked(bytes);
+  }
+  // 锁外写 staging:此刻它已出池、尚未登记回收,是本次调用私有,无并发访问(历史上的
+  // use-after-free 正出在「过早登记 + 锁外访问」,这里顺序相反,安全)。
+  detail::CopyMapped(context, staging.memory, buffer.data, bytes, /*to_device=*/true,
                      /*coherent=*/true);  // staging 就是按 HOST_COHERENT 分配的
 
   uint64_t signalled = 0;
   {
     std::lock_guard<std::mutex> guard(context->submit_mutex());
-    context->ReclaimCompletedLocked();
     VkCommandBuffer command_buffer = VK_NULL_HANDLE;
     context->AllocateCommandLocked(&command_buffer);
     VkCommandBufferBeginInfo begin{};
@@ -970,15 +1035,10 @@ inline Image Upload(const std::shared_ptr<Context>& context, const LMFlowBuffer&
     Check(vkBeginCommandBuffer(command_buffer, &begin), "vkBeginCommandBuffer");
     VkBufferCopy region{};
     region.size = bytes;
-    vkCmdCopyBuffer(command_buffer, staging, image.buffer(), 1, &region);
+    vkCmdCopyBuffer(command_buffer, staging.buffer, image.buffer(), 1, &region);
     Check(vkEndCommandBuffer(command_buffer), "vkEndCommandBuffer");
     signalled = context->SubmitLocked(command_buffer, /*wait_value=*/0);
-    Context::Retired retired;
-    retired.value = signalled;
-    retired.command_buffer = command_buffer;
-    retired.buffer = staging;
-    retired.memory = staging_memory;
-    context->RetireLocked(retired);
+    context->RetireStagingLocked(signalled, command_buffer, staging);
   }
   image.SetReady(signalled);
   return image;
@@ -1020,32 +1080,15 @@ inline Packet Download(const Image& image) {
   // 生命周期(防 use-after-free):staging buffer/memory 与命令缓冲在**读回之后**才登记进
   // 延迟回收表 —— 在此之前它们不在 retired_ 里,别的线程的 ReclaimCompletedLocked 碰不到,
   // 故锁外读回不会被并发回收提前释放。历史上的 use-after-free 正出在「过早登记 + 锁外访问」。
-  // 池化候选:与 Upload 的 staging 分支一样,这里每帧新建 buffer + vkAllocateMemory 再丢掉。
-  VkBuffer staging = VK_NULL_HANDLE;
-  VkDeviceMemory staging_memory = VK_NULL_HANDLE;
-  VkBufferCreateInfo staging_info{};
-  staging_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-  staging_info.size = bytes;
-  staging_info.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;  // 拷贝的**目的**(Upload 那边是 SRC)
-  Check(vkCreateBuffer(context->device(), &staging_info, nullptr, &staging), "vkCreateBuffer");
-  VkMemoryRequirements requirements{};
-  vkGetBufferMemoryRequirements(context->device(), staging, &requirements);
-  VkMemoryAllocateInfo allocate{};
-  allocate.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-  allocate.allocationSize = requirements.size;
-  allocate.memoryTypeIndex =
-      context->FindMemoryType(requirements.memoryTypeBits,
-                              VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-                                  VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-  Check(vkAllocateMemory(context->device(), &allocate, nullptr, &staging_memory),
-        "vkAllocateMemory");
-  Check(vkBindBufferMemory(context->device(), staging, staging_memory, 0), "vkBindBufferMemory");
-
+  // 池化:与 Upload 一样,staging 从池 best-fit 复用、回读完毕后归还池(见
+  // Context::AcquireStagingLocked / RetireStagingLocked),避免每帧新建 + vkAllocateMemory。
+  Context::StagingSlot staging;
   uint64_t signalled = 0;
   VkCommandBuffer command_buffer = VK_NULL_HANDLE;
   {
     std::lock_guard<std::mutex> guard(context->submit_mutex());
     context->ReclaimCompletedLocked();
+    staging = context->AcquireStagingLocked(bytes);  // usage 含 TRANSFER_DST,可作拷贝目的
     context->AllocateCommandLocked(&command_buffer);
     VkCommandBufferBeginInfo begin{};
     begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
@@ -1053,7 +1096,7 @@ inline Packet Download(const Image& image) {
     Check(vkBeginCommandBuffer(command_buffer, &begin), "vkBeginCommandBuffer");
     VkBufferCopy region{};
     region.size = bytes;
-    vkCmdCopyBuffer(command_buffer, image.buffer(), staging, 1, &region);
+    vkCmdCopyBuffer(command_buffer, image.buffer(), staging.buffer, 1, &region);
     Check(vkEndCommandBuffer(command_buffer), "vkEndCommandBuffer");
     // 设备侧等生产者的时间线值:等待目的阶段必须是 TRANSFER(拷贝就发生在这一阶段),
     // 用默认的 COMPUTE_SHADER 会漏掉这次拷贝、读到半成品。见 SubmitLocked。
@@ -1061,22 +1104,17 @@ inline Packet Download(const Image& image) {
                                       VK_PIPELINE_STAGE_TRANSFER_BIT);
   }
 
-  // GPU→CPU 边界:等这次回读拷贝完成,再读 staging。staging 尚未登记回收、且为本调用私有,
-  // 故锁外读取安全。
+  // GPU→CPU 边界:等这次回读拷贝完成,再读 staging。staging 已出池、尚未登记回收、且为本
+  // 调用私有,故锁外读取安全(与新建时同一不变量:未登记 ⇒ 并发回收碰不到)。
   context->WaitTimeline(signalled);
-  detail::CopyMapped(context, staging_memory, out.data, bytes, /*to_device=*/false,
+  detail::CopyMapped(context, staging.memory, out.data, bytes, /*to_device=*/false,
                      /*coherent=*/true);  // staging 按 HOST_COHERENT 分配,无需 invalidate
 
-  // 读完了,现在才把 staging 与命令缓冲交给延迟回收(时间线已过 signalled,下一次
-  // ReclaimCompletedLocked 即回收)。
+  // 读完了,现在才把 staging 与命令缓冲交给延迟回收:时间线已过 signalled,下一次
+  // ReclaimCompletedLocked 就把 staging **归还池**复用。
   {
     std::lock_guard<std::mutex> guard(context->submit_mutex());
-    Context::Retired retired;
-    retired.value = signalled;
-    retired.command_buffer = command_buffer;
-    retired.buffer = staging;
-    retired.memory = staging_memory;
-    context->RetireLocked(retired);
+    context->RetireStagingLocked(signalled, command_buffer, staging);
     context->ReclaimCompletedLocked();
   }
   return packet;
