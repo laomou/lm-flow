@@ -10,6 +10,27 @@ to each GitHub Release.
 
 ## [Unreleased]
 
+### Added
+
+- **Vulkan adapter: GPU→CPU staging read-back (`lmflow::vk::Download`).** Device-only memory — a
+  device with no `DEVICE_LOCAL|HOST_VISIBLE` type, i.e. the classic discrete-GPU case — now reads
+  back by copying the device buffer through a host-visible staging buffer, mirroring the existing
+  upload staging path in reverse (device → staging → host). The full GPU→CPU round trip therefore
+  works on such devices. `Context::SubmitLocked` gained an optional wait-stage argument so the
+  read-back copy waits on the producer at the `TRANSFER` stage; existing compute submits are
+  unchanged. The staging upload/read-back code paths are now exercised on unified-memory devices
+  (including CI's lavapipe) via `LMFLOW_VK_FORCE_STAGING=1`, with a second ctest
+  (`lmflow_vulkan_resize_test_staging`) asserting byte-identical results to the direct-map path.
+  The hardware precondition — a device that truly lacks a host-visible memory type — remains
+  unverified and still requires real discrete-GPU hardware.
+
+### Changed
+
+- **Vulkan adapter: `VkDownload` no longer fails at `Open` on device-only memory.** With staging
+  read-back implemented — and guaranteed feasible, since the Vulkan spec requires at least one
+  `HOST_VISIBLE|HOST_COHERENT` memory type — the previous "staging read-back path is not
+  implemented" rejection is removed.
+
 ## [0.3.1] — 2026-08-18
 
 ### Changed

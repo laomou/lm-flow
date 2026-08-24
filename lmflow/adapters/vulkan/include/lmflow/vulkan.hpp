@@ -21,9 +21,9 @@
  *      **CPU 线程不阻塞**;只有 Download 做主机侧等待。
  *
  *   3. 显存要自己选堆。若存在同时 DEVICE_LOCAL 且 HOST_VISIBLE 的内存类型,上传/下载
- *      直接映射,**零拷贝**;否则 Upload 退回 staging buffer + 队列拷贝,而
- *      **Download 的 staging 回读尚未实现** —— 那类设备上 `VkDownload` 会在 **Open 期**
- *      就明确失败,不会跑到出帧时才抛。
+ *      直接映射,**零拷贝**;否则 Upload 与 Download 各自退回 staging buffer + 队列拷贝
+ *      (Upload:host→staging→device;Download:device→staging→host),两侧对称。完整
+ *      GPU→CPU 回路在这类设备上也可用,`VkDownload` 不再有 Open 期门禁。
  *
  *      ⚠ 别把「否则」读成「独显」。判据只是「**存不存在**这样一个内存类型」。
  *      **已实测**:18 台移动 GPU 与 llvmpipe 全部存在,故一律走映射路径。
@@ -33,6 +33,11 @@
  *      若该推断成立,staging 分支的触发条件就是「设备完全没有 DEVICE_LOCAL|HOST_VISIBLE
  *      类型」,比「独显」窄得多;若不成立,则独显会走 staging,那条路的重要性要重估。
  *      拿到一台驱动正常的独显时,请以实测为准(详见 Upload 里的标注)。
+ *
+ *      staging 两条路的**代码逻辑**可在统一内存设备上被强制执行并逐字节校验:置环境变量
+ *      `LMFLOW_VK_FORCE_STAGING=1`(见 detail::ForceStagingForTest),CI 的 lavapipe 即
+ *      覆盖 device→staging→host 拷贝、时间线同步与延迟回收。但「真有一台没有该内存类型的
+ *      设备」这一**硬件前置条件**仍未实测 —— 触发它需要真机。
  *
  *      独显上真正要留意的反而是另一件事:既然会挑中那个 host-visible 类型,所有中间
  *      compute buffer 就都落进 BAR 窗口 —— 无 ReBAR 时只有 256 MB(几个 24 MB 的中间
@@ -93,6 +98,7 @@
 
 #include <vulkan/vulkan.h>
 
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <mutex>
@@ -339,7 +345,13 @@ class Context {
 
   /// 提交一个已记录好的命令缓冲:等待上一个时间线值,签发新值。
   /// 调用方须持有 submit_mutex()。返回本次签发的值。
-  uint64_t SubmitLocked(VkCommandBuffer command_buffer, uint64_t wait_value) {
+  ///
+  /// `wait_stage` 是**信号量等待的目的阶段掩码** —— 只有该掩码里的阶段才被 `wait_value`
+  /// 挡住。compute dispatch 用默认的 COMPUTE_SHADER;而 device→staging 的**拷贝**提交必须
+  /// 传 TRANSFER,否则那次 vkCmdCopyBuffer 不在 COMPUTE_SHADER 作用域内、根本不等生产者,
+  /// 会读到半成品(见 Download 的 staging 分支)。
+  uint64_t SubmitLocked(VkCommandBuffer command_buffer, uint64_t wait_value,
+                        VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT) {
     const uint64_t signal_value = ++timeline_value_;
     VkTimelineSemaphoreSubmitInfo timeline{};
     timeline.sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
@@ -348,7 +360,6 @@ class Context {
     timeline.signalSemaphoreValueCount = 1;
     timeline.pSignalSemaphoreValues = &signal_value;
 
-    const VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
     VkSubmitInfo submit{};
     submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
     submit.pNext = &timeline;
@@ -563,6 +574,29 @@ class Context {
   std::unordered_map<std::string, Program> programs_;
 };
 
+namespace detail {
+
+/// 测试专用开关:环境变量 `LMFLOW_VK_FORCE_STAGING` 非空且不是 "0" 时,`Image::Allocate`
+/// 把分配出来的 Image 一律**当作 device-only 显存对待**(host_visible/cached/coherent 置
+/// 假),从而在统一内存设备上也能走到 staging 上传/回读路径。
+///
+/// 为什么需要它:staging 分支只在「设备完全没有 DEVICE_LOCAL|HOST_VISIBLE 内存类型」时
+/// 才自然触发,而实测 18 台移动 GPU 与 llvmpipe/lavapipe **全都有**这样的类型,自然分配
+/// 永远到不了 staging。这个缝把「走哪条路」与「设备支不支持」解耦,让 device→staging 的
+/// 拷贝、时间线同步与延迟回收这**整套机器**能在统一内存设备(含 CI)上被真实执行、逐字节
+/// 校验。它**只改变本 Image 如何被对待,不改底层显存类型** —— 底层仍是 host-visible,
+/// 故拷贝照常成立,只是刻意不走直接映射。**它证明不了**「真独显上确实没有该内存类型」这一
+/// 硬件前置条件;那仍需一台真机(见文件头第 3 点)。
+inline bool ForceStagingForTest() {
+  static const bool forced = [] {
+    const char* value = std::getenv("LMFLOW_VK_FORCE_STAGING");
+    return value != nullptr && value[0] != '\0' && !(value[0] == '0' && value[1] == '\0');
+  }();
+  return forced;
+}
+
+}  // namespace detail
+
 /// 驻留设备的负载(storage buffer)。
 ///
 /// 这是 GPU 段之间流动的 payload 类型。它**不是** LMFlowBuffer —— 端口类型检查会在
@@ -668,6 +702,13 @@ class Image {
     image.host_visible_ = (picked & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) != 0;
     image.host_cached_ = (picked & VK_MEMORY_PROPERTY_HOST_CACHED_BIT) != 0;
     image.host_coherent_ = (picked & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) != 0;
+    // 测试专用:强制把本 Image 当作 device-only 显存,从而走 staging 上传/回读路径。
+    // 底层显存不变(仍是上面挑中的类型),只是不再当它 host-visible。见 ForceStagingForTest。
+    if (detail::ForceStagingForTest()) {
+      image.host_visible_ = false;
+      image.host_cached_ = false;
+      image.host_coherent_ = false;
+    }
     image.mapped_bytes_ = requirements.size;
     return image;
   }
@@ -849,7 +890,10 @@ inline Image Upload(const std::shared_ptr<Context>& context, const LMFlowBuffer&
     return image;
   }
 
-  // ⚠ 以下 staging 路径**从未在任何测试过的设备上执行过** —— 未验证代码,改动请当心。
+  // ⚠ 以下 staging 路径的**硬件触发条件**(设备完全没有 host-visible 显存)从未在真机上
+  // 出现过;但其**代码逻辑**已可经 `LMFLOW_VK_FORCE_STAGING=1` 在统一内存设备/CI(lavapipe)
+  // 上强制执行并逐字节校验(见文件头第 3 点与 detail::ForceStagingForTest)。改动仍请当心:
+  // 延迟回收是本 adapter 历史 use-after-free 的高发区。
   //
   // 触发条件是 `host_visible()` 为假,也就是**设备完全没有** DEVICE_LOCAL|HOST_VISIBLE
   // 的内存类型。实测 18 台移动 GPU(Adreno 613/710/722/740/810/812/829/830/840/850 与
@@ -865,8 +909,8 @@ inline Image Upload(const std::shared_ptr<Context>& context, const LMFlowBuffer&
   // 分配、一个命令缓冲、一次队列提交和一次延迟回收登记 —— 而本 adapter 历史上的
   // use-after-free 正是出在同一套延迟回收机制里。
   //
-  // 另需注意:即使它被执行,`Download` 在这类设备上也会在 Open 期就被拒(staging 回读
-  // 未实现),故完整 GPU→CPU 回路仍不可用;只有纯 GPU 段(上传 + 计算)用得到它。
+  // 对称地,`Download` 也有 staging 回读分支(device→staging→host),故完整 GPU→CPU 回路
+  // 在这类设备上同样可用,`VkDownload` 不再有 Open 期门禁。
   //
   // staging buffer -> vkCmdCopyBuffer。staging 随本次提交延迟回收。
   VkBuffer staging = VK_NULL_HANDLE;
@@ -919,15 +963,10 @@ inline Image Upload(const std::shared_ptr<Context>& context, const LMFlowBuffer&
 
 /// 把设备负载下载成一个引擎分配的 LMFlowBuffer 包。
 ///
-/// 这是整条链上唯一需要主机等待的地方 —— 先等生产者的时间线值,再读回。
+/// 这是整条链上唯一需要主机等待的地方 —— 先等生产者的时间线值,再读回。两条路:host-visible
+/// 显存直接映射读回;device-only 显存(经典独显)经一个 host-visible staging buffer 回读。
 inline Packet Download(const Image& image) {
   const std::shared_ptr<Context>& context = image.context();
-  // 先判设备能力、再分配输出包:device-only 显存没有回读路径,提前失败也省掉一次白分配。
-  if (!image.host_visible()) {
-    throw std::runtime_error(
-        "flow/vk: Download needs a DEVICE_LOCAL|HOST_VISIBLE memory type; this device has none "
-        "(typical for a discrete GPU) and the staging read-back path is not implemented");
-  }
 
   int64_t shape[kMaxNdim] = {0, 0, 0, 0};
   for (int i = 0; i < image.ndim(); ++i) shape[i] = image.shape(i);
@@ -939,10 +978,83 @@ inline Packet Download(const Image& image) {
   if (packet.IsEmpty()) {
     throw std::runtime_error("flow/vk: lmflow_packet_new_buffer_uninit failed");
   }
+  const size_t bytes = image.byte_size();
 
-  context->WaitTimeline(image.ready());
-  detail::CopyMapped(context, image.memory(), out.data, image.byte_size(), /*to_device=*/false,
-                     image.host_coherent());
+  // host-visible 显存(统一内存/软件实现):等生产者写完,直接映射读回。
+  if (image.host_visible()) {
+    context->WaitTimeline(image.ready());
+    detail::CopyMapped(context, image.memory(), out.data, bytes, /*to_device=*/false,
+                       image.host_coherent());
+    return packet;
+  }
+
+  // device-only 显存(经典独显):没有可映射的地址,经 host-visible staging buffer 回读 ——
+  // 即 Upload staging 路径的**镜像+反向**(device image → staging → host)。
+  //
+  // Vulkan 规范保证每台设备都至少有一个 HOST_VISIBLE|HOST_COHERENT 内存类型,故 staging
+  // 分配恒可成立;因此本分支对任何设备都可用,不再需要 Open 期门禁。
+  //
+  // 生命周期(防 use-after-free):staging buffer/memory 与命令缓冲在**读回之后**才登记进
+  // 延迟回收表 —— 在此之前它们不在 retired_ 里,别的线程的 ReclaimCompletedLocked 碰不到,
+  // 故锁外读回不会被并发回收提前释放。历史上的 use-after-free 正出在「过早登记 + 锁外访问」。
+  VkBuffer staging = VK_NULL_HANDLE;
+  VkDeviceMemory staging_memory = VK_NULL_HANDLE;
+  VkBufferCreateInfo staging_info{};
+  staging_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+  staging_info.size = bytes;
+  staging_info.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;  // 拷贝的**目的**(Upload 那边是 SRC)
+  Check(vkCreateBuffer(context->device(), &staging_info, nullptr, &staging), "vkCreateBuffer");
+  VkMemoryRequirements requirements{};
+  vkGetBufferMemoryRequirements(context->device(), staging, &requirements);
+  VkMemoryAllocateInfo allocate{};
+  allocate.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+  allocate.allocationSize = requirements.size;
+  allocate.memoryTypeIndex =
+      context->FindMemoryType(requirements.memoryTypeBits,
+                              VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                                  VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+  Check(vkAllocateMemory(context->device(), &allocate, nullptr, &staging_memory),
+        "vkAllocateMemory");
+  Check(vkBindBufferMemory(context->device(), staging, staging_memory, 0), "vkBindBufferMemory");
+
+  uint64_t signalled = 0;
+  VkCommandBuffer command_buffer = VK_NULL_HANDLE;
+  {
+    std::lock_guard<std::mutex> guard(context->submit_mutex());
+    context->ReclaimCompletedLocked();
+    context->AllocateCommandLocked(&command_buffer);
+    VkCommandBufferBeginInfo begin{};
+    begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    Check(vkBeginCommandBuffer(command_buffer, &begin), "vkBeginCommandBuffer");
+    VkBufferCopy region{};
+    region.size = bytes;
+    vkCmdCopyBuffer(command_buffer, image.buffer(), staging, 1, &region);
+    Check(vkEndCommandBuffer(command_buffer), "vkEndCommandBuffer");
+    // 设备侧等生产者的时间线值:等待目的阶段必须是 TRANSFER(拷贝就发生在这一阶段),
+    // 用默认的 COMPUTE_SHADER 会漏掉这次拷贝、读到半成品。见 SubmitLocked。
+    signalled = context->SubmitLocked(command_buffer, /*wait_value=*/image.ready(),
+                                      VK_PIPELINE_STAGE_TRANSFER_BIT);
+  }
+
+  // GPU→CPU 边界:等这次回读拷贝完成,再读 staging。staging 尚未登记回收、且为本调用私有,
+  // 故锁外读取安全。
+  context->WaitTimeline(signalled);
+  detail::CopyMapped(context, staging_memory, out.data, bytes, /*to_device=*/false,
+                     /*coherent=*/true);  // staging 按 HOST_COHERENT 分配,无需 invalidate
+
+  // 读完了,现在才把 staging 与命令缓冲交给延迟回收(时间线已过 signalled,下一次
+  // ReclaimCompletedLocked 即回收)。
+  {
+    std::lock_guard<std::mutex> guard(context->submit_mutex());
+    Context::Retired retired;
+    retired.value = signalled;
+    retired.command_buffer = command_buffer;
+    retired.buffer = staging;
+    retired.memory = staging_memory;
+    context->RetireLocked(retired);
+    context->ReclaimCompletedLocked();
+  }
   return packet;
 }
 
@@ -1174,17 +1286,9 @@ class DownloadKernel : public Kernel {
     c.OutputSetBuiltin(0, LMFLOW_TYPE_BUFFER);
   }
 
-  /// 不支持的设备在 **Open 期**就失败:device-only 显存没有 staging 回读路径,与其跑到
-  /// 出帧时才抛,不如让 `graph.start()` 直接报错(「算子应在 Open 里直接失败」见 flow.hpp)。
-  Status Open(lmflow::Context& cc) override {
-    if (!Context::Shared()->unified_memory()) {
-      return cc.Fail(
-          "VkDownload: this device has no DEVICE_LOCAL|HOST_VISIBLE memory type (typical for a "
-          "discrete GPU); the staging read-back path is not implemented");
-    }
-    return Status::Ok();
-  }
-
+  // 任何设备都能下载,故**没有** Open 期门禁:host-visible 显存直接映射回读,device-only
+  // 显存(经典独显)走 staging 回读(见 Download)。早先「device-only 无回读路径 → Open
+  // 失败」的分支已随 staging 回读落地而移除。
   Status Process(lmflow::Context& cc) override {
     Packet input = cc.TakeInput(0);
     const Image* image = input.TryGet<Image>();
