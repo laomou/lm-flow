@@ -595,6 +595,24 @@ inline bool ForceStagingForTest() {
   return forced;
 }
 
+/// 强制 staging 生效时警告一次(每进程一次)。
+///
+/// 这是**编译进生产代码**的运行期开关,只靠环境变量关闭 —— 误设不会有任何功能异常,只是
+/// 每帧多一次 staging 分配 + 一次额外拷贝 + 一次全同步,静默变慢。所以命中时必须留声。
+/// 走 `cc.LogWarn`(即引擎的日志 sink)而不是 stderr:flow.h 明确「不设置回调则引擎静默、
+/// 不抢占 stdout」,库直接往 stderr 写会破坏这条约定。也因此本函数需要一个 Context,
+/// 只能从算子里调 —— `Image::Allocate` 是自由函数,拿不到。
+inline void WarnIfForcedStaging(const lmflow::Context& cc) {
+  if (!ForceStagingForTest()) return;
+  static std::once_flag once;
+  std::call_once(once, [&cc] {
+    cc.LogWarn(
+        "flow/vk: LMFLOW_VK_FORCE_STAGING is set — every Image is treated as device-only, so "
+        "upload and download go through staging buffers. This is a test-only switch; unset it "
+        "for production, where it costs an extra allocation, copy and full sync per frame.");
+  });
+}
+
 }  // namespace detail
 
 /// 驻留设备的负载(storage buffer)。
@@ -913,6 +931,11 @@ inline Image Upload(const std::shared_ptr<Context>& context, const LMFlowBuffer&
   // 在这类设备上同样可用,`VkDownload` 不再有 Open 期门禁。
   //
   // staging buffer -> vkCmdCopyBuffer。staging 随本次提交延迟回收。
+  //
+  // 池化候选:这里每帧都新建 buffer + vkAllocateMemory 再丢掉。Download 的 staging 分支
+  // 同样如此。此前这条路不可达、无所谓;现在它在真独显与 FORCE_STAGING 下会真的每帧执行,
+  // 于是每帧多一次驱动分配(且 vkAllocateMemory 受 maxMemoryAllocationCount 限制)。
+  // 按字节大小分档复用 staging、或持久映射一条 staging ring,都是自然的下一步。
   VkBuffer staging = VK_NULL_HANDLE;
   VkDeviceMemory staging_memory = VK_NULL_HANDLE;
   VkBufferCreateInfo staging_info{};
@@ -997,6 +1020,7 @@ inline Packet Download(const Image& image) {
   // 生命周期(防 use-after-free):staging buffer/memory 与命令缓冲在**读回之后**才登记进
   // 延迟回收表 —— 在此之前它们不在 retired_ 里,别的线程的 ReclaimCompletedLocked 碰不到,
   // 故锁外读回不会被并发回收提前释放。历史上的 use-after-free 正出在「过早登记 + 锁外访问」。
+  // 池化候选:与 Upload 的 staging 分支一样,这里每帧新建 buffer + vkAllocateMemory 再丢掉。
   VkBuffer staging = VK_NULL_HANDLE;
   VkDeviceMemory staging_memory = VK_NULL_HANDLE;
   VkBufferCreateInfo staging_info{};
@@ -1269,6 +1293,12 @@ class UploadKernel : public Kernel {
     c.OutputSet<Image>(0);
   }
 
+  /// 只做一件事:强制 staging 开着时留个声。**不做任何门禁** —— 任何设备都能上传。
+  Status Open(lmflow::Context& cc) override {
+    detail::WarnIfForcedStaging(cc);
+    return Status::Ok();
+  }
+
   Status Process(lmflow::Context& cc) override {
     Packet input = cc.TakeInput(0);
     LMFlowBuffer buffer{};
@@ -1288,7 +1318,12 @@ class DownloadKernel : public Kernel {
 
   // 任何设备都能下载,故**没有** Open 期门禁:host-visible 显存直接映射回读,device-only
   // 显存(经典独显)走 staging 回读(见 Download)。早先「device-only 无回读路径 → Open
-  // 失败」的分支已随 staging 回读落地而移除。
+  // 失败」的分支已随 staging 回读落地而移除。下面这个 Open 只负责告警,不拒绝任何设备。
+  Status Open(lmflow::Context& cc) override {
+    detail::WarnIfForcedStaging(cc);
+    return Status::Ok();
+  }
+
   Status Process(lmflow::Context& cc) override {
     Packet input = cc.TakeInput(0);
     const Image* image = input.TryGet<Image>();
