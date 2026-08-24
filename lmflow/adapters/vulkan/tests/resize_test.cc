@@ -5,6 +5,7 @@
 // 参考实现与 kernel 用同一套约定 `src = (dst + 0.5) * scale - 0.5`,逐点比对。
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <string>
 #include <vector>
 
@@ -156,7 +157,10 @@ int main() {
     return 0;
   }
 
-  std::printf("VkResize 数值对照 CPU 参考(半像素中心双线性):\n");
+  const char* forced = std::getenv("LMFLOW_VK_FORCE_STAGING");
+  const bool staging = forced != nullptr && forced[0] != '\0' && forced[0] != '0';
+  std::printf("VkResize 数值对照 CPU 参考(半像素中心双线性)%s:\n",
+              staging ? " [LMFLOW_VK_FORCE_STAGING=1:强制 staging 上传/回读]" : "");
   RunCase("缩小 2D 8x8 -> 4x4", 8, 8, 1, 4, 4);
   RunCase("放大 2D 4x4 -> 9x7", 4, 4, 1, 9, 7);
   RunCase("缩小 3D 16x16x3 -> 5x5x3", 16, 16, 3, 5, 5);

@@ -49,6 +49,14 @@ if(LMFLOW_BUILD_VULKAN_ADAPTER AND LMFLOW_BUILD_TESTS
   target_link_libraries(lmflow_vulkan_resize_test PRIVATE lmflow::vulkan_kernels)
   add_dependencies(lmflow_vulkan_resize_test flow_engine)
   add_test(NAME lmflow_vulkan_resize_test COMMAND lmflow_vulkan_resize_test)
+
+  # 同一个 resize 用例在 LMFLOW_VK_FORCE_STAGING=1 下重跑:强制把每个 Image 当作 device-only
+  # 显存,从而走 staging 上传(host→staging→device)与 staging 回读(device→staging→host)
+  # 路径(见 vulkan.hpp detail::ForceStagingForTest)。数值应与直接映射路径**完全一致** ——
+  # 这是在统一内存设备/lavapipe 上对 staging 回读逻辑(拷贝+时间线同步+延迟回收)的逐字节校验。
+  add_test(NAME lmflow_vulkan_resize_test_staging COMMAND lmflow_vulkan_resize_test)
+  set_tests_properties(lmflow_vulkan_resize_test_staging PROPERTIES
+    ENVIRONMENT "LMFLOW_VK_FORCE_STAGING=1")
 endif()
 
 if(LMFLOW_BUILD_VULKAN_ADAPTER AND LMFLOW_BUILD_BENCHMARKS
