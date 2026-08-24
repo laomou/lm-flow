@@ -19,8 +19,10 @@ to each GitHub Release.
   works on such devices. `Context::SubmitLocked` gained an optional wait-stage argument so the
   read-back copy waits on the producer at the `TRANSFER` stage; existing compute submits are
   unchanged. The staging upload/read-back code paths are now exercised on unified-memory devices
-  (including CI's lavapipe) via `LMFLOW_VK_FORCE_STAGING=1`, with a second ctest
-  (`lmflow_vulkan_resize_test_staging`) asserting byte-identical results to the direct-map path.
+  (including CI's lavapipe) via `LMFLOW_VK_FORCE_STAGING=1`, where a second ctest
+  (`lmflow_vulkan_resize_test_staging`) re-runs the same resize cases with staging forced and
+  checks them against the same CPU reference as the direct-map run, so both paths are validated
+  against one oracle.
   The hardware precondition — a device that truly lacks a host-visible memory type — remains
   unverified and still requires real discrete-GPU hardware.
 
