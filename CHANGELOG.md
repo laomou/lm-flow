@@ -33,6 +33,19 @@ to each GitHub Release.
   `HOST_VISIBLE|HOST_COHERENT` memory type — the previous "staging read-back path is not
   implemented" rejection is removed.
 
+### Fixed
+
+- **Output poller could silently drop tail packets at end-of-stream under load.** `Poller::next`
+  (and `try_next`) treated an edge's `closed` flag as "the queue is empty" and returned `None`
+  without a final drain. But `closed` only latches "no more packets will be *enqueued*": a producer
+  can enqueue the last packet(s) and close the edge in the window between the poller's empty `pop`
+  and its `closed` check, so a consumer preempted in that window (common on a busy/few-core machine)
+  abandoned packets that were already queued. The closed branch now does a final `pop`, mirroring
+  the existing idle branch. This is the root cause of the rare
+  `peak_queue_depth_is_a_high_water_mark` flake observed on the macOS CI runner; a contended
+  regression test (`blocking_next_drains_tail_when_edge_closes_mid_drain`) drops packets without
+  the fix and passes with it.
+
 ## [0.3.1] — 2026-08-18
 
 ### Changed

@@ -169,6 +169,55 @@ output_ports: ["out"]
     assert_eq!(got, (0..N).collect::<Vec<_>>(), "order must be preserved");
 }
 
+/// 回归:阻塞 `next()` 在**边关闭**与**尾包入队**同时发生时,必须先把队列排空,
+/// 不能一看到 `closed` 就返回 `None` 把尾包丢掉。
+///
+/// `closed` 是「不会再有入队」的门闩,**不是**「队列已空」。生产者可能在消费者
+/// 「pop 到空」与「读到 `closed`」这两步之间,把最后一批包入队并关边(繁忙机器上
+/// 消费者恰在此处被抢占)。早先 `next()` 在这一刻直接 `Ok(None)`,静默丢尾包 ——
+/// 只在 CPU 紧张时偶发(如 `peak_queue_depth_is_a_high_water_mark` 在 macOS CI 上的
+/// 偶发失败)。这里用**边跑边排空**(不先 `wait_done`)重复多轮制造那个窗口;
+/// 用 2 线程池 + 宿主排空线程,在少核机器上竞争最激烈。
+#[test]
+fn blocking_next_drains_tail_when_edge_closes_mid_drain() {
+    init();
+    const N: usize = 6;
+    const ROUNDS: usize = 4000;
+    for round in 0..ROUNDS {
+        let graph = Graph::from_yaml(
+            r#"
+executors:
+  - { name: "pool", type: "ThreadPoolExecutor", num_threads: 2 }
+nodes:
+  - { name: "a", kernel: "PassThrough", executor: "pool", input_ports: ["in"],  output_ports: ["mid"] }
+  - { name: "b", kernel: "PassThrough", executor: "pool", input_ports: ["mid"], output_ports: ["out"] }
+input_ports: ["in"]
+output_ports: ["out"]
+"#,
+        )
+        .unwrap();
+        let poller = graph.add_poller("out").unwrap();
+        graph.start().unwrap();
+        let input = graph.input("in").unwrap();
+        for i in 0..N {
+            input
+                .send(Packet::new(i as i32).at(Timestamp(i as i64)))
+                .unwrap();
+        }
+        graph.close_all_inputs();
+        // 关键:边跑边用阻塞 next() 排空(不先 wait_done),让 pop 与「生产者入队 + 关边」竞争。
+        let mut got = 0usize;
+        while poller.next().is_some() {
+            got += 1;
+        }
+        graph.wait_done_timeout(Duration::from_secs(30)).unwrap();
+        assert_eq!(
+            got, N,
+            "round {round}: next() 丢了尾包(closed 门闩被当成「队列已空」)"
+        );
+    }
+}
+
 /// 默认节点确实跑在**别的线程**上 —— 而不是静默退回主线程。
 ///
 /// 用 Rust 的 observer 回调(**按图**注册)取代全局日志:回调在派发该包的线程上

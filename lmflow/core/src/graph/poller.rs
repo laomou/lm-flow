@@ -391,7 +391,14 @@ impl Poller {
                 return Err(error);
             }
             if self.inner.closed.load(Ordering::SeqCst) {
-                return Ok(None);
+                // `closed` is a latch meaning "no more packets will be *enqueued*" — NOT
+                // "the queue is empty". A producer can enqueue the final packet(s) and then
+                // close the edge in the window between the `pop` at the top of this loop and
+                // this check (e.g. this thread is preempted right here on a busy machine).
+                // Drain with a fresh `pop` — mirroring the idle branch below — so end-of-stream
+                // never abandons a packet that landed in that window. Returning `None` here
+                // unconditionally silently drops those packets.
+                return Ok(self.inner.pop(&self.graph));
             }
             if self.graph.pump_step() {
                 continue;
@@ -420,7 +427,10 @@ impl Poller {
             return Err(error);
         }
         if self.inner.closed.load(Ordering::SeqCst) {
-            return Ok(None);
+            // `closed` latches "no more enqueues", not "queue empty": a producer may enqueue
+            // and close between the `pop` above and this load. Re-pop so end-of-stream never
+            // drops that packet (see `next_deadline`).
+            return Ok(self.inner.pop(&self.graph));
         }
         Ok(None)
     }
