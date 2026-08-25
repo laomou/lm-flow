@@ -889,7 +889,7 @@ thread; dequeue resumes the pending flush. Do not combine `input_queues` limits 
 participate in capacity enforcement.
 
 Graph fields: `executors`, `nodes`, `subgraphs`, `include`, `input_ports`, `output_ports`,
-`max_queue_size`, `max_queued_packets`, `watchdog_ms`, `stats`.
+`max_queue_size`, `max_queued_packets`, `watchdog_ms`, `stats`, `trace_capacity`.
 
 ### Input policies
 
@@ -1060,9 +1060,10 @@ output.
 
 `stats` selects runtime diagnostics: `basic` (default) keeps low-cost state, throughput, queue, and
 backpressure counters; `full` additionally records callback timing, latency percentiles, CoW copies,
-and executor timing; `off` keeps only state required for correct scheduling. Because the watchdog
-depends on callback timing, setting `watchdog_ms > 0` forces `full` and logs an INFO line explaining
-why. Legacy `stats_timing: true/false` remains accepted as `full/basic`.
+and executor timing; `off` keeps only state required for correct scheduling. Because both the
+watchdog and the per-invocation trace depend on callback timing, setting `watchdog_ms > 0` or
+`trace_capacity > 0` forces `full` and logs an INFO line naming which one did it. Legacy
+`stats_timing: true/false` remains accepted as `full/basic`.
 
 ## Logging
 

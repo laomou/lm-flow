@@ -144,6 +144,9 @@ pub struct GraphShared {
     total_queued_bytes: AtomicU64,
     /// 算子自报计数器
     counters: Mutex<BTreeMap<String, i64>>,
+    /// 逐次调用 trace 的有界事件环。`config.trace_capacity > 0` 时为 `Some`;`None` 时
+    /// 热路径零开销(scheduler 连时钟都不读)。
+    trace: Option<crate::trace::TraceRing>,
     pub strings: CStrArena,
 }
 
@@ -151,6 +154,8 @@ impl GraphShared {
     pub fn new(config: GraphConfig) -> Self {
         Self {
             buffer_pool: std::sync::Arc::new(BufferPool::new(config.buffer_pool_max_bytes)),
+            trace: (config.trace_capacity > 0)
+                .then(|| crate::trace::TraceRing::new(config.trace_capacity)),
             config,
             error: Mutex::new(None),
             error_c: CStrArena::default(),
@@ -193,6 +198,39 @@ impl GraphShared {
         self.total_queued_bytes.store(0, Ordering::Relaxed);
         // 算子自报计数器:新一轮从零计(诊断语义;要跨轮累计的宿主自己在算子里存)。
         self.counters.lock().expect("counter lock poisoned").clear();
+        // trace 环:新一轮从零记(与计数器同语义)。容量与开关不变。
+        if let Some(trace) = &self.trace {
+            trace.clear();
+        }
+    }
+
+    /// trace 是否开启(`config.trace_capacity > 0`)。热路径据此决定是否读时钟/记 span。
+    #[inline]
+    pub fn trace_enabled(&self) -> bool {
+        self.trace.is_some()
+    }
+
+    /// 记一条 trace span(仅在开启时)。`node` 为节点索引,时间相对图 epoch,单位微秒。
+    #[inline]
+    pub fn record_trace(
+        &self,
+        node: u32,
+        phase: crate::trace::TracePhase,
+        start_us: i64,
+        dur_us: i64,
+        input_ts: i64,
+    ) {
+        if let Some(trace) = &self.trace {
+            trace.record(node, phase, start_us, dur_us, input_ts);
+        }
+    }
+
+    /// 当前 trace 环内容的快照(未开启时为空)。
+    pub fn trace_snapshot(&self) -> Vec<crate::trace::TraceEvent> {
+        self.trace
+            .as_ref()
+            .map(|t| t.snapshot())
+            .unwrap_or_default()
     }
 
     pub fn has_error(&self) -> bool {

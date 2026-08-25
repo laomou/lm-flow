@@ -844,6 +844,11 @@ const char* lmflow_graph_node_input_port_name(
  * ⚠ 引擎**无法中断**卡住的算子(与 cancel 同理,没有抢占)。这一层能做的只有
  *   「让你看见」;真正的修复是算子自身要有超时逻辑。
  *
+ * 若要逐次调用的**时间线**(而非上面这些聚合值),在 YAML 顶层配:
+ *     trace_capacity: 4096  # 有界事件环容量(条数, 0 = 关闭)
+ * 开启后每次 Open/Process/Close 记一条 span,经 lmflow_graph_to_chrome_trace() 导出成
+ * chrome://tracing / perfetto 可读的 JSON。开启会强制统计为 full,故不宜在稳态生产长开。
+ *
  * struct_size 约定:调用方**必须**填 sizeof(LMFlowNodeStats)。引擎写出完整结构体,
  * 故 struct_size 小于引擎的 sizeof 时会**明确失败**(返回 false + 置错误),而不是越界写坏
  * 调用方的缓冲 —— 换句话说它是**溢出护栏**:统计项增加后,老宿主重编即可(拿到的是
@@ -914,6 +919,14 @@ typedef enum {
  * 返回值同 dump:存放于线程局部缓冲,生命周期至本线程下次调用本函数,调用方不得 free。
  * 非法 view 返回空串并设置 last_error。 */
 const char* lmflow_graph_to_dot_view(LMFlowGraph*, LMFlowDotView view);
+/* 逐次调用 trace 的导出:Chrome Trace Event Format 的 JSON(chrome://tracing / perfetto
+ * 可直接打开),从而看到「哪个节点在什么时刻、在哪个线程上跑了多久」的时间线。
+ *
+ * 需在 YAML 顶层配 `trace_capacity: N`(条数, 0 = 关闭)开启:开启时每次 Open/Process/Close
+ * 回调记一条 span 进有界环(满了丢最旧),并**强制**统计提升为 full(需每次回调计时);
+ * 未开启时返回一个合法的空 trace(`{"traceEvents":[],...}`)。
+ * 返回值同 dump:存放于线程局部缓冲,生命周期至本线程下次调用本函数,调用方不得 free。 */
+const char* lmflow_graph_to_chrome_trace(LMFlowGraph*);
 /* 指定边的当前积压包数;端口不存在返回 LMFLOW_INVALID_ID。 */
 size_t lmflow_graph_queue_depth(LMFlowGraph*, const char* port);
 

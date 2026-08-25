@@ -47,6 +47,19 @@ impl GraphInner {
         })
     }
 
+    /// 导出当前 trace 环内容为 Chrome Trace Event Format 的 JSON(chrome://tracing /
+    /// perfetto 可直接打开)。未开启 trace(`trace_capacity == 0`)时返回一个合法的空
+    /// trace(`{"traceEvents":[],...}`)。多次调用返回环的当前快照,互不影响。
+    pub fn to_chrome_trace(&self) -> String {
+        let events = self.shared.trace_snapshot();
+        let labels: Vec<(String, String)> = self
+            .nodes
+            .iter()
+            .map(|n| (n.name.clone(), n.kernel_name.clone()))
+            .collect();
+        crate::trace::to_chrome_trace_json(&events, &labels)
+    }
+
     pub(super) fn input_queue_stats(
         &self,
         node_id: usize,

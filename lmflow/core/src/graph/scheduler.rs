@@ -1065,7 +1065,8 @@ impl GraphInner {
         }
         // 直接交出 UnsafeCell 内部指针:不构造 Rust 引用,故与回调内
         // 从该指针造出的 `&mut Context` 不冲突(该槽此刻由本调用独占持有)。
-        let ctx_ptr = node.ctxs[slot].get() as *mut c_void;
+        let ctx_cell = node.ctxs[slot].get();
+        let ctx_ptr = ctx_cell as *mut c_void;
         // 记账全走原子:改造前这里每次调用要拿 2 次 running_timing 锁 + 1 次 stats 锁
         // (再加 run_node 里的 processed 一次)。R1 要求「调算子时不持任何引擎锁」——
         // 原子天然满足,也顺带把 4 对 mutex 从每包热路径上去掉了。
@@ -1113,6 +1114,21 @@ impl GraphInner {
         node.stats.in_flight.fetch_sub(1, Ordering::Relaxed);
         let Some(t0) = started else { return rc }; // 计时关闭:统计与 watchdog 都不适用
         let us = t0.elapsed().as_micros() as i64;
+        // 逐次调用 trace:记录本次回调的 span(所有阶段,不只 Process)。仅在开启时;
+        // 关闭时 record_trace 内部立即返回,且上面若非 full 也不会读到这里。
+        if self.shared.trace_enabled() {
+            let start_us = t0.saturating_duration_since(self.epoch).as_micros() as i64;
+            // input_ts = 本次激活的对齐时间戳。回调只读它、且本槽此刻独占,故安全读;
+            // Open/Close 阶段可能是 UNSET 哨兵。
+            let input_ts = unsafe { (*ctx_cell).input_ts.0 };
+            let tphase = match phase {
+                KernelPhase::Open => crate::trace::TracePhase::Open,
+                KernelPhase::Process => crate::trace::TracePhase::Process,
+                KernelPhase::Close => crate::trace::TracePhase::Close,
+            };
+            self.shared
+                .record_trace(n as u32, tphase, start_us, us, input_ts);
+        }
         if matches!(phase, KernelPhase::Process) {
             node.stats.total_us.fetch_add(us, Ordering::Relaxed);
             node.stats.max_us.fetch_max(us, Ordering::Relaxed);

@@ -422,6 +422,13 @@ impl Graph {
         self.to_dot_with_view(DotView::Diagnostics)
     }
 
+    /// 导出当前 trace 环内容为 Chrome Trace Event Format 的 JSON(chrome://tracing /
+    /// perfetto 可直接打开)。需在建图时设 `trace_capacity > 0`;未开启时返回合法的空
+    /// trace。见 [`GraphInner::to_chrome_trace`]。
+    pub fn to_chrome_trace(&self) -> String {
+        self.inner.to_chrome_trace()
+    }
+
     pub fn node_stats(&self, i: usize) -> Option<NodeStatsSnapshot> {
         self.inner.node_stats(i)
     }
