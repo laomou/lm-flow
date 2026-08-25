@@ -121,42 +121,85 @@ class Context {
   /// 故「设参 + 入队」整段由这把锁保护。GPU 算子跑在普通线程池上,可能并发进入。
   std::mutex& enqueue_mutex() { return enqueue_mutex_; }
 
-  /// 一个可复用的计算 buffer(Image 的设备缓冲)。`capacity` 是创建时的字节大小,
-  /// 复用要求 `capacity >= 请求字节数`;`host_mapped` 记录是否以 CL_MEM_ALLOC_HOST_PTR
-  /// 分配 —— 统一内存才有,是 DownloadMapped 的前提,故不能与普通 buffer 混池。
+  /// 一个可复用的计算 buffer(Image 的设备缓冲)。
+  ///
+  /// `capacity` 是**创建时**的字节大小。它必须由 Image 一路带着传回来,不能在归还时用
+  /// `byte_size()` 重算:一块大 buffer 被小请求复用过之后逻辑大小就小于真实容量了,拿它当
+  /// 容量记录会让记录单调变小 —— 大请求再也匹配不上,而那块大内存仍占着槽位,池逐步退化成
+  /// 纯开销。
+  ///
+  /// `flags` 是创建时**实际生效**的 cl_mem_flags,复用要求**完全相等**。只比
+  /// CL_MEM_ALLOC_HOST_PTR 远远不够:`Image::Allocate` 的 flags 是公开、调用方可控的参数
+  /// (adapter 头的定位就是宿主自己写算子),宿主用 CL_MEM_READ_ONLY 分配的 buffer 若被一次
+  /// 默认 READ_WRITE 请求复用去当 kernel 输出,按 OpenCL 规范是未定义行为,而且完全静默;
+  /// CL_MEM_HOST_NO_ACCESS 被复用后 clEnqueueReadBuffer 直接非法。host_mapped 也由它推出。
   struct ImageSlot {
     cl_mem mem = nullptr;
     size_t capacity = 0;
-    bool host_mapped = false;
+    cl_mem_flags flags = 0;
   };
+
+  /// 池的两个上限,都是**天花板而非目标**:池只持有实际被归还过的 buffer。条目数挡住句柄
+  /// 累积;字节数挡住大帧下的常驻**设备内存** —— 8 个 24MB 的帧就是 192MB,对移动端不可
+  /// 忽略,而单看条目数对此毫无感知。两者取先到者。
+  static constexpr size_t kMaxPooledSlots = 8;
+  static constexpr size_t kMaxPooledBytes = size_t{256} << 20;
+
+  /// 池的命中统计。稳态尺寸下 `allocations` 应当停止增长 —— 这是池化唯一的收益指标。
+  struct PoolStats {
+    uint64_t allocations = 0;
+    uint64_t reuses = 0;
+    size_t slots = 0;
+    size_t bytes = 0;
+  };
+  PoolStats image_pool_stats() {
+    std::lock_guard<std::mutex> guard(pool_mutex_);
+    return {pool_allocations_, pool_reuses_, image_pool_.size(), pool_bytes_};
+  }
 
   /// Image 池的互斥锁。与 enqueue_mutex_ 分开:Allocate/Reset 可能在任何线程触发
   /// (Reset 常落在包释放回调上,不在入队上下文),池只保护自己的 vector。
   std::mutex& pool_mutex() { return pool_mutex_; }
 
-  /// 从池里取一块容量 >= `bytes`、host_mapped 与 `want_host_mapped` 一致的 buffer(best-fit)。
+  /// 从池里 best-fit 取一块容量 >= `bytes`、且 flags 与 `want_flags` **完全相等**的 buffer。
   /// 命中返回 true 并写 `*out`(该 buffer 已出池、为本调用私有);否则返回 false。
   /// 调用方须持有 pool_mutex()。
-  bool TryAcquireImageLocked(size_t bytes, bool want_host_mapped, cl_mem* out) {
+  bool TryAcquireImageLocked(size_t bytes, cl_mem_flags want_flags, ImageSlot* out) {
     size_t best = SIZE_MAX;
     for (size_t i = 0; i < image_pool_.size(); ++i) {
       const ImageSlot& slot = image_pool_[i];
-      if (slot.capacity < bytes || slot.host_mapped != want_host_mapped) continue;
+      if (slot.capacity < bytes || slot.flags != want_flags) continue;
       if (best == SIZE_MAX || slot.capacity < image_pool_[best].capacity) best = i;
     }
     if (best == SIZE_MAX) return false;
-    *out = image_pool_[best].mem;
+    *out = image_pool_[best];
+    pool_bytes_ -= out->capacity;
     image_pool_[best] = image_pool_.back();
     image_pool_.pop_back();
+    ++pool_reuses_;
     return true;
   }
 
-  /// 把一块 buffer 归还池(替代 clReleaseMemObject)。池满则照旧释放。调用方须持有 pool_mutex()。
+  /// 记一次新建(未命中池)。调用方须持有 pool_mutex()。
+  void NoteImageAllocationLocked() { ++pool_allocations_; }
+
+  /// 把一块 buffer 归还池(替代 clReleaseMemObject)。调用方须持有 pool_mutex()。
+  ///
+  /// 超限时淘汰**容量最小的那一个** —— 有可能正是刚归还的这个,那也对。反过来(无条件丢掉
+  /// 新来者、留住已有的那几个)在尺寸单调增长的负载下会让池彻底失效:池被一堆再也匹配不上的
+  /// 小 buffer 占满,每个新的大 buffer 一归还就被释放,于是既永不命中、又白占着设备内存。
   void RecycleImageLocked(const ImageSlot& slot) {
-    if (image_pool_.size() < kMaxPooledImages) {
-      image_pool_.push_back(slot);
-    } else {
-      clReleaseMemObject(slot.mem);
+    image_pool_.push_back(slot);
+    pool_bytes_ += slot.capacity;
+    while (image_pool_.size() > kMaxPooledSlots || pool_bytes_ > kMaxPooledBytes) {
+      size_t smallest = 0;
+      for (size_t i = 1; i < image_pool_.size(); ++i) {
+        if (image_pool_[i].capacity < image_pool_[smallest].capacity) smallest = i;
+      }
+      pool_bytes_ -= image_pool_[smallest].capacity;
+      clReleaseMemObject(image_pool_[smallest].mem);
+      image_pool_[smallest] = image_pool_.back();
+      image_pool_.pop_back();
     }
   }
 
@@ -260,9 +303,12 @@ class Context {
   bool host_unified_ = false;
   std::mutex enqueue_mutex_;
   std::mutex pool_mutex_;
-  /// 空闲计算 buffer(Image)池(受 pool_mutex_ 保护)。上限见 kMaxPooledImages。
+  /// 空闲计算 buffer(Image)池(受 pool_mutex_ 保护)。上限见 kMaxPooledSlots /
+  /// kMaxPooledBytes;acquire/recycle 见 TryAcquireImageLocked / RecycleImageLocked。
   std::vector<ImageSlot> image_pool_;
-  static constexpr size_t kMaxPooledImages = 8;
+  size_t pool_bytes_ = 0;
+  uint64_t pool_allocations_ = 0;
+  uint64_t pool_reuses_ = 0;
   std::mutex cache_mutex_;
   std::unordered_map<std::string, cl_program> programs_;
   std::unordered_map<std::string, cl_kernel> kernels_;
@@ -330,19 +376,25 @@ class Image {
     // 等待新生产者。队列是 in-order 的,新生产者的入队必然排在旧消费者命令之后,故复用时
     // 旧命令必然已经(或将要按序)完成 —— 这正是阶段 0 注释里「归还晚于同步点」的前提。
     const size_t bytes = count * DtypeSize(dtype);
-    cl_mem mem = nullptr;
+    Context::ImageSlot slot;
     bool from_pool = false;
     {
       std::lock_guard<std::mutex> guard(context->pool_mutex());
-      from_pool = context->TryAcquireImageLocked(bytes, want_host_mapped, &mem);
+      from_pool = context->TryAcquireImageLocked(bytes, effective, &slot);
     }
     if (!from_pool) {
       cl_int status = CL_SUCCESS;
-      mem = clCreateBuffer(context->context(), effective, bytes, nullptr, &status);
+      slot.mem = clCreateBuffer(context->context(), effective, bytes, nullptr, &status);
       Check(status, "clCreateBuffer");
+      slot.capacity = bytes;
+      slot.flags = effective;
+      std::lock_guard<std::mutex> guard(context->pool_mutex());
+      context->NoteImageAllocationLocked();
     }
-    Image image(context, mem, nullptr, dtype, ndim, shape);
+    Image image(context, slot.mem, nullptr, dtype, ndim, shape);
     image.host_mapped_ = want_host_mapped;
+    image.capacity_ = slot.capacity;
+    image.flags_ = slot.flags;
     return image;
   }
 
@@ -402,8 +454,8 @@ class Image {
     if (mem_ && context_) {
       Context::ImageSlot slot;
       slot.mem = mem_;
-      slot.capacity = byte_size();
-      slot.host_mapped = host_mapped_;
+      slot.capacity = capacity_;  // 真实创建大小,**不是** byte_size()(见 ImageSlot 注释)
+      slot.flags = flags_;
       std::lock_guard<std::mutex> guard(context_->pool_mutex());
       context_->RecycleImageLocked(slot);
       mem_ = nullptr;
@@ -419,9 +471,13 @@ class Image {
     dtype_ = other.dtype_;
     ndim_ = other.ndim_;
     host_mapped_ = other.host_mapped_;
+    capacity_ = other.capacity_;
+    flags_ = other.flags_;
     for (int i = 0; i < kMaxNdim; ++i) shape_[i] = other.shape_[i];
     other.mem_ = nullptr;
     other.ready_ = nullptr;
+    other.capacity_ = 0;
+    other.flags_ = 0;
     other.ndim_ = 0;
   }
 
@@ -431,6 +487,9 @@ class Image {
   int32_t dtype_ = 0;
   int ndim_ = 0;
   bool host_mapped_ = false;
+  /// 本 buffer 的真实创建字节数与生效 flags —— 归还池时按它们记录,复用据此匹配。
+  size_t capacity_ = 0;
+  cl_mem_flags flags_ = 0;
   int64_t shape_[kMaxNdim] = {0, 0, 0, 0};
 };
 
@@ -493,12 +552,14 @@ struct MappedHandoff {
 inline void ReleaseMappedHandoff(void* user_data) {
   auto* state = static_cast<MappedHandoff*>(user_data);
   if (state->context && state->mem && state->mapped) {
-    // 不等它完成:OpenCL 对 cl_mem 引用计数,已入队的 unmap 自己持有引用,
-    // 所以紧随其后的 clReleaseMemObject(owner 析构时)是安全的。
+    // 不等它完成。注意这里的安全性依据在 buffer 池化之后**变了**:引用计数只保证 cl_mem
+    // 对象还活着,不保证没人去**写**它 —— 而 owner 析构时这块 buffer 是归还池、随后可能被
+    // 一个新 Image 拿去当输出。真正的保证是单一 in-order 队列的排序:unmap 在此处先入队,
+    // 新生产者的入队必然排在它之后,故 unmap 必然先执行完。见 Image::Reset。
     clEnqueueUnmapMemObject(state->context->queue(), state->mem, state->mapped, 0, nullptr,
                             nullptr);
   }
-  delete state;  // owner 在此析构 —— cl_mem / cl_event 随之释放
+  delete state;  // owner 在此析构 —— cl_mem 归还池、cl_event 释放
 }
 
 }  // namespace detail

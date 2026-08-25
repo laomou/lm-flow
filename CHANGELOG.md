@@ -26,7 +26,50 @@ to each GitHub Release.
   The hardware precondition — a device that truly lacks a host-visible memory type — remains
   unverified and still requires real discrete-GPU hardware.
 
+### Fixed
+
+- **Vulkan buffer pool: reuse was gated on the memory allocation size, not the buffer size.**
+  `Image::Allocate` recorded `capacity = requirements.size` while creating the `VkBuffer` with
+  `size = bytes`. The Vulkan spec permits `requirements.size > info.size`, so on a driver that pads,
+  a request could match — and reuse — a `VkBuffer` genuinely too small for it: `vkCmdCopyBuffer`
+  would copy out of bounds and the `VK_WHOLE_SIZE` descriptor would resolve to a shorter range than
+  the host assumed. `capacity` is now the buffer's creation size. Note CI cannot catch this class of
+  bug: lavapipe reports zero padding for every size measured, so the reuse mismatch never occurs
+  there. The staging pool was already correct; the two now agree.
+- **OpenCL buffer pool: reuse ignored every `cl_mem_flags` bit except `CL_MEM_ALLOC_HOST_PTR`.**
+  `Image::Allocate` takes caller-supplied flags (defaulting to `CL_MEM_READ_WRITE`), so a host that
+  allocated with `CL_MEM_READ_ONLY` — or any `CL_MEM_HOST_*` restriction — could have that buffer
+  recycled and handed to a default read-write request as a kernel *output*, which is undefined
+  behaviour per the OpenCL spec and entirely silent. Slots now record the effective flags and reuse
+  requires them to be equal.
+- **OpenCL buffer pool: recorded capacity ratcheted downwards.** `Image::Reset` recorded
+  `capacity = byte_size()` (the logical size) rather than the size the buffer was created with, so
+  a large buffer that had been reused by a smaller request came back to the pool understating its
+  capacity. Large requests then stopped matching it while it kept occupying a slot and its real
+  device memory. `Image` now carries the creation size through to the pool.
+- **Both adapters: a full pool discarded the buffer that had just been returned.** All three pools
+  destroyed the incoming buffer once full, keeping the eight older ones. Under a workload whose
+  sizes grow, the pool filled with buffers too small to ever match again while every new larger
+  buffer was destroyed on return — the pool never hit and still held the memory. A full pool now
+  evicts its *smallest* slot instead (which may be the incoming one, when that is the smallest).
+- **Both adapters: pools were bounded by slot count only.** Eight 24 MB frames is 192 MB retained
+  for the process lifetime — staging is host-visible memory, the `Image` pool is device memory, and
+  neither is trimmed before `Context` teardown. Both pools now also carry a byte ceiling.
+
 ### Changed
+
+- **Vulkan adapter: the staging and `Image` pools share one implementation.** They were near-identical
+  copies, which is how the eviction bug above came to exist in both; `Retired` likewise carried two
+  parallel `recycle_*` booleans. There is now a single `BufferSlot`/`BufferPool` with one
+  `TryAcquireLocked`/`RecycleLocked` pair, and `Retired` carries one `Reclaim` tag.
+- **Both adapters: pool hit/miss counters, and tests that assert on them.** The only benefit pooling
+  offers is "steady-state sizes stop asking the driver for memory", and nothing covered it — the
+  numeric tests do not care how many allocations happened, so making the pool never hit would have
+  left every test green. New `lmflow_vulkan_pool_test` / `lmflow_opencl_pool_test` assert zero new
+  allocations across 20 same-size rounds, that a full pool still serves the largest size (this fails
+  against the old eviction policy), that OpenCL never crosses flag boundaries (this fails against the
+  old flag matching), and that neither ceiling is exceeded.
+
 
 - **Vulkan adapter: staging buffers are pooled and reused instead of allocated per transfer.**
   On the staging upload/read-back paths (the discrete-GPU case, and any run with
@@ -37,8 +80,9 @@ to each GitHub Release.
   reclamation that already made destruction safe now makes recycling safe, so there is no host wait
   and no new use-after-free surface. A steady-state fixed-size resize allocates staging once and
   then reuses it every frame (measured on lavapipe: 10 staging transfers → 2 allocations + 8
-  reuses), keeping `vkAllocateMemory` clear of `maxMemoryAllocationCount`. Byte-for-byte output is
-  unchanged — `lmflow_vulkan_resize_test_staging` still validates against the same CPU oracle.
+  reuses), keeping `vkAllocateMemory` clear of `maxMemoryAllocationCount`. Output is unchanged —
+  `lmflow_vulkan_resize_test_staging` re-runs the same cases with staging forced and checks them
+  against the same in-test CPU reference (1e-3 tolerance) as the direct-map run.
 - **Vulkan & OpenCL adapters: device buffers (`Image`) are pooled and reused instead of allocated
   per upload/dispatch.** Every `Upload` and every dispatch output previously created a device
   buffer with its own allocation (`vkCreateBuffer` + `vkAllocateMemory` on Vulkan;

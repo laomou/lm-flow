@@ -149,17 +149,11 @@ class Context {
     if (device_) {
       vkDeviceWaitIdle(device_);
       ReclaimUpTo(UINT64_MAX);
-      // ReclaimUpTo 刚把所有过期 staging / 计算 buffer 归还了池;设备已 idle,这里把池清空销毁。
-      for (StagingSlot& slot : staging_pool_) {
-        if (slot.buffer) vkDestroyBuffer(device_, slot.buffer, nullptr);
-        if (slot.memory) vkFreeMemory(device_, slot.memory, nullptr);
-      }
-      staging_pool_.clear();
-      for (ImageSlot& slot : image_pool_) {
-        if (slot.buffer) vkDestroyBuffer(device_, slot.buffer, nullptr);
-        if (slot.memory) vkFreeMemory(device_, slot.memory, nullptr);
-      }
-      image_pool_.clear();
+      // ReclaimUpTo 刚把所有过期 buffer 归还了两个池;设备已 idle,这里把池清空销毁。
+      for (const BufferSlot& slot : staging_pool_.slots) DestroySlot(slot);
+      staging_pool_.slots.clear();
+      for (const BufferSlot& slot : image_pool_.slots) DestroySlot(slot);
+      image_pool_.slots.clear();
       for (auto& entry : programs_) {
         vkDestroyPipeline(device_, entry.second.pipeline, nullptr);
         vkDestroyPipelineLayout(device_, entry.second.pipeline_layout, nullptr);
@@ -224,24 +218,63 @@ class Context {
                : 0;
   }
 
-  /// 一个可复用的 host-visible staging buffer。usage 同时含 TRANSFER_SRC|TRANSFER_DST,
-  /// 故**一个池同时服务 Upload(host→staging→device)与 Download(device→staging→host)**。
-  /// `capacity` 是创建时的字节大小;复用要求 `capacity >= 请求字节数`。
-  struct StagingSlot {
-    VkBuffer buffer = VK_NULL_HANDLE;
-    VkDeviceMemory memory = VK_NULL_HANDLE;
-    VkDeviceSize capacity = 0;
-  };
-
-  /// 一个可复用的计算 buffer(Image 的设备缓冲)。`capacity` 是**分配字节数**
-  /// (requirements.size,可能因对齐大于请求),复用要求 `capacity >= 请求字节数`。
-  /// `type_index` 是挑中的内存类型 —— host 可见性等标志都由它推出;池按「host-visible 与否」
-  /// 匹配,保证 device-local 与统一内存的 buffer 不会混池(usage 在创建时固定,也不能混用)。
-  struct ImageSlot {
+  /// 一块可复用的 buffer(staging 或计算 buffer)。
+  ///
+  /// `capacity` 是创建时 `VkBufferCreateInfo::size` 的值 —— **不是** `requirements.size`。
+  /// 复用门槛必须按 buffer 大小判断:`vkCmdCopyBuffer` 的 region 和 `VK_WHOLE_SIZE` 的
+  /// descriptor range 都由 buffer 大小约束,而规范允许 `requirements.size > info.size`。
+  /// 若按内存大小放行,就会把一个更小的 VkBuffer 当成更大的用 —— 越界拷贝加过短的
+  /// descriptor,而且这在不做 padding 的驱动上完全看不出来(实测 CI 的 lavapipe 对 11 种
+  /// 尺寸 padding 恒为 0)。内存侧不必担心:它按 `requirements.size` 分配,必然 >= `capacity`。
+  ///
+  /// `type_index` 是挑中的内存类型。计算 buffer 靠它重推 host 可见性等标志并参与匹配;
+  /// staging 恒为 HOST_VISIBLE|HOST_COHERENT,记录下来只为对称。
+  struct BufferSlot {
     VkBuffer buffer = VK_NULL_HANDLE;
     VkDeviceMemory memory = VK_NULL_HANDLE;
     VkDeviceSize capacity = 0;
     uint32_t type_index = 0;
+  };
+
+  /// 一个空闲 buffer 池。staging 与计算 buffer 各一个实例,共用下面的
+  /// `TryAcquireLocked` / `RecycleLocked` —— 淘汰策略这类容易写错的逻辑只此一份。
+  struct BufferPool {
+    std::vector<BufferSlot> slots;
+    VkDeviceSize bytes = 0;    ///< slots 里 capacity 之和
+    uint64_t allocations = 0;  ///< 未命中而新建的次数
+    uint64_t reuses = 0;       ///< 命中复用的次数
+  };
+
+  /// 池的两个上限,都是**天花板而非目标**:池只持有实际被归还过的 buffer。
+  ///
+  /// 条目数挡住句柄与 `vkAllocateMemory` 次数的累积(后者受 `maxMemoryAllocationCount`
+  /// 限制);字节数挡住大帧下的常驻内存 —— 8 个 24MB 的帧就是 192MB,对移动端不可忽略,
+  /// 而单看条目数对此毫无感知。两者取先到者。
+  static constexpr size_t kMaxPooledSlots = 8;
+  static constexpr VkDeviceSize kMaxPooledBytes = VkDeviceSize{256} << 20;
+
+  /// 池的命中统计。稳态尺寸下 `allocations` 应当停止增长 —— 这是池化唯一的收益指标,
+  /// 测试据此断言(见 adapters/vulkan/tests/pool_test.cc)。
+  struct PoolStats {
+    uint64_t allocations = 0;
+    uint64_t reuses = 0;
+    size_t slots = 0;
+    VkDeviceSize bytes = 0;
+  };
+  PoolStats staging_pool_stats() {
+    std::lock_guard<std::mutex> guard(submit_mutex_);
+    return StatsOf(staging_pool_);
+  }
+  PoolStats image_pool_stats() {
+    std::lock_guard<std::mutex> guard(submit_mutex_);
+    return StatsOf(image_pool_);
+  }
+
+  /// 延迟回收项对其 buffer 的处置方式。
+  enum class Reclaim : uint8_t {
+    kDestroy,  ///< 直接销毁(非池化路径;`RetireLocked` 的默认)
+    kStaging,  ///< 归还 staging 池
+    kImage,    ///< 归还计算 buffer 池
   };
 
   /// 一次 dispatch 用完就要回收的资源。按时间线值延迟回收,**不做主机等待**。
@@ -249,39 +282,77 @@ class Context {
     uint64_t value = 0;
     VkCommandBuffer command_buffer = VK_NULL_HANDLE;
     VkDescriptorSet descriptor_set = VK_NULL_HANDLE;
-    VkBuffer buffer = VK_NULL_HANDLE;
-    VkDeviceMemory memory = VK_NULL_HANDLE;
-    /// staging 池化:置位时,过了 `value` 不销毁 `staging`,而是**归还 staging 池**复用。
-    /// 复用安全性与销毁同源 —— 都由「时间线值已过 ⇒ GPU 用完」保证,不会 use-after-free。
-    StagingSlot staging;
-    bool recycle_staging = false;
-    /// 计算 buffer 池化:置位时,过了 `value` 不销毁 `image_slot`,而是**归还 Image 池**复用
-    /// (一次性 command buffer / descriptor set 仍照常销毁)。安全性与销毁同源 —— 都由
-    /// 「时间线值已过 ⇒ GPU 用完」保证,不会 use-after-free。
-    ImageSlot image_slot;
-    bool recycle_image = false;
+    /// 待处置的 buffer。`reclaim` 决定是销毁还是归还哪个池 —— 归还的安全性与销毁**同源**,
+    /// 都由「时间线值已过 ⇒ GPU 用完」保证,故池化不引入新的 use-after-free 面。
+    /// 一次性的 command buffer / descriptor set 无论哪种都照常销毁。
+    BufferSlot slot;
+    Reclaim reclaim = Reclaim::kDestroy;
   };
 
   /// 登记「等这个时间线值过了就能释放」。调用方须持有 submit_mutex()。
   void RetireLocked(const Retired& retired) { retired_.push_back(retired); }
 
+  /// 从 `pool` 里 best-fit 取一块容量 >= `bytes` 且满足 `match` 的空闲 buffer。命中返回 true
+  /// 并写 `*out`(该 buffer 已出池、为本次调用私有,故调用方可在锁外映射/读写它 —— 它既不在
+  /// 池里也不在 retired_ 里,别的线程碰不到)。调用方须持有 submit_mutex()。
+  template <class Match>
+  bool TryAcquireLocked(BufferPool& pool, VkDeviceSize bytes, Match match, BufferSlot* out) {
+    size_t best = SIZE_MAX;
+    for (size_t i = 0; i < pool.slots.size(); ++i) {
+      const BufferSlot& slot = pool.slots[i];
+      if (slot.capacity < bytes || !match(slot)) continue;
+      if (best == SIZE_MAX || slot.capacity < pool.slots[best].capacity) best = i;
+    }
+    if (best == SIZE_MAX) return false;
+    *out = pool.slots[best];
+    pool.bytes -= out->capacity;
+    pool.slots[best] = pool.slots.back();
+    pool.slots.pop_back();
+    ++pool.reuses;
+    return true;
+  }
+
+  /// 把一块 buffer 归还 `pool`。调用方须持有 submit_mutex()。
+  ///
+  /// 超限时淘汰**容量最小的那一个** —— 有可能正是刚归还的这个,那也对。反过来(无条件丢掉
+  /// 新来者、留住已有的那几个)在尺寸单调增长的负载下会让池彻底失效:池被一堆再也匹配不上的
+  /// 小 buffer 占满,每个新的大 buffer 一归还就被销毁,于是既永不命中、又白占着内存。
+  void RecycleLocked(BufferPool& pool, const BufferSlot& slot) {
+    pool.slots.push_back(slot);
+    pool.bytes += slot.capacity;
+    while (pool.slots.size() > kMaxPooledSlots || pool.bytes > kMaxPooledBytes) {
+      size_t smallest = 0;
+      for (size_t i = 1; i < pool.slots.size(); ++i) {
+        if (pool.slots[i].capacity < pool.slots[smallest].capacity) smallest = i;
+      }
+      pool.bytes -= pool.slots[smallest].capacity;
+      DestroySlot(pool.slots[smallest]);
+      pool.slots[smallest] = pool.slots.back();
+      pool.slots.pop_back();
+    }
+  }
+
+  void DestroySlot(const BufferSlot& slot) {
+    if (slot.buffer) vkDestroyBuffer(device_, slot.buffer, nullptr);
+    if (slot.memory) vkFreeMemory(device_, slot.memory, nullptr);
+  }
+
   /// 取一个容量 >= `bytes` 的 host-visible|coherent staging buffer:优先从池里 best-fit
-  /// 复用一个空闲项,没有合适的才新建(usage = TRANSFER_SRC|TRANSFER_DST)。这样在真独显 /
+  /// 复用一个空闲项,没有合适的才新建(usage = TRANSFER_SRC|TRANSFER_DST,故**一个池同时
+  /// 服务 Upload(host→staging→device)与 Download(device→staging→host)**)。这样在真独显 /
   /// `LMFLOW_VK_FORCE_STAGING` 下,稳态尺寸的上传/回读不再每帧 `vkCreateBuffer +
   /// vkAllocateMemory`(后者受 `maxMemoryAllocationCount` 限制)。调用方须持有 submit_mutex()。
-  StagingSlot AcquireStagingLocked(VkDeviceSize bytes) {
-    size_t best = SIZE_MAX;
-    for (size_t i = 0; i < staging_pool_.size(); ++i) {
-      if (staging_pool_[i].capacity < bytes) continue;
-      if (best == SIZE_MAX || staging_pool_[i].capacity < staging_pool_[best].capacity) best = i;
-    }
-    if (best != SIZE_MAX) {
-      StagingSlot slot = staging_pool_[best];
-      staging_pool_[best] = staging_pool_.back();
-      staging_pool_.pop_back();
+  ///
+  /// 注意未命中时 `vkCreateBuffer`/`vkAllocateMemory` 是**在 submit_mutex_ 里**执行的,而这把
+  /// 锁序列化整个进程的队列提交(Context 是进程级单例)。稳态命中时只是一次池查找,可忽略;
+  /// 但尺寸每帧变化的负载会把一次驱动分配塞进全局临界区。真要消除得拆成「锁外分配、进锁登记」,
+  /// 代价是多一次加锁和更绕的所有权交接 —— 目前没有实测证据表明值得。
+  BufferSlot AcquireStagingLocked(VkDeviceSize bytes) {
+    BufferSlot slot;
+    // staging 一律 HOST_VISIBLE|HOST_COHERENT,无需按内存类型匹配。
+    if (TryAcquireLocked(staging_pool_, bytes, [](const BufferSlot&) { return true; }, &slot)) {
       return slot;
     }
-    StagingSlot slot;
     slot.capacity = bytes;
     VkBufferCreateInfo info{};
     info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
@@ -290,58 +361,60 @@ class Context {
     Check(vkCreateBuffer(device_, &info, nullptr, &slot.buffer), "vkCreateBuffer");
     VkMemoryRequirements requirements{};
     vkGetBufferMemoryRequirements(device_, slot.buffer, &requirements);
+    slot.type_index = FindMemoryType(
+        requirements.memoryTypeBits,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
     VkMemoryAllocateInfo allocate{};
     allocate.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
     allocate.allocationSize = requirements.size;
-    allocate.memoryTypeIndex = FindMemoryType(
-        requirements.memoryTypeBits,
-        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    allocate.memoryTypeIndex = slot.type_index;
     Check(vkAllocateMemory(device_, &allocate, nullptr, &slot.memory), "vkAllocateMemory");
     Check(vkBindBufferMemory(device_, slot.buffer, slot.memory, 0), "vkBindBufferMemory");
+    ++staging_pool_.allocations;
     return slot;
   }
 
   /// 登记「等 `value` 过了就把这块 staging **归还池**」(而非销毁),连同其一次性命令缓冲。
   /// 与 `RetireLocked` 同一套延迟回收,故归还也晚于所有在途工作。调用方须持有 submit_mutex()。
-  void RetireStagingLocked(uint64_t value, VkCommandBuffer command_buffer, const StagingSlot& slot) {
+  void RetireStagingLocked(uint64_t value, VkCommandBuffer command_buffer,
+                           const BufferSlot& slot) {
     Retired retired;
     retired.value = value;
     retired.command_buffer = command_buffer;
-    retired.staging = slot;
-    retired.recycle_staging = true;
+    retired.slot = slot;
+    retired.reclaim = Reclaim::kStaging;
     retired_.push_back(retired);
   }
 
-  /// 从 Image 池取一块容量 >= `bytes`、且 host 可见性与 `want_host_visible` 一致的计算
-  /// buffer(best-fit)。没有合适的返回 false,调用方自行创建。返回 true 时 `*out` 有效,
-  /// 该 buffer 已出池、为本次调用私有。调用方须持有 submit_mutex()。
-  bool TryAcquireImageLocked(VkDeviceSize bytes, bool want_host_visible, ImageSlot* out) {
-    size_t best = SIZE_MAX;
-    for (size_t i = 0; i < image_pool_.size(); ++i) {
-      const ImageSlot& slot = image_pool_[i];
-      if (slot.capacity < bytes) continue;
-      const bool hv = (memory_type_flags(slot.type_index) & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) != 0;
-      if (hv != want_host_visible) continue;
-      if (best == SIZE_MAX || slot.capacity < image_pool_[best].capacity) best = i;
-    }
-    if (best == SIZE_MAX) return false;
-    *out = image_pool_[best];
-    image_pool_[best] = image_pool_.back();
-    image_pool_.pop_back();
-    return true;
+  /// 从计算 buffer 池 best-fit 取一块容量 >= `bytes`、且 host 可见性与 `want_host_visible`
+  /// 一致的 buffer。没有合适的返回 false,调用方自行创建。调用方须持有 submit_mutex()。
+  bool TryAcquireImageLocked(VkDeviceSize bytes, bool want_host_visible, BufferSlot* out) {
+    const auto match = [this, want_host_visible](const BufferSlot& slot) {
+      return ((memory_type_flags(slot.type_index) & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) != 0) ==
+             want_host_visible;
+    };
+    return TryAcquireLocked(image_pool_, bytes, match, out);
   }
 
-  /// 登记「等 `value` 过了就把这块计算 buffer **归还 Image 池**」(而非销毁),连同其一次性
+  /// 记一次计算 buffer 的新建(未命中池)。**自行加锁** —— 与 staging 不同,计算 buffer 的
+  /// `vkCreateBuffer`/`vkAllocateMemory` 刻意留在 submit_mutex_ 之外(见 Image::Allocate),
+  /// 所以调用点没有持锁。
+  void NoteImageAllocation() {
+    std::lock_guard<std::mutex> guard(submit_mutex_);
+    ++image_pool_.allocations;
+  }
+
+  /// 登记「等 `value` 过了就把这块计算 buffer **归还池**」(而非销毁),连同其一次性
   /// command buffer / descriptor set。与 `RetireLocked` 同一套延迟回收,故归还也晚于所有
   /// 在途工作。调用方须持有 submit_mutex()。
   void RetireImageLocked(uint64_t value, VkCommandBuffer command_buffer,
-                         VkDescriptorSet descriptor_set, const ImageSlot& slot) {
+                         VkDescriptorSet descriptor_set, const BufferSlot& slot) {
     Retired retired;
     retired.value = value;
     retired.command_buffer = command_buffer;
     retired.descriptor_set = descriptor_set;
-    retired.image_slot = slot;
-    retired.recycle_image = true;
+    retired.slot = slot;
+    retired.reclaim = Reclaim::kImage;
     retired_.push_back(retired);
   }
 
@@ -669,27 +742,17 @@ class Context {
       }
       if (entry.command_buffer) vkFreeCommandBuffers(device_, command_pool_, 1, &entry.command_buffer);
       if (entry.descriptor_set) vkFreeDescriptorSets(device_, descriptor_pool_, 1, &entry.descriptor_set);
-      if (entry.buffer) vkDestroyBuffer(device_, entry.buffer, nullptr);
-      if (entry.memory) vkFreeMemory(device_, entry.memory, nullptr);
-      // 时间线已过 ⇒ GPU 用完这块 staging:归还池以复用,而非销毁。池有上限以免病态增长
-      // (尺寸单调增长的工作负载会留下旧的小 buffer);超限则照旧销毁。
-      if (entry.recycle_staging && entry.staging.buffer) {
-        if (staging_pool_.size() < kMaxPooledStaging) {
-          staging_pool_.push_back(entry.staging);
-        } else {
-          vkDestroyBuffer(device_, entry.staging.buffer, nullptr);
-          if (entry.staging.memory) vkFreeMemory(device_, entry.staging.memory, nullptr);
-        }
-      }
-      // 时间线已过 ⇒ GPU 用完这块计算 buffer:归还 Image 池以复用,而非销毁。池有上限以免
-      // 病态增长(尺寸单调增长的工作负载会留下旧的小 buffer);超限则照旧销毁。
-      if (entry.recycle_image && entry.image_slot.buffer) {
-        if (image_pool_.size() < kMaxPooledImages) {
-          image_pool_.push_back(entry.image_slot);
-        } else {
-          vkDestroyBuffer(device_, entry.image_slot.buffer, nullptr);
-          if (entry.image_slot.memory) vkFreeMemory(device_, entry.image_slot.memory, nullptr);
-        }
+      // 时间线已过 ⇒ GPU 用完了这块 buffer:归还池以复用,或直接销毁 —— 两者安全性同源。
+      switch (entry.reclaim) {
+        case Reclaim::kStaging:
+          if (entry.slot.buffer) RecycleLocked(staging_pool_, entry.slot);
+          break;
+        case Reclaim::kImage:
+          if (entry.slot.buffer) RecycleLocked(image_pool_, entry.slot);
+          break;
+        case Reclaim::kDestroy:
+          DestroySlot(entry.slot);
+          break;
       }
     }
     retired_.resize(keep);
@@ -709,12 +772,14 @@ class Context {
   VkCommandPool command_pool_ = VK_NULL_HANDLE;
   VkDescriptorPool descriptor_pool_ = VK_NULL_HANDLE;
   std::vector<Retired> retired_;
-  /// 空闲 staging buffer 池(受 submit_mutex_ 保护,同 retired_)。上限见 kMaxPooledStaging。
-  std::vector<StagingSlot> staging_pool_;
-  static constexpr size_t kMaxPooledStaging = 8;
-  /// 空闲计算 buffer(Image)池(受 submit_mutex_ 保护,同 retired_)。上限见 kMaxPooledImages。
-  std::vector<ImageSlot> image_pool_;
-  static constexpr size_t kMaxPooledImages = 8;
+  /// 两个空闲 buffer 池(受 submit_mutex_ 保护,同 retired_)。上限见 kMaxPooledSlots /
+  /// kMaxPooledBytes;acquire/recycle 实现见 TryAcquireLocked / RecycleLocked。
+  BufferPool staging_pool_;
+  BufferPool image_pool_;
+
+  static PoolStats StatsOf(const BufferPool& pool) {
+    return {pool.allocations, pool.reuses, pool.slots.size(), pool.bytes};
+  }
   std::mutex submit_mutex_;
   std::mutex cache_mutex_;
   std::unordered_map<std::string, Program> programs_;
@@ -813,7 +878,12 @@ class Image {
     // 内存类型仍由 buffer 实际类型推出(见下),ready_ 归零,下次提交按新时间线值登记。
     // 匹配按「host-visible 与否」:统一内存挑 host-visible 类型,独显挑纯 device-local,
     // 二者不会混池。若池里没有合适的(或从未命中过),走下面的创建路径。
-    Context::ImageSlot slot;
+    //
+    // 已知的一个小缺口:这里拿 `unified_memory()`(设备属性)当期望值,而实际挑中的类型可能
+    // 落到下面第 ④ 档兜底(纯 device-local)。那种 buffer 归还池后 hv 为假、期望值为真,于是
+    // 永远匹配不上,白占一个槽位直到被淘汰。只影响命中率不影响正确性 —— 真要修得把期望的
+    // host 可见性从「挑类型」那段逻辑里透出来,而不是用设备属性近似。
+    Context::BufferSlot slot;
     const bool from_pool = [&] {
       std::lock_guard<std::mutex> guard(context->submit_mutex());
       context->ReclaimCompletedLocked();  // 先回收:把已完成的 buffer 归还池,便于下面复用
@@ -876,8 +946,11 @@ class Image {
             "vkAllocateMemory");
       Check(vkBindBufferMemory(context->device(), image.buffer_, image.memory_, 0),
             "vkBindBufferMemory");
-      image.capacity_ = requirements.size;
+      // capacity 记 **buffer 大小**(= bytes),不是 requirements.size。复用门槛按它判断,
+      // 否则会把一个更小的 VkBuffer 当成更大的用 —— 详见 Context::BufferSlot 的注释。
+      image.capacity_ = bytes;
       image.type_index_ = type_index;
+      context->NoteImageAllocation();
     }
     // 三个标志都由**实际挑中的**内存类型推出,而不是由 unified_memory() 推断 ——
     // 落到第 ④ 档(纯 device-local)时 host_visible 必须是 false。
@@ -892,7 +965,6 @@ class Image {
       image.host_cached_ = false;
       image.host_coherent_ = false;
     }
-    image.mapped_bytes_ = image.capacity_;
     return image;
   }
 
@@ -937,7 +1009,7 @@ class Image {
     // Upload 只做主机 memcpy、不提交,ready_ 保持 0,而读它的 dispatch 却可能仍在飞行 ——
     // 若按 ready_=0 登记,ReclaimUpTo 会立刻 vkDestroyBuffer/vkFreeMemory,GPU 便读到已
     // 释放的显存(表现为驱动 worker 线程段错误)。按最大签发值登记才覆盖所有在途引用。
-    Context::ImageSlot slot;
+    Context::BufferSlot slot;
     slot.buffer = buffer_;
     slot.memory = memory_;
     slot.capacity = capacity_;
@@ -967,7 +1039,6 @@ class Image {
     host_visible_ = other.host_visible_;
     host_cached_ = other.host_cached_;
     host_coherent_ = other.host_coherent_;
-    mapped_bytes_ = other.mapped_bytes_;
     capacity_ = other.capacity_;
     type_index_ = other.type_index_;
     for (int i = 0; i < kMaxNdim; ++i) shape_[i] = other.shape_[i];
@@ -991,8 +1062,8 @@ class Image {
   bool host_visible_ = false;
   bool host_cached_ = false;
   bool host_coherent_ = false;
-  VkDeviceSize mapped_bytes_ = 0;
-  /// 本 buffer 的分配字节数(requirements.size,池化复用的容量依据)。
+  /// 本 buffer 的创建大小(`VkBufferCreateInfo::size`,即请求字节数 —— **不是**
+  /// `requirements.size`)。归还池时按它记录,复用据此匹配;缘由见 Context::BufferSlot。
   VkDeviceSize capacity_ = 0;
   /// 本 buffer 挑中的内存类型(池化复用时据此重推 host 标志)。
   uint32_t type_index_ = 0;
@@ -1109,7 +1180,7 @@ inline Image Upload(const std::shared_ptr<Context>& context, const LMFlowBuffer&
   // Context::AcquireStagingLocked / RetireStagingLocked)。此前这条路不可达、无所谓;现在它
   // 在真独显与 FORCE_STAGING 下每帧执行,池化避免每帧 vkCreateBuffer + vkAllocateMemory
   // (后者受 maxMemoryAllocationCount 限制),尺寸稳态时稳态零新分配。
-  Context::StagingSlot staging;
+  Context::BufferSlot staging;
   {
     std::lock_guard<std::mutex> guard(context->submit_mutex());
     context->ReclaimCompletedLocked();  // 先回收:把已完成的 staging 归还池,便于下面复用
@@ -1178,7 +1249,7 @@ inline Packet Download(const Image& image) {
   // 故锁外读回不会被并发回收提前释放。历史上的 use-after-free 正出在「过早登记 + 锁外访问」。
   // 池化:与 Upload 一样,staging 从池 best-fit 复用、回读完毕后归还池(见
   // Context::AcquireStagingLocked / RetireStagingLocked),避免每帧新建 + vkAllocateMemory。
-  Context::StagingSlot staging;
+  Context::BufferSlot staging;
   uint64_t signalled = 0;
   VkCommandBuffer command_buffer = VK_NULL_HANDLE;
   {
@@ -1244,7 +1315,6 @@ inline Packet DownloadMapped(Packet image_packet) {
   const VkDeviceMemory memory = image->memory();
   const int ndim = image->ndim();
   const int32_t dtype = image->dtype();
-  const size_t bytes = image->byte_size();
   const bool coherent = image->host_coherent();
   int64_t shape[kMaxNdim] = {0, 0, 0, 0};
   for (int i = 0; i < ndim; ++i) shape[i] = image->shape(i);
