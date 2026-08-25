@@ -149,12 +149,17 @@ class Context {
     if (device_) {
       vkDeviceWaitIdle(device_);
       ReclaimUpTo(UINT64_MAX);
-      // ReclaimUpTo 刚把所有过期 staging 归还了池;设备已 idle,这里把池清空销毁。
+      // ReclaimUpTo 刚把所有过期 staging / 计算 buffer 归还了池;设备已 idle,这里把池清空销毁。
       for (StagingSlot& slot : staging_pool_) {
         if (slot.buffer) vkDestroyBuffer(device_, slot.buffer, nullptr);
         if (slot.memory) vkFreeMemory(device_, slot.memory, nullptr);
       }
       staging_pool_.clear();
+      for (ImageSlot& slot : image_pool_) {
+        if (slot.buffer) vkDestroyBuffer(device_, slot.buffer, nullptr);
+        if (slot.memory) vkFreeMemory(device_, slot.memory, nullptr);
+      }
+      image_pool_.clear();
       for (auto& entry : programs_) {
         vkDestroyPipeline(device_, entry.second.pipeline, nullptr);
         vkDestroyPipelineLayout(device_, entry.second.pipeline_layout, nullptr);
@@ -228,6 +233,17 @@ class Context {
     VkDeviceSize capacity = 0;
   };
 
+  /// 一个可复用的计算 buffer(Image 的设备缓冲)。`capacity` 是**分配字节数**
+  /// (requirements.size,可能因对齐大于请求),复用要求 `capacity >= 请求字节数`。
+  /// `type_index` 是挑中的内存类型 —— host 可见性等标志都由它推出;池按「host-visible 与否」
+  /// 匹配,保证 device-local 与统一内存的 buffer 不会混池(usage 在创建时固定,也不能混用)。
+  struct ImageSlot {
+    VkBuffer buffer = VK_NULL_HANDLE;
+    VkDeviceMemory memory = VK_NULL_HANDLE;
+    VkDeviceSize capacity = 0;
+    uint32_t type_index = 0;
+  };
+
   /// 一次 dispatch 用完就要回收的资源。按时间线值延迟回收,**不做主机等待**。
   struct Retired {
     uint64_t value = 0;
@@ -239,6 +255,11 @@ class Context {
     /// 复用安全性与销毁同源 —— 都由「时间线值已过 ⇒ GPU 用完」保证,不会 use-after-free。
     StagingSlot staging;
     bool recycle_staging = false;
+    /// 计算 buffer 池化:置位时,过了 `value` 不销毁 `image_slot`,而是**归还 Image 池**复用
+    /// (一次性 command buffer / descriptor set 仍照常销毁)。安全性与销毁同源 —— 都由
+    /// 「时间线值已过 ⇒ GPU 用完」保证,不会 use-after-free。
+    ImageSlot image_slot;
+    bool recycle_image = false;
   };
 
   /// 登记「等这个时间线值过了就能释放」。调用方须持有 submit_mutex()。
@@ -288,6 +309,39 @@ class Context {
     retired.command_buffer = command_buffer;
     retired.staging = slot;
     retired.recycle_staging = true;
+    retired_.push_back(retired);
+  }
+
+  /// 从 Image 池取一块容量 >= `bytes`、且 host 可见性与 `want_host_visible` 一致的计算
+  /// buffer(best-fit)。没有合适的返回 false,调用方自行创建。返回 true 时 `*out` 有效,
+  /// 该 buffer 已出池、为本次调用私有。调用方须持有 submit_mutex()。
+  bool TryAcquireImageLocked(VkDeviceSize bytes, bool want_host_visible, ImageSlot* out) {
+    size_t best = SIZE_MAX;
+    for (size_t i = 0; i < image_pool_.size(); ++i) {
+      const ImageSlot& slot = image_pool_[i];
+      if (slot.capacity < bytes) continue;
+      const bool hv = (memory_type_flags(slot.type_index) & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) != 0;
+      if (hv != want_host_visible) continue;
+      if (best == SIZE_MAX || slot.capacity < image_pool_[best].capacity) best = i;
+    }
+    if (best == SIZE_MAX) return false;
+    *out = image_pool_[best];
+    image_pool_[best] = image_pool_.back();
+    image_pool_.pop_back();
+    return true;
+  }
+
+  /// 登记「等 `value` 过了就把这块计算 buffer **归还 Image 池**」(而非销毁),连同其一次性
+  /// command buffer / descriptor set。与 `RetireLocked` 同一套延迟回收,故归还也晚于所有
+  /// 在途工作。调用方须持有 submit_mutex()。
+  void RetireImageLocked(uint64_t value, VkCommandBuffer command_buffer,
+                         VkDescriptorSet descriptor_set, const ImageSlot& slot) {
+    Retired retired;
+    retired.value = value;
+    retired.command_buffer = command_buffer;
+    retired.descriptor_set = descriptor_set;
+    retired.image_slot = slot;
+    retired.recycle_image = true;
     retired_.push_back(retired);
   }
 
@@ -627,6 +681,16 @@ class Context {
           if (entry.staging.memory) vkFreeMemory(device_, entry.staging.memory, nullptr);
         }
       }
+      // 时间线已过 ⇒ GPU 用完这块计算 buffer:归还 Image 池以复用,而非销毁。池有上限以免
+      // 病态增长(尺寸单调增长的工作负载会留下旧的小 buffer);超限则照旧销毁。
+      if (entry.recycle_image && entry.image_slot.buffer) {
+        if (image_pool_.size() < kMaxPooledImages) {
+          image_pool_.push_back(entry.image_slot);
+        } else {
+          vkDestroyBuffer(device_, entry.image_slot.buffer, nullptr);
+          if (entry.image_slot.memory) vkFreeMemory(device_, entry.image_slot.memory, nullptr);
+        }
+      }
     }
     retired_.resize(keep);
   }
@@ -648,6 +712,9 @@ class Context {
   /// 空闲 staging buffer 池(受 submit_mutex_ 保护,同 retired_)。上限见 kMaxPooledStaging。
   std::vector<StagingSlot> staging_pool_;
   static constexpr size_t kMaxPooledStaging = 8;
+  /// 空闲计算 buffer(Image)池(受 submit_mutex_ 保护,同 retired_)。上限见 kMaxPooledImages。
+  std::vector<ImageSlot> image_pool_;
+  static constexpr size_t kMaxPooledImages = 8;
   std::mutex submit_mutex_;
   std::mutex cache_mutex_;
   std::unordered_map<std::string, Program> programs_;
@@ -742,60 +809,79 @@ class Image {
     image.ndim_ = ndim;
     for (int i = 0; i < ndim; ++i) image.shape_[i] = shape[i];
 
-    VkBufferCreateInfo buffer_info{};
-    buffer_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-    buffer_info.size = bytes;
-    buffer_info.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
-                        VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
-    buffer_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-    Check(vkCreateBuffer(context->device(), &buffer_info, nullptr, &image.buffer_),
-          "vkCreateBuffer");
+    // 计算 buffer 池化:先尝试从池里 best-fit 复用一块空闲 buffer。复用**不改变任何语义**:
+    // 内存类型仍由 buffer 实际类型推出(见下),ready_ 归零,下次提交按新时间线值登记。
+    // 匹配按「host-visible 与否」:统一内存挑 host-visible 类型,独显挑纯 device-local,
+    // 二者不会混池。若池里没有合适的(或从未命中过),走下面的创建路径。
+    Context::ImageSlot slot;
+    const bool from_pool = [&] {
+      std::lock_guard<std::mutex> guard(context->submit_mutex());
+      context->ReclaimCompletedLocked();  // 先回收:把已完成的 buffer 归还池,便于下面复用
+      return context->TryAcquireImageLocked(bytes, context->unified_memory(), &slot);
+    }();
+    if (from_pool) {
+      image.buffer_ = slot.buffer;
+      image.memory_ = slot.memory;
+      image.capacity_ = slot.capacity;
+      image.type_index_ = slot.type_index;
+    } else {
+      VkBufferCreateInfo buffer_info{};
+      buffer_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+      buffer_info.size = bytes;
+      buffer_info.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+                          VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+      buffer_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+      Check(vkCreateBuffer(context->device(), &buffer_info, nullptr, &image.buffer_),
+            "vkCreateBuffer");
 
-    VkMemoryRequirements requirements{};
-    vkGetBufferMemoryRequirements(context->device(), image.buffer_, &requirements);
-    VkMemoryPropertyFlags want = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
-    // 统一内存上按三档优先级挑,而不是碰运气,也不要求 cached 与 coherent 兼备:
-    //
-    //   ① cached + coherent —— 最好,零拷贝且无需缓存维护
-    //   ② cached,非 coherent —— 仍可零拷贝,但读写要显式 invalidate / flush
-    //   ③ 只有 coherent(未缓存)—— 退回拷贝路径
-    //
-    // ②这一档是必须的:实测 5 种 Mali(G52/G57/G615/G625/G720)**都没有** cached+coherent
-    // 的类型,只有 cached 非 coherent 的。若像先前那样要求两者兼备,等于在所有 Mali 上
-    // 静默关掉零拷贝下载(分配照样成功、结果照样对,只是白白多一整次回读拷贝)。
-    //
-    // 显式排序同样必要:18 台真机上未缓存的 HOST_VISIBLE|COHERENT 类型**都排在**缓存版
-    // 之前,所以「取第一个匹配」在 memoryTypeBits 放行它时就会选中未缓存的那个。
-    uint32_t type_index = Context::kNoMemoryType;
-    if (context->unified_memory()) {
-      const VkMemoryPropertyFlags visible = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT;
-      const VkMemoryPropertyFlags coherent = VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
-      const VkMemoryPropertyFlags cached = VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
-      type_index = context->FindMemoryTypeOrNone(requirements.memoryTypeBits,
-                                                 want | visible | coherent | cached);
-      if (type_index == Context::kNoMemoryType) {
+      VkMemoryRequirements requirements{};
+      vkGetBufferMemoryRequirements(context->device(), image.buffer_, &requirements);
+      VkMemoryPropertyFlags want = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+      // 统一内存上按三档优先级挑,而不是碰运气,也不要求 cached 与 coherent 兼备:
+      //
+      //   ① cached + coherent —— 最好,零拷贝且无需缓存维护
+      //   ② cached,非 coherent —— 仍可零拷贝,但读写要显式 invalidate / flush
+      //   ③ 只有 coherent(未缓存)—— 退回拷贝路径
+      //
+      // ②这一档是必须的:实测 5 种 Mali(G52/G57/G615/G625/G720)**都没有** cached+coherent
+      // 的类型,只有 cached 非 coherent 的。若像先前那样要求两者兼备,等于在所有 Mali 上
+      // 静默关掉零拷贝下载(分配照样成功、结果照样对,只是白白多一整次回读拷贝)。
+      //
+      // 显式排序同样必要:18 台真机上未缓存的 HOST_VISIBLE|COHERENT 类型**都排在**缓存版
+      // 之前,所以「取第一个匹配」在 memoryTypeBits 放行它时就会选中未缓存的那个。
+      uint32_t type_index = Context::kNoMemoryType;
+      if (context->unified_memory()) {
+        const VkMemoryPropertyFlags visible = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT;
+        const VkMemoryPropertyFlags coherent = VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+        const VkMemoryPropertyFlags cached = VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
         type_index = context->FindMemoryTypeOrNone(requirements.memoryTypeBits,
-                                                  want | visible | cached);
+                                                   want | visible | coherent | cached);
+        if (type_index == Context::kNoMemoryType) {
+          type_index = context->FindMemoryTypeOrNone(requirements.memoryTypeBits,
+                                                    want | visible | cached);
+        }
+        if (type_index == Context::kNoMemoryType) {
+          type_index = context->FindMemoryTypeOrNone(requirements.memoryTypeBits,
+                                                    want | visible | coherent);
+        }
       }
       if (type_index == Context::kNoMemoryType) {
-        type_index = context->FindMemoryTypeOrNone(requirements.memoryTypeBits,
-                                                  want | visible | coherent);
+        type_index = context->FindMemoryType(requirements.memoryTypeBits, want);
       }
+      VkMemoryAllocateInfo allocate{};
+      allocate.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+      allocate.allocationSize = requirements.size;
+      allocate.memoryTypeIndex = type_index;
+      Check(vkAllocateMemory(context->device(), &allocate, nullptr, &image.memory_),
+            "vkAllocateMemory");
+      Check(vkBindBufferMemory(context->device(), image.buffer_, image.memory_, 0),
+            "vkBindBufferMemory");
+      image.capacity_ = requirements.size;
+      image.type_index_ = type_index;
     }
-    if (type_index == Context::kNoMemoryType) {
-      type_index = context->FindMemoryType(requirements.memoryTypeBits, want);
-    }
-    VkMemoryAllocateInfo allocate{};
-    allocate.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-    allocate.allocationSize = requirements.size;
-    allocate.memoryTypeIndex = type_index;
-    Check(vkAllocateMemory(context->device(), &allocate, nullptr, &image.memory_),
-          "vkAllocateMemory");
-    Check(vkBindBufferMemory(context->device(), image.buffer_, image.memory_, 0),
-          "vkBindBufferMemory");
     // 三个标志都由**实际挑中的**内存类型推出,而不是由 unified_memory() 推断 ——
     // 落到第 ④ 档(纯 device-local)时 host_visible 必须是 false。
-    const VkMemoryPropertyFlags picked = context->memory_type_flags(type_index);
+    const VkMemoryPropertyFlags picked = context->memory_type_flags(image.type_index_);
     image.host_visible_ = (picked & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) != 0;
     image.host_cached_ = (picked & VK_MEMORY_PROPERTY_HOST_CACHED_BIT) != 0;
     image.host_coherent_ = (picked & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) != 0;
@@ -806,7 +892,7 @@ class Image {
       image.host_cached_ = false;
       image.host_coherent_ = false;
     }
-    image.mapped_bytes_ = requirements.size;
+    image.mapped_bytes_ = image.capacity_;
     return image;
   }
 
@@ -843,21 +929,23 @@ class Image {
  private:
   void Reset() {
     if (!context_) return;
-    // 不做主机等待:把资源登记到延迟回收表,由后续提交顺带回收。
+    // 不做主机等待:把资源登记到延迟回收表,由后续提交顺带回收。计算 buffer 走
+    // RetireImageLocked —— 时间线值过后归还 Image 池复用而非销毁(一次性 command
+    // buffer / descriptor set 仍照常销毁)。
     //
     // 登记值必须是**已签发的最大时间线值**,而不是本 Image 自己的 ready_:统一内存路径的
     // Upload 只做主机 memcpy、不提交,ready_ 保持 0,而读它的 dispatch 却可能仍在飞行 ——
     // 若按 ready_=0 登记,ReclaimUpTo 会立刻 vkDestroyBuffer/vkFreeMemory,GPU 便读到已
     // 释放的显存(表现为驱动 worker 线程段错误)。按最大签发值登记才覆盖所有在途引用。
-    Context::Retired retired;
-    retired.command_buffer = command_buffer_;
-    retired.descriptor_set = descriptor_set_;
-    retired.buffer = buffer_;
-    retired.memory = memory_;
+    Context::ImageSlot slot;
+    slot.buffer = buffer_;
+    slot.memory = memory_;
+    slot.capacity = capacity_;
+    slot.type_index = type_index_;
     {
       std::lock_guard<std::mutex> guard(context_->submit_mutex());
-      retired.value = context_->last_issued_locked();
-      context_->RetireLocked(retired);
+      context_->RetireImageLocked(context_->last_issued_locked(), command_buffer_,
+                                  descriptor_set_, slot);
       context_->ReclaimCompletedLocked();
     }
     buffer_ = VK_NULL_HANDLE;
@@ -880,11 +968,15 @@ class Image {
     host_cached_ = other.host_cached_;
     host_coherent_ = other.host_coherent_;
     mapped_bytes_ = other.mapped_bytes_;
+    capacity_ = other.capacity_;
+    type_index_ = other.type_index_;
     for (int i = 0; i < kMaxNdim; ++i) shape_[i] = other.shape_[i];
     other.buffer_ = VK_NULL_HANDLE;
     other.memory_ = VK_NULL_HANDLE;
     other.command_buffer_ = VK_NULL_HANDLE;
     other.descriptor_set_ = VK_NULL_HANDLE;
+    other.capacity_ = 0;
+    other.type_index_ = 0;
     other.ndim_ = 0;
   }
 
@@ -900,6 +992,10 @@ class Image {
   bool host_cached_ = false;
   bool host_coherent_ = false;
   VkDeviceSize mapped_bytes_ = 0;
+  /// 本 buffer 的分配字节数(requirements.size,池化复用的容量依据)。
+  VkDeviceSize capacity_ = 0;
+  /// 本 buffer 挑中的内存类型(池化复用时据此重推 host 标志)。
+  uint32_t type_index_ = 0;
   int64_t shape_[kMaxNdim] = {0, 0, 0, 0};
 };
 

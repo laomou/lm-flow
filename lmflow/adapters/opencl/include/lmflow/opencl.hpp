@@ -93,6 +93,9 @@ class Context {
   ~Context() {
     for (auto& entry : kernels_) clReleaseKernel(entry.second);
     for (auto& entry : programs_) clReleaseProgram(entry.second);
+    for (const ImageSlot& slot : image_pool_) {
+      if (slot.mem) clReleaseMemObject(slot.mem);  // 池里残余的 buffer
+    }
     if (queue_) clReleaseCommandQueue(queue_);
     if (context_) clReleaseContext(context_);
   }
@@ -117,6 +120,45 @@ class Context {
   /// 队列默认 in-order,且 clSetKernelArg 对同一 cl_kernel 不是线程安全的 ——
   /// 故「设参 + 入队」整段由这把锁保护。GPU 算子跑在普通线程池上,可能并发进入。
   std::mutex& enqueue_mutex() { return enqueue_mutex_; }
+
+  /// 一个可复用的计算 buffer(Image 的设备缓冲)。`capacity` 是创建时的字节大小,
+  /// 复用要求 `capacity >= 请求字节数`;`host_mapped` 记录是否以 CL_MEM_ALLOC_HOST_PTR
+  /// 分配 —— 统一内存才有,是 DownloadMapped 的前提,故不能与普通 buffer 混池。
+  struct ImageSlot {
+    cl_mem mem = nullptr;
+    size_t capacity = 0;
+    bool host_mapped = false;
+  };
+
+  /// Image 池的互斥锁。与 enqueue_mutex_ 分开:Allocate/Reset 可能在任何线程触发
+  /// (Reset 常落在包释放回调上,不在入队上下文),池只保护自己的 vector。
+  std::mutex& pool_mutex() { return pool_mutex_; }
+
+  /// 从池里取一块容量 >= `bytes`、host_mapped 与 `want_host_mapped` 一致的 buffer(best-fit)。
+  /// 命中返回 true 并写 `*out`(该 buffer 已出池、为本调用私有);否则返回 false。
+  /// 调用方须持有 pool_mutex()。
+  bool TryAcquireImageLocked(size_t bytes, bool want_host_mapped, cl_mem* out) {
+    size_t best = SIZE_MAX;
+    for (size_t i = 0; i < image_pool_.size(); ++i) {
+      const ImageSlot& slot = image_pool_[i];
+      if (slot.capacity < bytes || slot.host_mapped != want_host_mapped) continue;
+      if (best == SIZE_MAX || slot.capacity < image_pool_[best].capacity) best = i;
+    }
+    if (best == SIZE_MAX) return false;
+    *out = image_pool_[best].mem;
+    image_pool_[best] = image_pool_.back();
+    image_pool_.pop_back();
+    return true;
+  }
+
+  /// 把一块 buffer 归还池(替代 clReleaseMemObject)。池满则照旧释放。调用方须持有 pool_mutex()。
+  void RecycleImageLocked(const ImageSlot& slot) {
+    if (image_pool_.size() < kMaxPooledImages) {
+      image_pool_.push_back(slot);
+    } else {
+      clReleaseMemObject(slot.mem);
+    }
+  }
 
   /// 取一个编译好的 kernel;按 (源码, 入口名) 缓存。
   ///
@@ -217,6 +259,10 @@ class Context {
   cl_command_queue queue_ = nullptr;
   bool host_unified_ = false;
   std::mutex enqueue_mutex_;
+  std::mutex pool_mutex_;
+  /// 空闲计算 buffer(Image)池(受 pool_mutex_ 保护)。上限见 kMaxPooledImages。
+  std::vector<ImageSlot> image_pool_;
+  static constexpr size_t kMaxPooledImages = 8;
   std::mutex cache_mutex_;
   std::unordered_map<std::string, cl_program> programs_;
   std::unordered_map<std::string, cl_kernel> kernels_;
@@ -277,12 +323,26 @@ class Image {
     if (context->host_unified() && !caller_chose_host_ptr) {
       effective |= CL_MEM_ALLOC_HOST_PTR;
     }
-    cl_int status = CL_SUCCESS;
-    cl_mem mem =
-        clCreateBuffer(context->context(), effective, count * DtypeSize(dtype), nullptr, &status);
-    Check(status, "clCreateBuffer");
+    const bool want_host_mapped = (effective & CL_MEM_ALLOC_HOST_PTR) != 0;
+
+    // 计算 buffer 池化:先尝试从池里 best-fit 复用一块空闲 buffer。复用**不改变任何语义**:
+    // host_mapped 标志按匹配严格一致(统一内存才有,不能与普通 buffer 混池),ready_ 为 null
+    // 等待新生产者。队列是 in-order 的,新生产者的入队必然排在旧消费者命令之后,故复用时
+    // 旧命令必然已经(或将要按序)完成 —— 这正是阶段 0 注释里「归还晚于同步点」的前提。
+    const size_t bytes = count * DtypeSize(dtype);
+    cl_mem mem = nullptr;
+    bool from_pool = false;
+    {
+      std::lock_guard<std::mutex> guard(context->pool_mutex());
+      from_pool = context->TryAcquireImageLocked(bytes, want_host_mapped, &mem);
+    }
+    if (!from_pool) {
+      cl_int status = CL_SUCCESS;
+      mem = clCreateBuffer(context->context(), effective, bytes, nullptr, &status);
+      Check(status, "clCreateBuffer");
+    }
     Image image(context, mem, nullptr, dtype, ndim, shape);
-    image.host_mapped_ = (effective & CL_MEM_ALLOC_HOST_PTR) != 0;
+    image.host_mapped_ = want_host_mapped;
     return image;
   }
 
@@ -332,13 +392,23 @@ class Image {
 
  private:
   void Reset() {
-    // clReleaseMemObject / clReleaseEvent 在命令仍在飞行时调用是安全的:
-    // OpenCL 对二者引用计数,已入队的命令自己持有引用。因此这里不需要先等待,
-    // 也因此阶段 0 不做设备内存池 —— 池化才需要「归还必须晚于同步点完成」。
+    // clReleaseEvent 在命令仍在飞行时调用是安全的:OpenCL 对事件引用计数,已入队的命令
+    // 自己持有引用。
     if (ready_) clReleaseEvent(ready_);
-    if (mem_) clReleaseMemObject(mem_);
+    // 计算 buffer 池化:把 mem **归还池复用**而非 clReleaseMemObject。阶段 0 注释说「池化
+    // 需要归还晚于同步点完成」—— 本 adapter 的队列是 in-order 的单一队列:归还的 buffer
+    // 被新 Image 复用时,新生产者的入队必然排在所有旧消费者命令之后,于是该前提由队列排序
+    // 天然保证,无需主机等待。池满则照旧释放。
+    if (mem_ && context_) {
+      Context::ImageSlot slot;
+      slot.mem = mem_;
+      slot.capacity = byte_size();
+      slot.host_mapped = host_mapped_;
+      std::lock_guard<std::mutex> guard(context_->pool_mutex());
+      context_->RecycleImageLocked(slot);
+      mem_ = nullptr;
+    }
     ready_ = nullptr;
-    mem_ = nullptr;
     context_.reset();
   }
 
