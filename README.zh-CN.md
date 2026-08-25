@@ -94,7 +94,7 @@ let g = Graph::from_yaml(yaml)?;
 发布出去的 crate 是**纯 Rust 引擎**；18 个官方 C++ kernels 是独立 CMake 组件，
 core crate 永远不会编译它们。
 
-如需参考 MediaPipe CalculatorRunner 做单算子测试，可使用 Rust 的 `KernelRunner`、
+如需对单个算子做单元测试，可使用 Rust 的 `KernelRunner`、
 C++ 的 `lmflow::KernelRunner` 或 Python 的 `lmflow.KernelRunner`。它直接驱动
 `get_contract`/`open`/`process`/`close`，不解析 Graph YAML，也不启动图执行器：
 
