@@ -47,6 +47,14 @@ to each GitHub Release.
   `Upload → … → Download` pipeline out of the box; the duplicate registrations were removed from the
   tests that link the archive.
 
+  Compatibility: the archive now claims those four names, so a host that links it **and** registers
+  one of them itself should drop its own registration. Registering a name twice is an error, but
+  `LMFLOW_REGISTER_KERNEL_AS` does not check the return value — the second registration is silently
+  dropped and which one wins depends on static-initialisation order. Registering the same class twice
+  is therefore harmless, but a host that wants its *own* bridge kernel under one of these names must
+  pick a different name instead. Hosts that link only `lmflow::vulkan` / `lmflow::opencl` (the plumbing
+  headers, without the kernels archive) are unaffected and still register whatever they like.
+
 ### Fixed
 
 - **Vulkan buffer pool: reuse was gated on the memory allocation size, not the buffer size.**

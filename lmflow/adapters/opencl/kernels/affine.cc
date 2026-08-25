@@ -18,6 +18,9 @@ namespace {
 // 逐元素,无需 count/边界检查:Enqueue 用精确的 global = 输出元素数、local 交给 runtime
 // (local_work_size = NULL),故 get_global_id(0) 恒落在 [0, count) 内,不会越界。
 // (Vulkan 侧按固定 local_size = 64 铺、会向上取整,才需要 count 守卫。)
+//
+// 代价:local 交给 runtime 意味着元素数为**质数**时实现可能退到 work-group = 1,占用率很差。
+// 正常图像尺寸都是合数,真遇到病态长度再改成「向上取整 global + count 守卫」即可。
 const char* kAffineSource = R"CLC(
 __kernel void affine_f32(__global const float* src, __global float* dst,
                          const float scale, const float shift) {

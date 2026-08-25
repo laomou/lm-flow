@@ -4,7 +4,9 @@
 // [0,1])就是它的直接用途,典型接在 resize 之后:resize → affine → …,中间不落主机。
 //
 // 同形逐元素,故用 1 维工作组、按输出元素数铺(见 vulkan.hpp 的 EnqueueUnary)。
-// local_size 必须与 EnqueueUnary 的默认 local_size_x = 64 一致 —— 不一致会覆盖不全或越界。
+// local_size 必须与 affine.cc 的 kLocalSize 一致 —— 改这里就得同改那里,并重新生成
+// affine_spv.h。不一致时:host 侧值偏小只是过度铺开(下面的 count 守卫兜住),偏大则
+// 尾部元素不被写入,是静默错值。
 //
 // binding 0/1 是「两个 storage buffer」—— 复用 adapter Context::ProgramFor 固定建的那套
 // descriptor layout,算子不必自建。
