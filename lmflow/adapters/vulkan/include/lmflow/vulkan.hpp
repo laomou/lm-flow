@@ -1062,7 +1062,8 @@ class Image {
   bool host_visible_ = false;
   bool host_cached_ = false;
   bool host_coherent_ = false;
-  /// 本 buffer 的分配字节数(requirements.size,池化复用的容量依据)。
+  /// 本 buffer 的创建大小(`VkBufferCreateInfo::size`,即请求字节数 —— **不是**
+  /// `requirements.size`)。归还池时按它记录,复用据此匹配;缘由见 Context::BufferSlot。
   VkDeviceSize capacity_ = 0;
   /// 本 buffer 挑中的内存类型(池化复用时据此重推 host 标志)。
   uint32_t type_index_ = 0;
