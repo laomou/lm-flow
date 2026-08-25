@@ -39,6 +39,27 @@ to each GitHub Release.
   then reuses it every frame (measured on lavapipe: 10 staging transfers → 2 allocations + 8
   reuses), keeping `vkAllocateMemory` clear of `maxMemoryAllocationCount`. Byte-for-byte output is
   unchanged — `lmflow_vulkan_resize_test_staging` still validates against the same CPU oracle.
+- **Vulkan & OpenCL adapters: device buffers (`Image`) are pooled and reused instead of allocated
+  per upload/dispatch.** Every `Upload` and every dispatch output previously created a device
+  buffer with its own allocation (`vkCreateBuffer` + `vkAllocateMemory` on Vulkan;
+  `clCreateBuffer` on OpenCL) and destroyed it when the last reference dropped. Compute buffers
+  are now drawn from a best-fit pool on the `Context` and returned to it once the GPU is done with
+  them, so a steady-state pipeline allocates once and then reuses every frame (measured on
+  lavapipe: the 5-case resize test does 5 allocations + 5 reuses; the bench's tight loop runs
+  clean). Pooling changes nothing semantically — memory type / host-mapped flags are matched or
+  re-derived, so zero-copy download and forced-staging paths behave identically.
+  - **Vulkan** recycles through the *same* timeline-based deferred reclamation that already made
+    destruction safe: a buffer goes back to the pool only when `ReclaimUpTo` sees its timeline
+    value completed, so there is no host wait and no new use-after-free surface. The pool splits
+    device-local vs host-visible buffers so unified and discrete paths never mix.
+  - **OpenCL** relies on the single in-order queue: a recycled `cl_mem` is reused by a new
+    `Image`, and the new producer's enqueue is sequenced after every old consumer command, so the
+    "return must follow the sync point" requirement holds by queue ordering — no host wait. (This
+    was noted as deferred in earlier code; the in-order queue makes it free.) Pooled buffers are
+    split by the `CL_MEM_ALLOC_HOST_PTR` flag so zero-copy download buffers never mix with plain
+    ones.
+  - Both pools are bounded (8 slots) so size-growing workloads can't accumulate stale buffers;
+    each adapter's `Context` destructor destroys whatever remains.
 - **Vulkan adapter: `VkDownload` no longer fails at `Open` on device-only memory.** With staging
   read-back implemented — and guaranteed feasible, since the Vulkan spec requires at least one
   `HOST_VISIBLE|HOST_COHERENT` memory type — the previous "staging read-back path is not
