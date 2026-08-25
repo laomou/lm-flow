@@ -238,10 +238,25 @@ impl GraphInner {
             }
         }
 
-        if configured_stats != StatsLevel::Full && shared.config.watchdog_ms > 0 {
-            runtime::log_info(
-                "stats is overridden to full because watchdog_ms > 0 (the watchdog needs per-call timing)",
-            );
+        // watchdog 与 trace 都依赖每次回调的计时,故都会把 stats 强制提升为 full。
+        // 覆盖了就必须说清是**哪个**触发的 —— 否则宿主只看到自己配的 `stats` 悄悄失效。
+        let forced_by = if configured_stats == StatsLevel::Full {
+            None
+        } else {
+            match (
+                shared.config.watchdog_ms > 0,
+                shared.config.trace_capacity > 0,
+            ) {
+                (true, true) => Some("watchdog_ms > 0 and trace_capacity > 0"),
+                (true, false) => Some("watchdog_ms > 0"),
+                (false, true) => Some("trace_capacity > 0"),
+                (false, false) => None,
+            }
+        };
+        if let Some(reason) = forced_by {
+            runtime::log_info(&format!(
+                "stats is overridden to full because {reason} (per-call timing is required)"
+            ));
         } else if stats_level != StatsLevel::Full {
             runtime::log_info(
                 "stats is not full: per-call timing, latency percentiles, CoW copies, and executor timing are disabled",

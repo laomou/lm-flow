@@ -1478,6 +1478,16 @@ output_ports: [out]
     }
 
     #[test]
+    fn trace_capacity_forces_full_stats() {
+        // trace 记的是每次回调的耗时,故与 watchdog 同样强制提升 —— 哪怕显式配了 `off`。
+        let cfg = GraphConfig::from_yaml("nodes: []\nstats: off\ntrace_capacity: 8").unwrap();
+        assert_eq!(cfg.effective_stats_level(), StatsLevel::Full);
+        // 关闭时不得越权提升:默认仍是 basic。
+        let off = GraphConfig::from_yaml("nodes: []\ntrace_capacity: 0").unwrap();
+        assert_eq!(off.effective_stats_level(), StatsLevel::Basic);
+    }
+
+    #[test]
     fn parses_options_and_executors() {
         let cfg = GraphConfig::from_yaml(
             r#"
