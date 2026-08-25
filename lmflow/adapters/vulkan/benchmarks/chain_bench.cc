@@ -2,50 +2,49 @@
  * chain_bench.cc —— 量一件事:**一条预处理链里的第二个逐元素算子,放 GPU 还是放 CPU?**
  *
  * 起因是 adapters/vulkan/kernels/resize.cc 写着盈亏平衡在「连续 2~3 个 GPU 算子、中间结果
- * 不落主机」时才出现,而在 affine 落地之前没有第二个算子可串,那句话一直是推断。本文件量到的
- * 是那句话的**一半**:第二个算子放 GPU 确实更快。至于"不落主机"那一半 —— 见下面的警告,
- * 这里并没有测到。
+ * 不落主机」时才出现,而在 affine 落地之前没有第二个算子可串,那句话一直是推断。现在两半都
+ * 量过了,而且**归因和那句话暗示的相反** —— 见下面的实测表。
  *
  * 与 vulkan_bench.cc 的分工:那个是**分阶段**基准(upload / dispatch / download 各自的成本
  * 来源不同,分开才能把优化归因到阶段)。这个是**图级**基准 —— 因为要比较的两种做法差别不在
  * 某个阶段内部,而在第二个算子跑在哪一侧、以及由此多出的一个图节点,只有整条图才能体现;
  * 而且这也正是宿主真正感受到的数字(含引擎开销)。
  *
- * ⚠ **它测的不是"驻留"。** 两条图算出完全相同的结果,只差第二个逐元素算子在哪执行:
+ * 两组对比,三条图算出**完全相同的结果**(基准会先校验,不一致就拒绝报数):
  *
- *   second_op_on_gpu: VkUpload → VkResize → VkAffine → VkDownload
- *   second_op_on_cpu: VkUpload → VkResize → VkDownload → AffineKernel(CPU)
+ *   mid_resident:      VkUpload → VkResize → VkAffine → VkDownload
+ *   mid_roundtrip:     VkUpload → VkResize → VkDownload → VkUpload → VkAffine → VkDownload
+ *   second_op_on_cpu:  VkUpload → VkResize → VkDownload → AffineKernel(CPU)
  *
- * 注意两条图的 `VkDownload` **搬运的字节数完全相同** —— 一条在 affine 之后下载,另一条在
- * resize 之后下载,而 affine 不改变形状。所以这里**没有省下任何一次跨边界传输**,差值全部
- * 来自「同一个逐元素运算放 GPU 还是放 CPU」,外加 split 侧多一个图节点的调度与包分配。
+ *   ① 驻留:    resident vs roundtrip —— 两侧 affine **都在 GPU**,只差中间结果多一次
+ *               device→host→device 往返。这是 kernels/resize.cc 那句「中间结果不落主机时
+ *               才赢」的直接检验,差值里不混"GPU 算术 vs CPU 算术"。
+ *   ② 算子落点:resident vs second_op_on_cpu —— 注意这两条图的 Download **搬的字节数相同**
+ *               (affine 不改形状),所以这一组**与驻留无关**,纯粹是同一个运算放哪一侧。
  *
- * 这仍是个有用的问题(宿主真的在这两者之间选),但它**不能**用来支持「中间结果不落主机才是
- * 收益来源」。要测驻留本身,split 侧必须在两个 GPU 算子之间真的**下载再上传**一次,比如:
+ * ── 实测:Adreno 740 / SM8550 / Android 13,8 轮 ────────────────────────────────
  *
- *   驻留:  Upload → Resize → Affine → Download
- *   不驻留:Upload → Resize → Download → Upload → Affine → Download
+ *   中间结果    ① 驻留(中位 / 区间)          ② 算子落点
+ *   0.57 MB      -1.3%  (-10.5 ~ +2.6%)  跨零     -2.1%
+ *   2.64 MB      -8.9%  (-13.9 ~ +1.5%)  跨零    -17.2%
+ *   5.93 MB      -6.8%  (-13.0 ~ +2.8%)  跨零    -17.9%
  *
- * 那才是「多一次往返」对「留在设备上」。本文件目前**没有**实现那个对比。
+ * **结论与直觉相反:主项是算子落点,不是驻留。** ② 始终一致为负;① 三档 8 轮**全部跨零**,
+ * 这个量级在本机噪声内说不清。原因是统一内存 —— 那次"往返"其实是同一块物理内存里的两次
+ * memcpy,不过总线。所以在本项目主打的移动端上,"中间结果不落主机"省下的远没有"别用泛化
+ * CPU 循环"多。
  *
- * ── 实测(Adreno 740 / SM8550 / Android 13,中位)────────────────────────────
+ * ② 那一列也是分两段测的:给 cpp/kernels/affine.cc 加 f32/f64 特化快路**之前**是 -9.4% /
+ * -33% / -33.6%,加了之后才降到上表的数字 —— 也就是说原始差距有**一半只是那个每元素两次
+ * dtype 分派的泛化循环**,与 GPU 无关。
  *
- *   形状              输出元素     CPU affine 泛化路   CPU affine 快路   Δ/元素
- *   1080p → 224x224     150,528        -9.4%              -2.1%          11.3 ns
- *   720p  → 360x640     691,200        -33%              -17.2%          10.3 ns
- *   1080p → 540x960   1,555,200        -33.6%            -17.9%           8.0 ns
+ * ⚠ 这不推翻独显:独显回读要过 PCIe,往返代价应当大得多,但手头没有可枚举的独显,那一档
+ * 仍未实测。别把 ① 的结论外推到独显。
  *
- * 左列是 cpp/kernels/affine.cc 每元素两次 dtype 分派的旧路径;中列是给它加了 f32/f64 特化
- * 快路之后。**一半的差距原本只是那个泛化循环** —— 这也是加快路的由来(它对所有 CPU 用户
- * 有效,不只是 GPU adapter 的宿主)。
- *
- * 右列是快路之后的残差,仍约 8~11 ns/输出元素、仍线性于元素数。由于两条图搬的字节相同,这个
- * 残差不是传输,而是「向量化的 CPU 乘加 + 多一个节点」对「一次 GPU dispatch」;要再往下归因
- * 需要单独的微基准,不要靠推理。
- *
- * (两条已修正的记录:早前只有 llvmpipe 数据时,我据"百分比不随中间结果增长"判断收益以固定
- * 成本为主 —— 错的,绝对差值严格线性于元素数;更早我把这整个对比称作"驻留是否值得" ——
- * 也是错的,两条图的跨边界字节数相同。都由实测暴露。)
+ * (三条已修正的记录。早前只有 llvmpipe 数据时,我据"百分比不随中间结果增长"判断收益以固定
+ * 成本为主 —— 错的,绝对差值严格线性于元素数。更早我把 ② 那一组称作"驻留是否值得" ——
+ * 也是错的,两条图跨边界字节数相同,于是才补了 mid_roundtrip 这条图。三次都是实测暴露的,
+ * 不是重读代码发现的。)
  *
  * 跑这个基准请**跑多轮看区间**,不要拿单轮的符号下判断 —— 最小那档在 llvmpipe 上会跨零。
  *
@@ -139,6 +138,38 @@ std::string SplitYaml(int64_t out_h, int64_t out_w, double scale, double shift) 
                 "output_ports: [c] }\n"
                 "  - { name: af, kernel: AffineKernel, executor: gpu, input_ports: [c], "
                 "output_ports: [out], options: { scale: %g, shift: %g } }\n"
+                "input_ports: [in]\n"
+                "output_ports: [out]\n",
+                static_cast<long long>(out_h), static_cast<long long>(out_w), scale, shift);
+  return buffer;
+}
+
+/// 第三条图:中间结果**强制往返主机**一次,再交回 GPU 做 affine。
+///
+/// 这是隔离「驻留」本身的那个对比 —— 与 ResidentYaml 相比,两侧的 affine **都跑在 GPU 上、
+/// 用同一个 VkAffine**,唯一差别是中间结果多了一次 device→host→device 往返。于是差值里不再
+/// 混入 "GPU 算术 vs CPU 算术",剩下的就是往返本身:一次多余的 Download(含主机侧输出包
+/// 分配)+ 一次多余的 Upload。
+///
+/// 这正是 kernels/resize.cc 那句「中间结果不落主机时才赢」所断言的东西。
+std::string RoundtripYaml(int64_t out_h, int64_t out_w, double scale, double shift) {
+  char buffer[1400];
+  std::snprintf(buffer, sizeof buffer,
+                "executors:\n"
+                "  - { name: gpu, type: ThreadPoolExecutor, num_threads: 1 }\n"
+                "nodes:\n"
+                "  - { name: up, kernel: VkUpload, executor: gpu, input_ports: [in], "
+                "output_ports: [a] }\n"
+                "  - { name: rs, kernel: VkResize, executor: gpu, input_ports: [a], "
+                "output_ports: [b], options: { out_h: %lld, out_w: %lld } }\n"
+                "  - { name: d1, kernel: VkDownload, executor: gpu, input_ports: [b], "
+                "output_ports: [c] }\n"
+                "  - { name: u2, kernel: VkUpload, executor: gpu, input_ports: [c], "
+                "output_ports: [d] }\n"
+                "  - { name: af, kernel: VkAffine, executor: gpu, input_ports: [d], "
+                "output_ports: [e], options: { scale: %g, shift: %g } }\n"
+                "  - { name: d2, kernel: VkDownload, executor: gpu, input_ports: [e], "
+                "output_ports: [out] }\n"
                 "input_ports: [in]\n"
                 "output_ports: [out]\n",
                 static_cast<long long>(out_h), static_cast<long long>(out_w), scale, shift);
@@ -243,30 +274,38 @@ int main(int argc, char** argv) {
           ResidentYaml(shape.out_h, shape.out_w, affine_scale, affine_shift);
       const std::string split_yaml =
           SplitYaml(shape.out_h, shape.out_w, affine_scale, affine_shift);
+      const std::string roundtrip_yaml =
+          RoundtripYaml(shape.out_h, shape.out_w, affine_scale, affine_shift);
 
-      // 先校验两条图算出同一个东西 —— 否则后面的数字没有可比性。
+      // 三条图必须算出同一个东西 —— 否则后面的数字没有可比性。
       const FrameCheck a = RunOnce(resident_yaml, input, in_shape, 3);
       const FrameCheck b = RunOnce(split_yaml, input, in_shape, 3);
-      const bool same = a.elements == b.elements && a.elements > 0 &&
-                        std::fabs(a.first - b.first) < 1e-4 &&
-                        std::fabs(a.last - b.last) < 1e-4;
-      if (!same) {
+      const FrameCheck c = RunOnce(roundtrip_yaml, input, in_shape, 3);
+      const auto agrees = [&a](const FrameCheck& x) {
+        return x.elements == a.elements && a.elements > 0 &&
+               std::fabs(a.first - x.first) < 1e-4 && std::fabs(a.last - x.last) < 1e-4;
+      };
+      if (!agrees(b) || !agrees(c)) {
         std::fprintf(stderr,
-                     "chain bench: %s 两条图结果不一致(resident %lld 元素 first=%g last=%g / "
-                     "split %lld 元素 first=%g last=%g)—— 拒绝报数\n",
+                     "chain bench: %s 三条图结果不一致(gpu %lld/%g/%g  cpu %lld/%g/%g  "
+                     "roundtrip %lld/%g/%g)—— 拒绝报数\n",
                      shape.label, static_cast<long long>(a.elements), a.first, a.last,
-                     static_cast<long long>(b.elements), b.first, b.last);
+                     static_cast<long long>(b.elements), b.first, b.last,
+                     static_cast<long long>(c.elements), c.first, c.last);
         return EXIT_FAILURE;
       }
 
       const std::string suffix = std::string("/") + shape.label;
-      // 中间结果的大小是这组对比的**驱动变量** —— split 多付的正是它的一次回读 + 一次主机侧
-      // 包分配 + 一趟 CPU 遍历。一并报出来,读者不必自己回去算形状。
+      // 中间结果大小:roundtrip 多付的那一次 Download + Upload 搬的就是它。
       const double mid_bytes =
           static_cast<double>(shape.out_h * shape.out_w * shape.channels) * sizeof(float);
-      results.push_back(Make("vk/second_op_on_gpu" + suffix, iterations, in_bytes,
+      results.push_back(Make("vk/mid_resident" + suffix, iterations, in_bytes,
                              TimeSeconds(warmup, iterations,
                                          [&] { RunOnce(resident_yaml, input, in_shape, 3); }),
+                             mid_bytes));
+      results.push_back(Make("vk/mid_roundtrip" + suffix, iterations, in_bytes,
+                             TimeSeconds(warmup, iterations,
+                                         [&] { RunOnce(roundtrip_yaml, input, in_shape, 3); }),
                              mid_bytes));
       results.push_back(Make("vk/second_op_on_cpu" + suffix, iterations, in_bytes,
                              TimeSeconds(warmup, iterations,
@@ -295,17 +334,27 @@ int main(int argc, char** argv) {
                            r.seconds / (1024.0 * 1024.0);
         std::printf("%-34s %8zu %12.3f %12.1f\n", r.name.c_str(), r.iterations, ms, mib);
       }
-      // 直接把结论算出来,省得读者自己相减 —— 也免得只看绝对值就下判断。
-      std::printf("\naffine 放 GPU 相对放 CPU 的差值(负数 = 放 GPU 更快):\n");
-      for (std::size_t i = 0; i + 1 < results.size(); i += 2) {
-        const double resident_ms =
-            results[i].seconds * 1000.0 / static_cast<double>(results[i].iterations);
-        const double split_ms =
-            results[i + 1].seconds * 1000.0 / static_cast<double>(results[i + 1].iterations);
-        const double delta = (resident_ms - split_ms) / split_ms * 100.0;
-        std::printf("  %-24s 中间 %6.2f MB  %+7.1f%%  (%.3f ms vs %.3f ms)\n",
+      // 直接把两组结论算出来,省得读者自己相减。
+      // 组一(驻留):两侧 affine 都在 GPU,只差中间结果是否往返主机 —— 这是 resize.cc
+      //             「中间结果不落主机时才赢」那句话的直接检验。
+      // 组二(算子落点):affine 放 GPU 对放 CPU —— 两条图搬的字节相同,见文件头警告。
+      std::printf("\n① 驻留 vs 往返(两侧 affine 都在 GPU,只差中间结果是否落主机):\n");
+      for (std::size_t i = 0; i + 2 < results.size() + 1; i += 3) {
+        const double res_ms = results[i].seconds * 1000.0 / results[i].iterations;
+        const double rt_ms = results[i + 1].seconds * 1000.0 / results[i + 1].iterations;
+        std::printf("  %-22s 中间 %6.2f MB  %+7.1f%%  (%.3f ms vs %.3f ms)\n",
                     results[i].name.substr(results[i].name.find('/') + 1).c_str(),
-                    results[i].mid_bytes / (1024.0 * 1024.0), delta, resident_ms, split_ms);
+                    results[i].mid_bytes / (1024.0 * 1024.0),
+                    (res_ms - rt_ms) / rt_ms * 100.0, res_ms, rt_ms);
+      }
+      std::printf("\n② affine 放 GPU vs 放 CPU(字节流量相同,不涉及驻留):\n");
+      for (std::size_t i = 0; i + 2 < results.size() + 1; i += 3) {
+        const double res_ms = results[i].seconds * 1000.0 / results[i].iterations;
+        const double cpu_ms = results[i + 2].seconds * 1000.0 / results[i + 2].iterations;
+        std::printf("  %-22s 中间 %6.2f MB  %+7.1f%%  (%.3f ms vs %.3f ms)\n",
+                    results[i].name.substr(results[i].name.find('/') + 1).c_str(),
+                    results[i].mid_bytes / (1024.0 * 1024.0),
+                    (res_ms - cpu_ms) / cpu_ms * 100.0, res_ms, cpu_ms);
       }
     }
     return EXIT_SUCCESS;
