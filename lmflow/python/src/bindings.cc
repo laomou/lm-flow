@@ -910,6 +910,10 @@ class Graph {
     if (!s || s[0] == '\0') check(LMFLOW_ERR_INVALID_ARG, "to_dot_view");
     return s;
   }
+  std::string to_chrome_trace() const {
+    const char* s = lmflow_graph_to_chrome_trace(g_);
+    return s ? s : "";
+  }
   std::string last_error() const {
     const char* s = lmflow_graph_last_error(g_);
     return s ? s : "";
@@ -1252,6 +1256,7 @@ PYBIND11_MODULE(_lmflow, m) {
       .def("new_buffer", &Graph::new_buffer, py::arg("shape"), py::arg("dtype"))
       .def_property_readonly("state", &Graph::state)
       .def("to_dot_view", &Graph::to_dot_view, py::arg("view"))
+      .def("to_chrome_trace", &Graph::to_chrome_trace)
       .def("last_error", &Graph::last_error)
       .def("dropped_count", &Graph::dropped_count)
       .def("counter_value", &Graph::counter_value)

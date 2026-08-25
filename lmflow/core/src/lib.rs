@@ -108,6 +108,7 @@ pub mod packet;
 pub mod runtime;
 pub mod status;
 pub mod timestamp;
+pub mod trace;
 
 pub use graph::{
     DotView, Graph, Input, OutputEvent, Poller, PollerBackpressureStatsSnapshot, PollerOptions,

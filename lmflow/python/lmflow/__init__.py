@@ -757,6 +757,20 @@ class Graph:
             ) from None
         return self._g.to_dot_view(native_view)
 
+    def to_chrome_trace(self) -> str:
+        """Per-invocation execution trace as Chrome Trace Event Format JSON.
+
+        Open ``chrome://tracing`` (or perfetto) and load the string to see a
+        timeline of which node ran when, on which worker thread, and for how
+        long — detail the aggregate stats (total/max/percentile) cannot show.
+
+        Requires ``trace_capacity: N`` (a bounded event-ring size, 0 = off) at
+        the top level of the graph YAML; enabling it forces stats to ``full``
+        (per-call timing is needed). When tracing is off this returns a valid
+        empty trace (``{"traceEvents": [], ...}``).
+        """
+        return self._g.to_chrome_trace()
+
     def last_error(self) -> str:
         """Graph-level error text — the only place to get a worker-thread kernel's failure reason."""
         return self._g.last_error()

@@ -179,6 +179,27 @@ pub unsafe extern "C" fn lmflow_graph_to_dot_view(g: *mut LMFlowGraph, view: i32
     })
 }
 
+/// 导出当前 trace 环内容为 Chrome Trace Event Format 的 JSON(chrome://tracing / perfetto
+/// 可直接打开)。需在建图时设 `trace_capacity > 0`;未开启时返回合法的空 trace。返回值同
+/// `dump`:**线程局部缓冲**,下次在本线程调用即失效,调用方不得 free(需要就先拷走)。
+#[no_mangle]
+pub unsafe extern "C" fn lmflow_graph_to_chrome_trace(g: *mut LMFlowGraph) -> *const c_char {
+    guard_val(c"".as_ptr(), || {
+        thread_local! {
+            static BUF: std::cell::RefCell<std::ffi::CString> =
+                std::cell::RefCell::new(std::ffi::CString::default());
+        }
+        let text = graph_of(g).map_or_else(
+            || "{\"traceEvents\":[],\"displayTimeUnit\":\"ms\"}".to_string(),
+            |gr| gr.to_chrome_trace(),
+        );
+        BUF.with(|b| {
+            *b.borrow_mut() = std::ffi::CString::new(text).unwrap_or_default();
+            b.borrow().as_ptr()
+        })
+    })
+}
+
 #[repr(C)]
 pub struct LMFlowNodeStats {
     pub struct_size: u32,

@@ -257,6 +257,13 @@ pub struct GraphConfig {
     /// 不得与 `stats` 同时出现。
     #[serde(default)]
     pub stats_timing: Option<bool>,
+    /// 逐次调用 trace 的有界环容量(条数,0 = 关闭)。
+    ///
+    /// 大于 0 时,每次 Open/Process/Close 回调记一条 span 进有界环(满了丢最旧),可经
+    /// `to_chrome_trace()` 导出成 chrome://tracing / perfetto 可读的 JSON。开启会**强制**
+    /// 统计提升为 `full`(需要每次回调计时),故不要在稳态生产中长开。
+    #[serde(default)]
+    pub trace_capacity: usize,
 }
 
 /// **必须与上面的 serde 默认值保持一致** —— 否则「YAML 省略字段」与 Rust
@@ -276,6 +283,7 @@ impl Default for GraphConfig {
             buffer_pool_max_bytes: 0,
             stats: None,
             stats_timing: None,
+            trace_capacity: 0,
         }
     }
 }
@@ -342,7 +350,8 @@ impl GraphConfig {
     }
 
     pub fn effective_stats_level(&self) -> StatsLevel {
-        if self.watchdog_ms > 0 {
+        if self.watchdog_ms > 0 || self.trace_capacity > 0 {
+            // watchdog 与 trace 都依赖每次回调的计时,故都强制提升为 full。
             return StatsLevel::Full;
         }
         self.stats.unwrap_or_else(|| {

@@ -54,6 +54,18 @@ to each GitHub Release.
   is therefore harmless, but a host that wants its *own* bridge kernel under one of these names must
   pick a different name instead. Hosts that link only `lmflow::vulkan` / `lmflow::opencl` (the plumbing
   headers, without the kernels archive) are unaffected and still register whatever they like.
+- **Per-invocation execution trace with Chrome Trace export (`trace_capacity` + `to_chrome_trace`).**
+  The engine already exposed rich *aggregate* per-node stats (total/max process time, throughput, queue
+  high-water marks, e2e latency percentiles) and a diagnostic DOT view, but nothing answered "which node
+  ran *when*, on which worker thread, and for how long" — the question aggregates cannot. Setting
+  `trace_capacity: N` (a bounded event-ring size, `0` = off, the default) at the YAML top level now makes
+  every Open/Process/Close callback record one span into a fixed-size ring (oldest dropped when full, so
+  memory stays bounded), tagged with node, kernel, worker-thread lane, start/duration, and the aligned
+  input timestamp. `graph.to_chrome_trace()` (Rust `Graph`, C `lmflow_graph_to_chrome_trace`, and Python)
+  exports the ring as Chrome Trace Event Format JSON, loadable directly in `chrome://tracing` or perfetto.
+  Enabling it forces `stats: full` (per-call timing is required), exactly as `watchdog_ms > 0` already
+  does, so it is a profiling aid rather than a steady-state production setting; with tracing off the
+  hot path is unchanged (the scheduler never reads the clock) and the exporter returns an empty trace.
 
 ### Fixed
 

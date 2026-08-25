@@ -62,6 +62,26 @@ graph.to_dot(lmflow.DotView.DIAGNOSTICS)
 The diagnostic graph includes queue/backpressure state, executor saturation, route rule hit counts,
 default/unmatched/drop/error counters, missing metadata observations, and predicate evaluation errors.
 
+### Execution timeline (Chrome trace)
+
+The diagnostic DOT above aggregates timing (total/max/percentile per node). To see a *timeline* — which
+node ran when, on which worker thread, and for how long — enable a bounded per-invocation trace ring and
+export it as Chrome Trace Event Format:
+
+```yaml
+trace_capacity: 4096   # bounded event-ring size in entries; 0 = off (default)
+```
+
+```python
+open("trace.json", "w").write(graph.to_chrome_trace())   # open in chrome://tracing or perfetto
+```
+
+Every Open/Process/Close callback records one span; the ring drops the oldest entry when full, so memory
+stays bounded. Enabling it forces `stats: full` (per-call timing is required), so it is a profiling aid,
+not a steady-state production setting. The same export is available from C
+(`lmflow_graph_to_chrome_trace`) and the Rust `Graph`. With tracing off, the exporter returns a valid
+empty trace.
+
 Recommended production checks:
 
 1. Keep `input_queues.packets` bounded for every real-time branch.
