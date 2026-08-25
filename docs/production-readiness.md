@@ -77,7 +77,8 @@ open("trace.json", "w").write(graph.to_chrome_trace())   # open in chrome://trac
 ```
 
 Every Open/Process/Close callback records one span; the ring drops the oldest entry when full, so memory
-stays bounded. Enabling it forces `stats: full` (per-call timing is required), so it is a profiling aid,
+stays bounded — the capacity is in *entries*, and one span is 40 bytes, so 4096 entries is about 160 KB.
+Enabling it forces `stats: full` (per-call timing is required), so it is a profiling aid,
 not a steady-state production setting. The same export is available from C
 (`lmflow_graph_to_chrome_trace`) and the Rust `Graph`. With tracing off, the exporter returns a valid
 empty trace.

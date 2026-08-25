@@ -15,6 +15,8 @@ use std::fmt::Write as _;
 use std::sync::Mutex;
 use std::thread::ThreadId;
 
+use crate::timestamp::Timestamp;
+
 /// 算子回调阶段。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TracePhase {
@@ -45,7 +47,8 @@ pub struct TraceEvent {
     pub start_us: i64,
     /// 本次回调时长(微秒)。
     pub dur_us: i64,
-    /// 本次激活的对齐时间戳原值;Open/Close 阶段可能是 UNSET 哨兵。
+    /// 本次激活的对齐时间戳原值。Open 阶段是 `Unstarted`、Close 阶段是 `Done`,都不是流内
+    /// 值 —— 导出时按名字记(见 [`to_chrome_trace_json`]),不然会是贴着 `i64::MIN/MAX` 的数。
     pub input_ts: i64,
 }
 
@@ -62,6 +65,9 @@ pub struct TraceRing {
 }
 
 impl TraceRing {
+    /// 建一个容量为 `capacity` 条的环。每条 [`TraceEvent`] 40 字节,故 `capacity` 直接决定
+    /// 内存上限(如 4096 条 ≈ 160 KB)。引擎只在 `trace_capacity > 0` 时构造,但本构造器是
+    /// 公开 API,故 `0` 按 `1` 处理 —— 关键是任何输入下都必须有界。
     pub fn new(capacity: usize) -> Self {
         Self {
             inner: Mutex::new(Inner {
@@ -137,12 +143,42 @@ fn push_json_escaped(out: &mut String, s: &str) {
 /// 把 span 导出成 Chrome Trace Event Format(chrome://tracing / perfetto 可直接打开)。
 ///
 /// `labels[node]` = `(节点名, 算子名)`。产出 complete `"X"` 事件,时间单位微秒,`pid = 1`,
-/// `tid` 为环内线程号。手写 JSON(字段少)以免给 core 引入 `serde_json` 依赖。
+/// `tid` 为环内线程号,并为每条泳道补一条 `"M"` 元事件命名 —— 没有它查看器只显示裸 tid
+/// 数字,而「哪个线程」正是这个视图的看点。
+///
+/// 手写 JSON 而非用 `serde_json`(它本就是本 crate 的依赖):一次导出可能上万条 span,直接
+/// 写字符串省掉为每条 span 建中间 `Value` 树的开销。
 pub fn to_chrome_trace_json(events: &[TraceEvent], labels: &[(String, String)]) -> String {
-    let mut out = String::with_capacity(64 + events.len() * 128);
+    let mut out = String::with_capacity(128 + events.len() * 128);
     out.push_str("{\"traceEvents\":[");
-    for (i, e) in events.iter().enumerate() {
-        if i > 0 {
+    let mut first = true;
+
+    // ---- 泳道命名:每条出现过的 tid 一条 thread_name 元事件 ----
+    let mut tids: Vec<u32> = events.iter().map(|e| e.tid).collect();
+    tids.sort_unstable();
+    tids.dedup();
+    for tid in tids {
+        if first {
+            first = false;
+            out.push_str(
+                "{\"name\":\"process_name\",\"ph\":\"M\",\"pid\":1,\
+                 \"args\":{\"name\":\"lm-flow graph\"}},",
+            );
+        } else {
+            out.push(',');
+        }
+        let _ = write!(
+            out,
+            "{{\"name\":\"thread_name\",\"ph\":\"M\",\"pid\":1,\"tid\":{tid},\
+             \"args\":{{\"name\":\"worker {tid}\"}}}}"
+        );
+    }
+
+    // ---- span 本体 ----
+    for e in events {
+        if first {
+            first = false;
+        } else {
             out.push(',');
         }
         let (node_name, kernel_name) = labels
@@ -165,7 +201,15 @@ pub fn to_chrome_trace_json(events: &[TraceEvent], labels: &[(String, String)]) 
         out.push_str(",\"phase\":");
         push_json_escaped(&mut out, e.phase.as_str());
         out.push_str(",\"input_ts\":");
-        let _ = write!(out, "{}", e.input_ts);
+        let ts = Timestamp(e.input_ts);
+        if ts.is_range_value() {
+            let _ = write!(out, "{}", e.input_ts);
+        } else {
+            // 哨兵(Unset/Unstarted/PreStream/PostStream/Done…)贴着 i64::MIN/MAX,原样导出
+            // 会在查看器里显示成 -9223372036854775806 这种天文数字。用 Timestamp 既有的
+            // Display 记成名字,一眼看出是哪个哨兵 —— Open/Close 阶段拿到的就是它们。
+            push_json_escaped(&mut out, &ts.to_string());
+        }
         out.push_str("}}");
     }
     out.push_str("],\"displayTimeUnit\":\"ms\"}");
@@ -218,5 +262,79 @@ mod tests {
         assert!(json.contains("no\\\"de"), "name quote escaped");
         assert!(json.contains("Kern\\\\el"), "kernel backslash escaped");
         assert!(json.contains("\"input_ts\":1000"));
+    }
+
+    #[test]
+    fn lanes_get_named_and_empty_stays_valid() {
+        // 每条泳道一条 thread_name 元事件,否则查看器只显示裸 tid 数字。
+        let ev = |tid| TraceEvent {
+            node: 0,
+            phase: TracePhase::Process,
+            tid,
+            start_us: 0,
+            dur_us: 1,
+            input_ts: 7,
+        };
+        let labels = vec![("n".to_string(), "K".to_string())];
+        let json = to_chrome_trace_json(&[ev(0), ev(2), ev(0)], &labels);
+        assert!(json.contains("\"process_name\""), "进程名: {json}");
+        assert_eq!(
+            json.matches("\"thread_name\"").count(),
+            2,
+            "两条泳道各一条,重复 tid 不重复发: {json}"
+        );
+        assert!(
+            json.contains("\"name\":\"worker 2\""),
+            "泳道 2 命名: {json}"
+        );
+
+        // 没有 span 时不得凭空产出元事件,仍是合法空 trace。
+        let empty = to_chrome_trace_json(&[], &labels);
+        assert!(
+            empty.contains("\"traceEvents\":[]"),
+            "空 trace 不带元事件: {empty}"
+        );
+    }
+
+    #[test]
+    fn sentinel_input_ts_exports_as_a_name() {
+        // Open/Close 阶段的 input_ts 是贴着 i64::MIN/MAX 的哨兵,原样导出是天文数字。
+        let ev = |ts: Timestamp| TraceEvent {
+            node: 0,
+            phase: TracePhase::Open,
+            tid: 0,
+            start_us: 0,
+            dur_us: 1,
+            input_ts: ts.0,
+        };
+        let labels = vec![("n".to_string(), "K".to_string())];
+
+        let json = to_chrome_trace_json(&[ev(Timestamp::unstarted())], &labels);
+        assert!(
+            json.contains("\"input_ts\":\"Unstarted\""),
+            "哨兵应记成名字: {json}"
+        );
+        assert!(
+            !json.contains(&format!("{}", i64::MIN + 1)),
+            "不该出现天文数字: {json}"
+        );
+
+        let json = to_chrome_trace_json(&[ev(Timestamp::done())], &labels);
+        assert!(json.contains("\"input_ts\":\"Done\""), "Done: {json}");
+
+        // 普通流内时间戳仍是数字(供查看器按数值筛选)。
+        let json = to_chrome_trace_json(&[ev(Timestamp(42))], &labels);
+        assert!(json.contains("\"input_ts\":42"), "普通值仍为数字: {json}");
+    }
+
+    #[test]
+    fn zero_capacity_ring_stays_bounded() {
+        // `TraceRing::new` 是公开 API,故 0 是可达输入(引擎自己只在 >0 时构造)。
+        // `capacity.max(1)` 就是为它兜底:必须仍然有界,不能无限增长。
+        let ring = TraceRing::new(0);
+        for i in 0..5 {
+            ring.record(i, TracePhase::Process, 0, 1, 0);
+        }
+        assert_eq!(ring.snapshot().len(), 1, "0 容量按 1 处理,仍然有界");
     }
 }

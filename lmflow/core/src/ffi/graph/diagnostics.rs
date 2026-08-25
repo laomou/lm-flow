@@ -190,7 +190,9 @@ pub unsafe extern "C" fn lmflow_graph_to_chrome_trace(g: *mut LMFlowGraph) -> *c
                 std::cell::RefCell::new(std::ffi::CString::default());
         }
         let text = graph_of(g).map_or_else(
-            || "{\"traceEvents\":[],\"displayTimeUnit\":\"ms\"}".to_string(),
+            // 空句柄:仍给一个合法的空 trace。走同一个导出器而非硬编码字面量,
+            // 免得将来给格式加字段时两处漂移。
+            || crate::trace::to_chrome_trace_json(&[], &[]),
             |gr| gr.to_chrome_trace(),
         );
         BUF.with(|b| {

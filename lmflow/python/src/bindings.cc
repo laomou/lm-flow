@@ -912,7 +912,10 @@ class Graph {
   }
   std::string to_chrome_trace() const {
     const char* s = lmflow_graph_to_chrome_trace(g_);
-    return s ? s : "";
+    // 成功导出**永不**是空串:未开启 trace 也至少产出 `{"traceEvents":[],...}`。
+    // 故空串只可能是 guard 兜住了 panic 或句柄为空 —— 别静默当成空 trace 返回。
+    if (!s || s[0] == '\0') check(LMFLOW_ERR_INVALID_ARG, "to_chrome_trace");
+    return s;
   }
   std::string last_error() const {
     const char* s = lmflow_graph_last_error(g_);

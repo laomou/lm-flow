@@ -262,6 +262,9 @@ pub struct GraphConfig {
     /// 大于 0 时,每次 Open/Process/Close 回调记一条 span 进有界环(满了丢最旧),可经
     /// `to_chrome_trace()` 导出成 chrome://tracing / perfetto 可读的 JSON。开启会**强制**
     /// 统计提升为 `full`(需要每次回调计时),故不要在稳态生产中长开。
+    ///
+    /// 单位是**条**而非字节:每条 span 40 字节,故 4096 条 ≈ 160 KB、100 万条 ≈ 40 MB。
+    /// 引擎不设上限 —— 环占多少内存由你这个数字直接决定,填之前先乘一下。
     #[serde(default)]
     pub trace_capacity: usize,
 }
@@ -1485,6 +1488,69 @@ output_ports: [out]
         // 关闭时不得越权提升:默认仍是 basic。
         let off = GraphConfig::from_yaml("nodes: []\ntrace_capacity: 0").unwrap();
         assert_eq!(off.effective_stats_level(), StatsLevel::Basic);
+    }
+
+    /// `docs/lmflow-config.schema.json` 与 `GraphConfig` 必须逐字段对齐。schema 顶层是
+    /// `additionalProperties: false`,所以**漏一个字段**就等于让文档里教的配置校验不过;
+    /// 反过来 `GraphConfig` 是 `deny_unknown_fields`,schema **多一个字段**就等于放行一个
+    /// 引擎其实会拒的键。两边都是静默失败,靠人记着同步已经漏过一次(`trace_capacity`)。
+    #[test]
+    fn schema_and_graph_config_agree_on_top_level_fields() {
+        // 这个解构是这个测试的关键:给 `GraphConfig` 加字段会让**这里编译不过**,从而强制
+        // 把新字段同时补进下面的名单和 schema。没有它,这个测试只是又一处要手动同步的地方。
+        let GraphConfig {
+            executors: _,
+            nodes: _,
+            include: _,
+            subgraphs: _,
+            input_ports: _,
+            output_ports: _,
+            max_queue_size: _,
+            max_queued_packets: _,
+            watchdog_ms: _,
+            buffer_pool_max_bytes: _,
+            stats: _,
+            stats_timing: _,
+            trace_capacity: _,
+        } = GraphConfig::default();
+        // 与上面解构出的字段一一对应(没有 serde rename,故 YAML 键名与字段名同名)。
+        const FIELDS: &[&str] = &[
+            "executors",
+            "nodes",
+            "include",
+            "subgraphs",
+            "input_ports",
+            "output_ports",
+            "max_queue_size",
+            "max_queued_packets",
+            "watchdog_ms",
+            "buffer_pool_max_bytes",
+            "stats",
+            "stats_timing",
+            "trace_capacity",
+        ];
+
+        // JSON 是 YAML 1.2 的子集,故直接用已有的 serde_yaml 解析,无需新增依赖。
+        let text = include_str!("../../../docs/lmflow-config.schema.json");
+        let schema: serde_yaml::Value = serde_yaml::from_str(text).expect("schema 应为合法 JSON");
+        let props = schema
+            .get("properties")
+            .and_then(|p| p.as_mapping())
+            .expect("schema 应有顶层 properties");
+        let keys: Vec<&str> = props.keys().filter_map(|k| k.as_str()).collect();
+
+        for field in FIELDS {
+            assert!(
+                keys.contains(field),
+                "schema 缺 `{field}` —— 文档里教用户配的键会被 additionalProperties:false 拒掉"
+            );
+        }
+        for key in &keys {
+            assert!(
+                FIELDS.contains(key),
+                "schema 有 `{key}` 但 GraphConfig 没有 —— deny_unknown_fields 会拒掉它"
+            );
+        }
     }
 
     #[test]
