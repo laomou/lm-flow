@@ -391,7 +391,14 @@ impl Poller {
                 return Err(error);
             }
             if self.inner.closed.load(Ordering::SeqCst) {
-                return Ok(None);
+                // `closed` is a latch meaning "no more packets will be *enqueued*" — NOT
+                // "the queue is empty". A producer can enqueue the final packet(s) and then
+                // close the edge in the window between the `pop` at the top of this loop and
+                // this check (e.g. this thread is preempted right here on a busy machine).
+                // Drain with a fresh `pop` — mirroring the idle branch below — so end-of-stream
+                // never abandons a packet that landed in that window. Returning `None` here
+                // unconditionally silently drops those packets.
+                return Ok(self.inner.pop(&self.graph));
             }
             if self.graph.pump_step() {
                 continue;
@@ -420,15 +427,25 @@ impl Poller {
             return Err(error);
         }
         if self.inner.closed.load(Ordering::SeqCst) {
-            return Ok(None);
+            // `closed` latches "no more enqueues", not "queue empty": a producer may enqueue
+            // and close between the `pop` above and this load. Re-pop so end-of-stream never
+            // drops that packet (see `next_deadline`).
+            return Ok(self.inner.pop(&self.graph));
         }
         Ok(None)
     }
 
+    /// 边是否已关闭 —— 即「**不会再有入队**」,**不等于**队列已排空。
+    ///
+    /// 单独用它判流结束会丢包:生产者可以在你读到 `false` 之后入队并关边。判流结束请用
+    /// `next()` / `next_result()` / `try_next_result()` 返回的 `Ok(None)`(它们已经包含了
+    /// 最终排空),或者显式写成 `is_closed() && is_empty()` —— 顺序不能反,先观察到 closed
+    /// 为真才能保证随后的 `is_empty()` 是权威的。
     pub fn is_closed(&self) -> bool {
         self.inner.closed.load(Ordering::SeqCst)
     }
 
+    /// 队列当前是否为空。**不代表流结束** —— 见 [`is_closed`](Self::is_closed)。
     pub fn is_empty(&self) -> bool {
         self.inner.is_empty()
     }

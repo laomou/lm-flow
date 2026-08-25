@@ -1729,3 +1729,67 @@ output_ports: ["out"]
         lmflow_set_log_callback(None, std::ptr::null_mut());
     }
 }
+
+/// `try_next_status` 的 `CLOSED` 语义:**队列排空之后**才是 `CLOSED`。边已关闭但队列里还有包
+/// 时必须继续给包(`OK`),不能报流结束 —— 否则 C 侧一见 `CLOSED` 就停止排空,包就丢了。
+///
+/// 这是**契约测试,不是回归测试**:它在修复前也通过(那种状态下 `try_next_result` 顶部的
+/// `pop` 直接命中)。真正被修掉的竞争发生在 `try_next_result` 返回 `Ok(None)` 与随后那次
+/// 独立的 `is_closed()` 之间的几条指令里,不往生产代码塞注入点没法稳定复现。此处锁住的是
+/// 对外可见的语义:`CLOSED` ⟺ 已关闭**且**已排空。
+///
+/// 「此刻确实已关闭」由最后那句 `CLOSED` 断言反证:边若没关,排空后返回的会是
+/// `WOULD_BLOCK`(5) 而不是 `CLOSED`(8);而 `wait_done` 已返回、其间没有任何生产,
+/// 所以前面三次 `OK` 也处在同一个已关闭状态下。ABI 没有导出 `is_closed`,故只能这样断言。
+#[test]
+fn try_next_status_reports_closed_only_after_the_queue_drains() {
+    register_test_kernels();
+    unsafe {
+        let graph = lmflow_graph_new();
+        let yaml = cs(r#"
+executors:
+  - { name: host, type: DelegatingExecutor }
+nodes:
+  - { name: pass, kernel: PassThrough, executor: host, input_ports: [in], output_ports: [out] }
+input_ports: [in]
+output_ports: [out]
+"#);
+        assert_eq!(lmflow_graph_init_from_yaml(graph, yaml.as_ptr()), 0);
+        let output = cs("out");
+        let poller = lmflow_graph_add_poller(graph, output.as_ptr());
+        assert!(!poller.is_null());
+        assert_eq!(lmflow_graph_start(graph), 0);
+        let input_name = cs("in");
+        let input = lmflow_graph_input(graph, input_name.as_ptr());
+        const N: i32 = 3;
+        for i in 0..N {
+            assert_eq!(lmflow_input_send(input, make_int_packet(i, i as i64)), 0);
+        }
+        // 先关边、再把图跑完:此刻 poller 的 closed 已置位,而 N 个包全在队列里 —— 正是
+        // 「已关闭但未排空」这个必须返回 OK 的状态。
+        lmflow_graph_close_all_inputs(graph);
+        assert_eq!(lmflow_graph_wait_done(graph), 0);
+
+        for i in 0..N {
+            let mut packet = LMFlowPacket::default();
+            assert_eq!(
+                lmflow_poller_try_next_status(poller, &mut packet),
+                0,
+                "第 {i} 个包:边已关闭但队列非空,必须返回 OK 而不是 CLOSED"
+            );
+            assert_eq!(*(packet.payload as *const i32), i);
+            lmflow_packet_drop(&mut packet);
+        }
+
+        let mut packet = LMFlowPacket::default();
+        assert_eq!(
+            lmflow_poller_try_next_status(poller, &mut packet),
+            8,
+            "排空之后才是 CLOSED"
+        );
+
+        lmflow_input_free(input);
+        lmflow_poller_free(poller);
+        lmflow_graph_free(graph);
+    }
+}
