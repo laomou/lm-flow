@@ -1,57 +1,51 @@
 /*
- * chain_bench.cc —— 回答一个具体问题:**把第二个算子也放 GPU、让中间结果留在设备上,
- * 到底值不值?**
+ * chain_bench.cc —— 量一件事:**一条预处理链里的第二个逐元素算子,放 GPU 还是放 CPU?**
  *
- * adapters/vulkan/kernels/resize.cc 写着盈亏平衡在「连续 2~3 个 GPU 算子、中间结果不落主机」
- * 时才出现,但在 affine 落地之前根本没有第二个算子可串,所以那句话一直是推断。这个基准就是
- * 去量它。
+ * 起因是 adapters/vulkan/kernels/resize.cc 写着盈亏平衡在「连续 2~3 个 GPU 算子、中间结果
+ * 不落主机」时才出现,而在 affine 落地之前没有第二个算子可串,那句话一直是推断。本文件量到的
+ * 是那句话的**一半**:第二个算子放 GPU 确实更快。至于"不落主机"那一半 —— 见下面的警告,
+ * 这里并没有测到。
  *
  * 与 vulkan_bench.cc 的分工:那个是**分阶段**基准(upload / dispatch / download 各自的成本
  * 来源不同,分开才能把优化归因到阶段)。这个是**图级**基准 —— 因为要比较的两种做法差别不在
- * 某个阶段内部,而在「中间结果过不过 CPU 边界」,只有整条图才能体现,而且这也正是宿主真正
- * 感受到的数字(含引擎开销)。
+ * 某个阶段内部,而在第二个算子跑在哪一侧、以及由此多出的一个图节点,只有整条图才能体现;
+ * 而且这也正是宿主真正感受到的数字(含引擎开销)。
  *
- * 两条图算出**完全相同的结果**,只差 affine 在哪执行:
+ * ⚠ **它测的不是"驻留"。** 两条图算出完全相同的结果,只差第二个逐元素算子在哪执行:
  *
- *   resident: VkUpload → VkResize → VkAffine → VkDownload     ← 中间是驻留设备的 vk::Image
- *   split:    VkUpload → VkResize → VkDownload → Affine(CPU)  ← 中间落回主机再算
+ *   second_op_on_gpu: VkUpload → VkResize → VkAffine → VkDownload
+ *   second_op_on_cpu: VkUpload → VkResize → VkDownload → AffineKernel(CPU)
  *
- * 于是 split - resident 就是「第二个算子留在 GPU」省下的量:一次设备→主机回读、一次主机侧
- * 输出包分配、以及一趟 CPU 逐元素遍历。基准会**校验两条图的输出一致**再报数 —— 算错的基准
- * 没有意义。
+ * 注意两条图的 `VkDownload` **搬运的字节数完全相同** —— 一条在 affine 之后下载,另一条在
+ * resize 之后下载,而 affine 不改变形状。所以这里**没有省下任何一次跨边界传输**,差值全部
+ * 来自「同一个逐元素运算放 GPU 还是放 CPU」,外加 split 侧多一个图节点的调度与包分配。
  *
- * 形状用真实预处理尺寸(1080p → 模型输入),而不是抽象的等长 buffer:resize → 归一化 是
- * 这一对算子的实际用途,而 resize 会大幅缩小数据量,这恰恰**对 resident 不利**(中间结果
- * 越小,省下的那次回读就越便宜)。用真实形状才不会把结论吹大。
+ * 这仍是个有用的问题(宿主真的在这两者之间选),但它**不能**用来支持「中间结果不落主机才是
+ * 收益来源」。要测驻留本身,split 侧必须在两个 GPU 算子之间真的**下载再上传**一次,比如:
  *
- * ⚠ 与 vulkan_bench.cc 同一条警告:软件实现(lavapipe / llvmpipe)上 dispatch 由 CPU 跑,
- * 设备侧数字**不代表真实 GPU**。主机侧成本(回读、包分配)仍然可信。报告带设备名与
- * software 标记,别拿软件实现的数字去推真机。
+ *   驻留:  Upload → Resize → Affine → Download
+ *   不驻留:Upload → Resize → Download → Upload → Affine → Download
  *
- * ── 实测结论(务必连同下面的归因一起读)────────────────────────────────────────
+ * 那才是「多一次往返」对「留在设备上」。本文件目前**没有**实现那个对比。
  *
- * Adreno 740 / SM8550 / Android 13,4 轮取中位;llvmpipe 一列作对照:
+ * ── 实测(Adreno 740 / SM8550 / Android 13,中位)────────────────────────────
  *
- *   形状              中间结果   Adreno 740    llvmpipe   Δ绝对(ms)   Δ/输出元素
- *   1080p → 224x224    0.57 MB      -9.4%       -1.5%        5.7        37.7 ns
- *   720p  → 360x640    2.64 MB      -33%       -13.2%       15.4        22.3 ns
- *   1080p → 540x960    5.93 MB      -33.6%     -12.9%       31.1        20.0 ns
+ *   形状              输出元素     CPU affine 泛化路   CPU affine 快路   Δ/元素
+ *   1080p → 224x224     150,528        -9.4%              -2.1%          11.3 ns
+ *   720p  → 360x640     691,200        -33%              -17.2%          10.3 ns
+ *   1080p → 540x960   1,555,200        -33.6%            -17.9%           8.0 ns
  *
- * **归因:差值几乎全部是 CPU 侧的逐元素开销,不是数据传输。** 最后一列是关键 —— 两个大档
- * 给出 22.3 / 20.0 ns 每输出元素,高度一致,即差值**线性于输出元素数**。而 cpp/kernels/
- * affine.cc 的循环正是每元素两次 dtype 分派(`read_f64` / `write_f64`)再提升到 double,
- * 不可向量化,~20 ns/元素完全对得上。2.64 MB 的映射回读在统一内存上只值 1~2 ms,解释不了
- * 15 ms。
+ * 左列是 cpp/kernels/affine.cc 每元素两次 dtype 分派的旧路径;中列是给它加了 f32/f64 特化
+ * 快路之后。**一半的差距原本只是那个泛化循环** —— 这也是加快路的由来(它对所有 CPU 用户
+ * 有效,不只是 GPU adapter 的宿主)。
  *
- * 所以这个基准**真正比较的是**「GPU affine」对「随仓库发布的那个泛化 CPU affine」。这是一个
- * 公平的现实对比(宿主真会用那个算子),但它**不能**用来支持「中间结果不落主机才是收益来源」
- * —— 传输在这里是次要项。想验证"驻留"本身的价值,得让两侧的 affine 实现等价。
+ * 右列是快路之后的残差,仍约 8~11 ns/输出元素、仍线性于元素数。由于两条图搬的字节相同,这个
+ * 残差不是传输,而是「向量化的 CPU 乘加 + 多一个节点」对「一次 GPU dispatch」;要再往下归因
+ * 需要单独的微基准,不要靠推理。
  *
- * 由此引出一条比 GPU 链更宽的收益:给 CPU affine 加一条 f32→f32 的特化快路,受益的是**所有**
- * CPU 用户,而不只是用 GPU adapter 的。
- *
- * (早前只有 llvmpipe 数据时,我据"百分比不随中间结果增长"判断收益以固定成本为主 —— 那是
- * 错的:百分比不变只是因为基线同步变大,绝对差值其实严格线性于元素数。真机数据才暴露出来。)
+ * (两条已修正的记录:早前只有 llvmpipe 数据时,我据"百分比不随中间结果增长"判断收益以固定
+ * 成本为主 —— 错的,绝对差值严格线性于元素数;更早我把这整个对比称作"驻留是否值得" ——
+ * 也是错的,两条图的跨边界字节数相同。都由实测暴露。)
  *
  * 跑这个基准请**跑多轮看区间**,不要拿单轮的符号下判断 —— 最小那档在 llvmpipe 上会跨零。
  *
@@ -270,11 +264,11 @@ int main(int argc, char** argv) {
       // 包分配 + 一趟 CPU 遍历。一并报出来,读者不必自己回去算形状。
       const double mid_bytes =
           static_cast<double>(shape.out_h * shape.out_w * shape.channels) * sizeof(float);
-      results.push_back(Make("vk/chain_resident" + suffix, iterations, in_bytes,
+      results.push_back(Make("vk/second_op_on_gpu" + suffix, iterations, in_bytes,
                              TimeSeconds(warmup, iterations,
                                          [&] { RunOnce(resident_yaml, input, in_shape, 3); }),
                              mid_bytes));
-      results.push_back(Make("vk/chain_split" + suffix, iterations, in_bytes,
+      results.push_back(Make("vk/second_op_on_cpu" + suffix, iterations, in_bytes,
                              TimeSeconds(warmup, iterations,
                                          [&] { RunOnce(split_yaml, input, in_shape, 3); }),
                              mid_bytes));
@@ -302,7 +296,7 @@ int main(int argc, char** argv) {
         std::printf("%-34s %8zu %12.3f %12.1f\n", r.name.c_str(), r.iterations, ms, mib);
       }
       // 直接把结论算出来,省得读者自己相减 —— 也免得只看绝对值就下判断。
-      std::printf("\nresident 相对 split 的差值(负数 = 留在 GPU 更快):\n");
+      std::printf("\naffine 放 GPU 相对放 CPU 的差值(负数 = 放 GPU 更快):\n");
       for (std::size_t i = 0; i + 1 < results.size(); i += 2) {
         const double resident_ms =
             results[i].seconds * 1000.0 / static_cast<double>(results[i].iterations);
