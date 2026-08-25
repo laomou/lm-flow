@@ -36,7 +36,7 @@ to each GitHub Release.
 ### Fixed
 
 - **Output poller could silently drop tail packets at end-of-stream under load.** `Poller::next`
-  (and `try_next`) treated an edge's `closed` flag as "the queue is empty" and returned `None`
+  (and `try_next_result`) treated an edge's `closed` flag as "the queue is empty" and returned `None`
   without a final drain. But `closed` only latches "no more packets will be *enqueued*": a producer
   can enqueue the last packet(s) and close the edge in the window between the poller's empty `pop`
   and its `closed` check, so a consumer preempted in that window (common on a busy/few-core machine)
@@ -45,6 +45,14 @@ to each GitHub Release.
   `peak_queue_depth_is_a_high_water_mark` flake observed on the macOS CI runner; a contended
   regression test (`blocking_next_drains_tail_when_edge_closes_mid_drain`) drops packets without
   the fix and passes with it.
+- **`lmflow_poller_try_next_status` could report `CLOSED` with packets still queued.** The same race
+  one level up, at the C ABI: on `Ok(None)` the entrypoint decided `CLOSED` vs `WOULD_BLOCK` from a
+  *second, later* `is_closed()` load, so a producer that enqueued and closed in between made it
+  report end-of-stream over a non-empty queue — and a C consumer treating `CLOSED` as "stop draining"
+  lost those packets. It now requires `is_closed() && is_empty()`, returning `WOULD_BLOCK` while the
+  queue still holds packets. `lmflow_poller_next_status` / `next_timeout` were never affected (their
+  `Ok(None)` already includes the final drain), nor was
+  `lmflow_kernel_runner_try_output` (it maps `Ok(None)` to `WOULD_BLOCK` unconditionally).
 
 ## [0.3.1] — 2026-08-18
 

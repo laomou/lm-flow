@@ -265,7 +265,17 @@ pub unsafe extern "C" fn lmflow_poller_try_next_status(
                 code::OK
             }
             Ok(None) => {
-                if poller.is_closed() {
+                // `Ok(None)` 这里可能来自 `try_next_result` 的**未关闭**分支 —— 即「读那一刻
+                // 队列空且未 closed」。下面这次 `is_closed()` 是**更晚的另一次 load**:生产者
+                // 可以在两次之间入队并关边,此时只看 `is_closed()` 就会在**队列非空**时报
+                // `CLOSED`,而 C 侧据此停止排空 —— 与 `Poller::next` 里刚修掉的丢包是同一个
+                // 竞争,只是搬到了 ABI 边界上。
+                //
+                // 因此必须两个条件都成立才算流结束。顺序不能反:先观察到 `closed == true`
+                // 就意味着不会再有入队,随后的 `is_empty()` 才是权威的;反过来先看空、再看
+                // closed,中间又是同一个窗口。队列非空时返回 `WOULD_BLOCK` 让调用方再来一次,
+                // 下一次的 `pop` 就会取到那些包。
+                if poller.is_closed() && poller.is_empty() {
                     code::CLOSED
                 } else {
                     code::WOULD_BLOCK

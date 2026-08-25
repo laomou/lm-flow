@@ -435,10 +435,17 @@ impl Poller {
         Ok(None)
     }
 
+    /// 边是否已关闭 —— 即「**不会再有入队**」,**不等于**队列已排空。
+    ///
+    /// 单独用它判流结束会丢包:生产者可以在你读到 `false` 之后入队并关边。判流结束请用
+    /// `next()` / `next_result()` / `try_next_result()` 返回的 `Ok(None)`(它们已经包含了
+    /// 最终排空),或者显式写成 `is_closed() && is_empty()` —— 顺序不能反,先观察到 closed
+    /// 为真才能保证随后的 `is_empty()` 是权威的。
     pub fn is_closed(&self) -> bool {
         self.inner.closed.load(Ordering::SeqCst)
     }
 
+    /// 队列当前是否为空。**不代表流结束** —— 见 [`is_closed`](Self::is_closed)。
     pub fn is_empty(&self) -> bool {
         self.inner.is_empty()
     }
