@@ -11,7 +11,7 @@ endif()
 # 非 MSVC 生成器会忽略这个变量。
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreadedDLL")
 
-project(lmflow VERSION 0.3.1 LANGUAGES CXX)
+project(lmflow VERSION 0.3.2 LANGUAGES CXX)
 
 # 引擎是纯 Rust crate(lmflow/core),Cargo 产 core staticlib；CMake 单独编译
 # lmflow/cpp/kernels，并按开关组合原生 SDK 与 Python 扩展。
