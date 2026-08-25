@@ -44,6 +44,13 @@ if(LMFLOW_BUILD_OPENCL_ADAPTER AND LMFLOW_BUILD_TESTS
   add_dependencies(lmflow_opencl_test flow_engine)
   add_test(NAME lmflow_opencl_test COMMAND lmflow_opencl_test)
 
+  # buffer 池的行为:稳态零新分配(收益指标本身)、池满时的淘汰策略、flags 不同不得互相复用
+  # (这条是正确性,不是性能),以及两个上限。与 adapters/vulkan/tests/pool_test.cc 同构。
+  add_executable(lmflow_opencl_pool_test tests/pool_test.cc)
+  target_link_libraries(lmflow_opencl_pool_test PRIVATE lmflow::opencl)
+  add_dependencies(lmflow_opencl_pool_test flow_engine)
+  add_test(NAME lmflow_opencl_pool_test COMMAND lmflow_opencl_pool_test)
+
   # 随 adapter 的算子:链 lmflow::opencl_kernels(OclResize 由该档案静态自注册),
   # 数值逐点对照测试内的 CPU 参考实现。
   add_executable(lmflow_opencl_resize_test tests/resize_test.cc)

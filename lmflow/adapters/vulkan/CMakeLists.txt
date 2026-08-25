@@ -43,6 +43,13 @@ if(LMFLOW_BUILD_VULKAN_ADAPTER AND LMFLOW_BUILD_TESTS
   add_dependencies(lmflow_vulkan_test flow_engine)
   add_test(NAME lmflow_vulkan_test COMMAND lmflow_vulkan_test)
 
+  # buffer 池的行为:稳态零新分配(池化的收益指标本身)、池满时的淘汰策略、以及两个上限。
+  # 数值测试覆盖不到这些 —— 把池改成永不命中或把淘汰写反,resize 照样全绿。
+  add_executable(lmflow_vulkan_pool_test tests/pool_test.cc)
+  target_link_libraries(lmflow_vulkan_pool_test PRIVATE lmflow::vulkan)
+  add_dependencies(lmflow_vulkan_pool_test flow_engine)
+  add_test(NAME lmflow_vulkan_pool_test COMMAND lmflow_vulkan_pool_test)
+
   # 随 adapter 的算子:链 lmflow::vulkan_kernels(VkResize 由该档案静态自注册),
   # 数值逐点对照测试内的 CPU 参考实现,并与 OpenCL 侧同一套约定。
   add_executable(lmflow_vulkan_resize_test tests/resize_test.cc)
