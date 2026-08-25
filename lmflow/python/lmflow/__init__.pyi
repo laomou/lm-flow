@@ -93,7 +93,7 @@ class Poller:
     def try_next(self) -> Packet | None: ...
 
 class KernelRunner:
-    """CalculatorRunner-style harness; directly drives one kernel without Graph."""
+    """Single-kernel test harness; directly drives one kernel without Graph."""
     def __init__(
         self,
         kernel: str,

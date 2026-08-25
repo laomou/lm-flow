@@ -714,7 +714,14 @@ inline Image EnqueueUnary(const Image& input, const std::string& source, const s
   return Enqueue(input, DispatchSpec{}, source, entry, std::forward<SetArgs>(set_args));
 }
 
-/// LMFlowBuffer -> Image。注册名建议 "OclUpload"。
+/// LMFlowBuffer -> Image。
+///
+/// 随 adapter 的 kernels archive 以 **"OclUpload"** 注册(见 kernels/bridge.cc),所以链
+/// `lmflow::opencl_kernels` 的宿主图里直接写 `kernel: OclUpload` 即可,不必自己注册。
+/// 只链 `lmflow::opencl`(纯管道)的宿主仍需自行注册,名字随意。
+///
+/// ⚠ 若你想用**自己的**上传算子,请换一个注册名:重名时 `LMFLOW_REGISTER_KERNEL_AS`
+/// 不检查返回值,两次注册会静默丢掉一个,谁生效取决于静态初始化顺序。
 class UploadKernel : public Kernel {
  public:
   static void GetContract(Contract& c) {
@@ -731,7 +738,10 @@ class UploadKernel : public Kernel {
   }
 };
 
-/// Image -> LMFlowBuffer。注册名建议 "OclDownload"。
+/// Image -> LMFlowBuffer。
+///
+/// 随 adapter 的 kernels archive 以 **"OclDownload"** 注册(见 kernels/bridge.cc);重名
+/// 注意事项同 `UploadKernel`。
 class DownloadKernel : public Kernel {
  public:
   static void GetContract(Contract& c) {

@@ -141,12 +141,9 @@ void RunCase(const char* label, int in_h, int in_w, int channels, int out_h, int
 
 }  // namespace
 
-// OclResize 由 lmflow_opencl_kernels 档案静态自注册,**此处不能再注册**。
-// upload/download 是 adapter 头里的类,按约定由宿主注册。
-using OclUploadKernel = lmflow::ocl::UploadKernel;
-using OclDownloadKernel = lmflow::ocl::DownloadKernel;
-LMFLOW_REGISTER_KERNEL_AS(OclUploadKernel, "OclUpload")
-LMFLOW_REGISTER_KERNEL_AS(OclDownloadKernel, "OclDownload")
+// OclResize / OclUpload / OclDownload 都由 lmflow_opencl_kernels 档案静态自注册
+// (kernels/resize.cc、kernels/bridge.cc),本测试链的就是该档案,**此处不能再注册**
+// (重复注册同名会在静态初始化期报错)。
 
 int main() {
   try {

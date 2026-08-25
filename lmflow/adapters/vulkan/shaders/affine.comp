@@ -1,0 +1,28 @@
+#version 450
+// affine.comp —— 逐元素仿射 out[i] = in[i] * scale + shift,与 cpp/kernels/affine.cc
+// 及 adapters/opencl/kernels/affine.cc 同一套语义(F32)。归一化(减均值除方差、缩放到
+// [0,1])就是它的直接用途,典型接在 resize 之后:resize → affine → …,中间不落主机。
+//
+// 同形逐元素,故用 1 维工作组、按输出元素数铺(见 vulkan.hpp 的 EnqueueUnary)。
+// local_size 必须与 affine.cc 的 kLocalSize 一致 —— 改这里就得同改那里,并重新生成
+// affine_spv.h。不一致时:host 侧值偏小只是过度铺开(下面的 count 守卫兜住),偏大则
+// 尾部元素不被写入,是静默错值。
+//
+// binding 0/1 是「两个 storage buffer」—— 复用 adapter Context::ProgramFor 固定建的那套
+// descriptor layout,算子不必自建。
+layout(local_size_x = 64) in;
+
+layout(std430, binding = 0) readonly  buffer SrcBuf { float data[]; } src;
+layout(std430, binding = 1) writeonly buffer DstBuf { float data[]; } dst;
+
+layout(push_constant) uniform Params {
+  float scale;
+  float shift;
+  uint count;
+} params;
+
+void main() {
+  const uint i = gl_GlobalInvocationID.x;
+  if (i >= params.count) return;
+  dst.data[i] = src.data[i] * params.scale + params.shift;
+}

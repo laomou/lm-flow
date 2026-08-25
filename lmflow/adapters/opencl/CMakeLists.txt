@@ -57,6 +57,13 @@ if(LMFLOW_BUILD_OPENCL_ADAPTER AND LMFLOW_BUILD_TESTS
   target_link_libraries(lmflow_opencl_resize_test PRIVATE lmflow::opencl_kernels)
   add_dependencies(lmflow_opencl_resize_test flow_engine)
   add_test(NAME lmflow_opencl_resize_test COMMAND lmflow_opencl_resize_test)
+
+  # OclAffine 数值 + 多算子 GPU 驻留链(OclUpload→OclResize→OclAffine→OclDownload,中间不落
+  # 主机)。全部算子由 lmflow::opencl_kernels 档案自注册,数值对照测试内的 CPU 参考。
+  add_executable(lmflow_opencl_chain_test tests/chain_test.cc)
+  target_link_libraries(lmflow_opencl_chain_test PRIVATE lmflow::opencl_kernels)
+  add_dependencies(lmflow_opencl_chain_test flow_engine)
+  add_test(NAME lmflow_opencl_chain_test COMMAND lmflow_opencl_chain_test)
 endif()
 
 if(LMFLOW_BUILD_OPENCL_ADAPTER AND LMFLOW_BUILD_BENCHMARKS

@@ -93,7 +93,7 @@ let g = Graph::from_yaml(yaml)?;
 The published crate is the **pure-Rust engine**. The 18 bundled C++ kernels are a separate CMake
 component and are never compiled by the core crate.
 
-For CalculatorRunner-style single-kernel tests, use `KernelRunner` from Rust,
+To unit-test a single kernel, use `KernelRunner` from Rust,
 `lmflow::KernelRunner` from C++, or `lmflow.KernelRunner` from Python. It directly
 drives `get_contract`/`open`/`process`/`close` without parsing graph YAML or starting
 graph executors:

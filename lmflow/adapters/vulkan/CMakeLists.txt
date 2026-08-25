@@ -65,6 +65,13 @@ if(LMFLOW_BUILD_VULKAN_ADAPTER AND LMFLOW_BUILD_TESTS
   add_test(NAME lmflow_vulkan_resize_test_staging COMMAND lmflow_vulkan_resize_test)
   set_tests_properties(lmflow_vulkan_resize_test_staging PROPERTIES
     ENVIRONMENT "LMFLOW_VK_FORCE_STAGING=1")
+
+  # VkAffine 数值 + 多算子 GPU 驻留链(VkUpload→VkResize→VkAffine→VkDownload,中间不落主机)。
+  # 全部算子由 lmflow::vulkan_kernels 档案自注册,数值对照测试内的 CPU 参考。
+  add_executable(lmflow_vulkan_chain_test tests/chain_test.cc)
+  target_link_libraries(lmflow_vulkan_chain_test PRIVATE lmflow::vulkan_kernels)
+  add_dependencies(lmflow_vulkan_chain_test flow_engine)
+  add_test(NAME lmflow_vulkan_chain_test COMMAND lmflow_vulkan_chain_test)
 endif()
 
 if(LMFLOW_BUILD_VULKAN_ADAPTER AND LMFLOW_BUILD_BENCHMARKS
@@ -75,6 +82,13 @@ if(LMFLOW_BUILD_VULKAN_ADAPTER AND LMFLOW_BUILD_BENCHMARKS
   add_executable(lmflow_vulkan_bench benchmarks/vulkan_bench.cc)
   target_link_libraries(lmflow_vulkan_bench PRIVATE lmflow::vulkan)
   add_dependencies(lmflow_vulkan_bench flow_engine)
+
+  # 图级基准:量「把第二个算子也放 GPU、中间结果不落主机」到底值不值 —— 这是 resize.cc 里
+  # 「盈亏平衡在连续 2~3 个 GPU 算子」那句话的实测。两条对照图只差 affine 在哪算,故需要
+  # 同时链 GPU 算子档案(VkResize/VkAffine/桥接)与 CPU 算子档案(Affine)。
+  add_executable(lmflow_vulkan_chain_bench benchmarks/chain_bench.cc)
+  target_link_libraries(lmflow_vulkan_chain_bench PRIVATE lmflow::vulkan_kernels lmflow::kernels)
+  add_dependencies(lmflow_vulkan_chain_bench flow_engine)
 endif()
 
 if(LMFLOW_BUILD_VULKAN_ADAPTER AND CMAKE_SOURCE_DIR STREQUAL LMFLOW_ROOT)

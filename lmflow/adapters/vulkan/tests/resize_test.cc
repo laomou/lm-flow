@@ -142,12 +142,9 @@ void RunCase(const char* label, int in_h, int in_w, int channels, int out_h, int
 
 }  // namespace
 
-// VkResize 由 lmflow_opencl_kernels 档案静态自注册,**此处不能再注册**。
-// upload/download 是 adapter 头里的类,按约定由宿主注册。
-using VkUploadKernel = lmflow::vk::UploadKernel;
-using VkDownloadKernel = lmflow::vk::DownloadKernel;
-LMFLOW_REGISTER_KERNEL_AS(VkUploadKernel, "VkUpload")
-LMFLOW_REGISTER_KERNEL_AS(VkDownloadKernel, "VkDownload")
+// VkResize / VkUpload / VkDownload 都由 lmflow_vulkan_kernels 档案静态自注册
+// (kernels/resize.cc、kernels/bridge.cc),本测试链的就是该档案,**此处不能再注册**
+// (重复注册同名会在静态初始化期报错)。
 
 int main() {
   try {
