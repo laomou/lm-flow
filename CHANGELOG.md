@@ -25,6 +25,27 @@ to each GitHub Release.
   against one oracle.
   The hardware precondition — a device that truly lacks a host-visible memory type — remains
   unverified and still requires real discrete-GPU hardware.
+- **Vulkan and OpenCL adapters: an element-wise affine kernel (`VkAffine` / `OclAffine`).**
+  `out = in * scale + shift` over F32, the same semantics as the CPU `AffineKernel`, mirrored across
+  both backends (a 25-line SPIR-V shader on Vulkan, a runtime CL source string on OpenCL). Until now
+  each GPU adapter shipped exactly one compute kernel (`resize`), so the break-even the adapters are
+  built for — "chain two or three GPU ops and keep the intermediate off the host" — could not be
+  formed at all: there was no second op to chain. `resize → affine` (resize then normalize) is the
+  canonical image-preprocessing pair, and it is the first workload that actually exercises the
+  device-buffer pool across dispatches. A new `lmflow_{vulkan,opencl}_chain_test` runs
+  `Upload → Resize → Affine → Download` — the whole graph has a single `Download`, so the
+  `Resize → Affine` intermediate stays a device-resident `Image` — and checks the result against a
+  CPU reference (`affine(resize(in))`); it also covers `affine` on its own. The Vulkan case is
+  validated on lavapipe, including under `LMFLOW_VK_FORCE_STAGING=1`.
+- **Vulkan and OpenCL adapters: the CPU↔GPU bridge kernels now ship registered in the kernels
+  archive.** `VkUpload` / `VkDownload` / `OclUpload` / `OclDownload` were provided only as classes in
+  the adapter headers (which deliberately do not self-register — a header included by many TUs would
+  register in each), so every host wanting a `CPU → GPU → CPU` graph had to write the two-line
+  registration itself, and only the tests did. They are now registered once from a `kernels/bridge.cc`
+  in each adapter's whole-archive-linked kernels library, alongside `resize` and `affine`. Linking
+  `lmflow::vulkan_kernels` / `lmflow::opencl_kernels` now yields a graph-ready
+  `Upload → … → Download` pipeline out of the box; the duplicate registrations were removed from the
+  tests that link the archive.
 
 ### Fixed
 

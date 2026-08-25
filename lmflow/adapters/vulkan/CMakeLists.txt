@@ -65,6 +65,13 @@ if(LMFLOW_BUILD_VULKAN_ADAPTER AND LMFLOW_BUILD_TESTS
   add_test(NAME lmflow_vulkan_resize_test_staging COMMAND lmflow_vulkan_resize_test)
   set_tests_properties(lmflow_vulkan_resize_test_staging PROPERTIES
     ENVIRONMENT "LMFLOW_VK_FORCE_STAGING=1")
+
+  # VkAffine 数值 + 多算子 GPU 驻留链(VkUpload→VkResize→VkAffine→VkDownload,中间不落主机)。
+  # 全部算子由 lmflow::vulkan_kernels 档案自注册,数值对照测试内的 CPU 参考。
+  add_executable(lmflow_vulkan_chain_test tests/chain_test.cc)
+  target_link_libraries(lmflow_vulkan_chain_test PRIVATE lmflow::vulkan_kernels)
+  add_dependencies(lmflow_vulkan_chain_test flow_engine)
+  add_test(NAME lmflow_vulkan_chain_test COMMAND lmflow_vulkan_chain_test)
 endif()
 
 if(LMFLOW_BUILD_VULKAN_ADAPTER AND LMFLOW_BUILD_BENCHMARKS
