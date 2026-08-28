@@ -9,7 +9,7 @@ name = "lm-lmflow"
 version = "0.3.2"
 description = "数据流图计算框架:Rust 引擎 + C ABI + C++/Python 算子"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.8"
 dependencies = ["numpy>=1.20"]
 license = { text = "Apache-2.0" }
 authors = [{ name = "laomou", email = "rui.mou@foxmail.com" }]
@@ -21,6 +21,7 @@ classifiers = [
     "Programming Language :: Rust",
     "Programming Language :: C++",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
     "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
@@ -51,9 +52,11 @@ build-dir = "build/{wheel_tag}"              # 按 wheel tag 分目录,避免多
 [tool.cibuildwheel]
 # build-frontend=build → `python -m build --wheel`:直接从源码出 wheel(third_party 子模块在源码内)。
 build-frontend = "build"
-# 显式钉死 CPython 3.9–3.12(不随 cibuildwheel 默认版本漂移)。
-build = ["cp39-*", "cp310-*", "cp311-*", "cp312-*"]
-skip = ["*-musllinux*", "pp*", "*_i686", "*-win32"]
+# 显式钉死 CPython 3.8–3.12(不随 cibuildwheel 默认版本漂移)。
+build = ["cp38-*", "cp39-*", "cp310-*", "cp311-*", "cp312-*"]
+# cp38-macosx_*:Python 3.8 早于 Apple Silicon,官方没有 macOS arm64 构建,
+# 而 release.yml 的 mac runner 是 macos-14(arm64)。cp38 因此只出 Linux wheel。
+skip = ["*-musllinux*", "pp*", "*_i686", "*-win32", "cp38-macosx_*"]
 test-command = "python -c \"import lmflow; g = lmflow.Graph.from_yaml('nodes:\\n  - {kernel: PassThroughKernel, input_ports: [in], output_ports: [out]}\\ninput_ports: [in]\\noutput_ports: [out]'); g.close(); print('lm-flow OK')\""
 
 [tool.cibuildwheel.linux]

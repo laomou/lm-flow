@@ -10,6 +10,29 @@ to each GitHub Release.
 
 ## [Unreleased]
 
+### Changed
+
+- **Minimum supported Python lowered from 3.9 to 3.8; the release now publishes `cp38` wheels.**
+  `requires-python` becomes `>=3.8` and the cibuildwheel matrix gains `cp38-*`. The library source
+  needed no changes to get there — it already carried `from __future__ import annotations`, so its
+  PEP 585/604 annotations never evaluate at runtime, and its `asyncio` usage
+  (`get_running_loop`/`create_task`/`wait_for`/`shield`) is all 3.7-era. Only the test suite had a
+  hard 3.9 dependency: five cancellation tests called `asyncio.to_thread`, which arrived in 3.9, and
+  now go through a module-local helper that falls back to `loop.run_in_executor` on 3.8.
+  Consequences worth knowing:
+  - **cibuildwheel is pinned back to 3.4.1 (from 4.2.0).** cibuildwheel 4.0 removed `cp38` from the
+    set of targets it can build at all — with 4.x, a `cp38-*` entry matches nothing rather than
+    failing loudly. 3.4.1 is the last release that builds `cp38`, and it still covers `cp38`–`cp314`,
+    comfortably wider than the `cp38`–`cp312` this project pins explicitly. The only thing given up
+    is `cp315`, which is unreleased and outside the pinned matrix regardless.
+  - **`cp38` ships for Linux only** (`manylinux_2_28` x86_64). Python 3.8 predates Apple Silicon and
+    has no macOS arm64 build, while the release workflow's Mac runner is `macos-14` (arm64), so
+    `cp38-macosx_*` is skipped. This follows the existing decision not to ship Intel-Mac wheels.
+  - **CI's `python` job now runs on a `['3.8', '3.11']` matrix.** A declared floor that nothing
+    exercises is not a floor: the `asyncio.to_thread` calls above were valid 3.8 *syntax*, so
+    `compileall` accepted them and the `cp38` wheel's `test-command` (import plus a smoke graph)
+    would have passed too — the break only appears when the suite actually runs on 3.8.
+
 ## [0.3.2] — 2026-08-25
 
 ### Added
