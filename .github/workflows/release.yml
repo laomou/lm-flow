@@ -29,7 +29,10 @@ jobs:
       # macOS 直接在 runner 上装,给主机侧也备一份(host 工具没用到但无害)。
       - uses: dtolnay/rust-toolchain@stable
       - name: 构建 wheel(cibuildwheel:含 Rust 引擎 + pybind11 扩展)
-        uses: pypa/cibuildwheel@v4.2.0
+        # 钉在 3.4.1:这是最后一个能构建 cp38 的 cibuildwheel(4.0 起移除了 cp38,
+        # 因为 3.8 已 EOL)。本包最低支持 Python 3.8,故不能升到 4.x。
+        # 3.4.1 覆盖 cp38–cp314,远超 pyproject 里 build 列表钉死的 cp38–cp312。
+        uses: pypa/cibuildwheel@v3.4.1
         # 配置在 pyproject.toml 的 [tool.cibuildwheel];scikit-build-core 调根 CMake。
       - uses: actions/upload-artifact@v7
         with:

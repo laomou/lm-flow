@@ -23,6 +23,17 @@ import numpy as np
 
 import lmflow
 
+# Python 3.8(本包支持的最低版本)没有 asyncio.to_thread(3.9 才加)。
+# 测试用它把阻塞的 Event.wait 挪出事件循环,这里按需退回 run_in_executor。
+if sys.version_info >= (3, 9):
+    _to_thread = asyncio.to_thread
+else:
+
+    async def _to_thread(func, /, *args):
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, func, *args)
+
+
 # ---------------------------------------------------------------- 测试用算子
 # 注册是全局且一次性的,故在模块级定义。
 
@@ -559,7 +570,7 @@ output_ports: [out]
                 try:
                     g.start()
                     g.input("in").send(1, ts=0)
-                    self.assertTrue(await asyncio.to_thread(CANCEL_STARTED.wait, 1.0))
+                    self.assertTrue(await _to_thread(CANCEL_STARTED.wait, 1.0))
                     started = time.monotonic()
                     with self.assertWarnsRegex(RuntimeWarning, "timeout grace expired"):
                         with self.assertRaises(lmflow.Timeout):
@@ -623,7 +634,7 @@ output_ports: [out]
                     run = asyncio.create_task(g.run_async(cancel_grace=1.0))
                     await asyncio.sleep(0)
                     g.input("in").send(1, ts=0)
-                    self.assertTrue(await asyncio.to_thread(CANCEL_STARTED.wait, 1.0))
+                    self.assertTrue(await _to_thread(CANCEL_STARTED.wait, 1.0))
                     run.cancel()
                     await asyncio.sleep(0)
                     self.assertFalse(run.done())
@@ -654,7 +665,7 @@ output_ports: [out]
                     run = asyncio.create_task(g.run_async(cancel_grace=10.0))
                     await asyncio.sleep(0)
                     g.input("in").send(1, ts=0)
-                    self.assertTrue(await asyncio.to_thread(CANCEL_STARTED.wait, 1.0))
+                    self.assertTrue(await _to_thread(CANCEL_STARTED.wait, 1.0))
                     run.cancel()
                     await asyncio.sleep(0)
                     self.assertFalse(run.done())
@@ -687,7 +698,7 @@ output_ports: [out]
                     run = asyncio.create_task(g.run_async(cancel_grace=0.01))
                     await asyncio.sleep(0)
                     g.input("in").send(1, ts=0)
-                    self.assertTrue(await asyncio.to_thread(CANCEL_STARTED.wait, 1.0))
+                    self.assertTrue(await _to_thread(CANCEL_STARTED.wait, 1.0))
                     started = time.monotonic()
                     run.cancel()
                     with self.assertWarnsRegex(RuntimeWarning, "grace expired"):
@@ -804,7 +815,7 @@ output_ports: [out]
                     run = asyncio.create_task(g.run_async())
                     await asyncio.sleep(0)
                     g.input("in").send(1, ts=0)
-                    self.assertTrue(await asyncio.to_thread(CANCEL_STARTED.wait, 1.0))
+                    self.assertTrue(await _to_thread(CANCEL_STARTED.wait, 1.0))
                     started = time.monotonic()
                     run.cancel()
                     with self.assertWarnsRegex(RuntimeWarning, "grace expired"):

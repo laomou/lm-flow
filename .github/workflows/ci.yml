@@ -237,14 +237,20 @@ jobs:
   # 走 pip install .(scikit-build-core 调根 CMake:cargo 引擎 + pybind11 扩展),
   # 与最终 wheel 完全同一条构建路径。
   python:
-    name: bindings · python (pybind11)
+    name: bindings · python ${{ matrix.python-version }} (pybind11)
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.8 是 pyproject 声明的最低支持版本(release 会为它出 cp38 wheel),必须真跑一遍:
+        # 3.9+ 的 API 在 3.8 上语法完全合法,compileall 查不出来,只有跑测试才会暴露。
+        python-version: ['3.8', '3.11']
     steps:
       - uses: actions/checkout@v7
         with: { submodules: recursive }   # third_party/pybind11
       - uses: dtolnay/rust-toolchain@stable
       - uses: actions/setup-python@v7
-        with: { python-version: '3.11' }
+        with: { python-version: '${{ matrix.python-version }}' }
       - name: pip install(scikit-build-core → CMake → 引擎 + pybind11 扩展)
         run: python -m pip install -v .
       - name: Python 测试套件
