@@ -801,7 +801,7 @@ Poller.__iter__ = _poller_iter  # type: ignore[attr-defined]
 
 # 版本信息
 ABI_VERSION = _native.ABI_VERSION
-__version__ = "0.3.2"
+__version__ = "0.3.3"
 
 if sys.version_info < (3, 8):  # pragma: no cover
     raise RuntimeError("lmflow requires Python 3.8+")

@@ -20,7 +20,7 @@ Each tagged release ships a per-platform SDK tarball — Linux x86_64 / aarch64,
 iOS arm64, Android arm64:
 
 ```text
-lmflow-v0.3.2-linux-x86_64/
+lmflow-v0.3.3-linux-x86_64/
 ├── include/lmflow/   flow.h · flow.hpp · flow_platform_log.hpp
 └── lib/              liblmflow_core.a · liblmflow_kernels.a · liblmflow.so
 ```
