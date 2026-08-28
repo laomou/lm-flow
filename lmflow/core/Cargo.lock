@@ -280,7 +280,7 @@ checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
 
 [[package]]
 name = "lmflow"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "criterion",
  "serde",
