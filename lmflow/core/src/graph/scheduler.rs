@@ -195,6 +195,12 @@ impl GraphInner {
             let mut q = self.nodes[node].input_queues[port]
                 .lock()
                 .expect("queue lock poisoned");
+            // An accepted send or producer flush may still be dispatching when
+            // cancellation/error closes a consumer. Check under the queue lock
+            // so it cannot refill an input after forced-close cleanup drains it.
+            if self.shared.is_cancelled() || self.shared.has_error() {
+                continue;
+            }
             for pkt in packets {
                 // fixed_size:满则丢最旧的。这是**有意的有损**策略,且不阻塞上游,
                 // 故与「内部边不背压」不冲突,而是其配套的内存约束手段。
