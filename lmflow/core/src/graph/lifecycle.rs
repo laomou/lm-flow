@@ -363,9 +363,14 @@ impl GraphInner {
     pub(super) fn wait_done(&self, deadline: Option<std::time::Instant>) -> Result<()> {
         loop {
             // 先把能自己干的干完
-            while self.pump_step() {}
+            // A synchronous callback cannot be preempted, but check the deadline
+            // between tasks even when delegated work remains continuously ready.
+            while self.remaining(deadline).is_some() && self.pump_step() {}
             if self.all_nodes_closed() && self.workers_idle() {
                 break;
+            }
+            if self.remaining(deadline).is_none() {
+                return Err(Error::Timeout);
             }
             // 在判断是否空闲**之前**捕获活动代数,再据此等待 —— 否则会丢唤醒。
             let before = self.activity_gen();
@@ -395,7 +400,7 @@ impl GraphInner {
                     .copied()
                     .collect();
                 if !blocked.is_empty() {
-                    if self.retry_idle_progress() {
+                    if self.retry_idle_progress(deadline)? {
                         continue;
                     }
                     let details = self.backpressure_stall_details(&blocked);
@@ -405,7 +410,7 @@ impl GraphInner {
                         details.join("; ")
                     )));
                 }
-                if self.retry_idle_progress() {
+                if self.retry_idle_progress(deadline)? {
                     continue;
                 }
                 // 空闲且未全关:再推一轮关流
@@ -470,12 +475,15 @@ impl GraphInner {
     /// 等到在途任务都处理完(但不结束图)。
     pub(super) fn wait_until_idle(&self, deadline: Option<std::time::Instant>) -> Result<()> {
         loop {
-            while self.run_one_main_task() {}
+            while self.remaining(deadline).is_some() && self.run_one_main_task() {}
             self.resume_blocked_flushes();
             // 判断空闲**之前**捕获代数,防止丢唤醒(见 activity_gen)。
             let before = self.activity_gen();
             if self.is_idle() {
                 break;
+            }
+            if self.remaining(deadline).is_none() {
+                return Err(Error::Timeout);
             }
             if self.workers_idle() {
                 let blocked: Vec<NodeId> = self
@@ -485,7 +493,7 @@ impl GraphInner {
                     .iter()
                     .copied()
                     .collect();
-                if !blocked.is_empty() && self.retry_idle_progress() {
+                if !blocked.is_empty() && self.retry_idle_progress(deadline)? {
                     continue;
                 }
                 if self.is_idle() {

@@ -242,11 +242,16 @@ impl Graph {
         self.inner.request_wakeup();
     }
 
+    /// Wait for completion, checking the timeout between delegated callbacks.
+    /// A synchronous callback already executing on this thread cannot be preempted.
+    /// Timing out leaves pending work available for a later wait or cancellation.
     pub fn wait_done_timeout(&self, timeout: std::time::Duration) -> Result<()> {
         self.inner
             .wait_done(Some(std::time::Instant::now() + timeout))
     }
 
+    /// Wait for idle with a timeout checked between delegated callbacks.
+    /// A synchronous callback already executing on this thread cannot be preempted.
     pub fn wait_until_idle_timeout(&self, timeout: std::time::Duration) -> Result<()> {
         self.inner
             .wait_until_idle(Some(std::time::Instant::now() + timeout))
