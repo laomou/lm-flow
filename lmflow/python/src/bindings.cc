@@ -111,8 +111,23 @@ py::dtype numpy_from_dtype(int dt) {
 }
 
 /// 把 LMFlowBuffer 包成 numpy 视图(**零拷贝**)。
-/// `owner` 让底层缓冲在数组存活期间不被释放。
-py::array wrap_buffer(const LMFlowBuffer& b, const py::object& owner, bool writable) {
+/// Pin the current payload independently of the mutable Python Packet wrapper.
+py::array wrap_buffer(const LMFlowBuffer& b, const LMFlowPacket& packet, bool writable) {
+  auto release = [](LMFlowPacket* packet) {
+    lmflow_packet_drop(packet);
+    delete packet;
+  };
+  std::unique_ptr<LMFlowPacket, decltype(release)> retained(
+      new LMFlowPacket(lmflow_packet_clone(&packet)), release);
+  if (!retained->owner) {
+    throw std::runtime_error(std::string("buffer view failed: ") + lmflow_last_error());
+  }
+  py::capsule owner(retained.get(), [](void* ptr) {
+    auto* packet = static_cast<LMFlowPacket*>(ptr);
+    lmflow_packet_drop(packet);
+    delete packet;
+  });
+  retained.release();
   std::vector<py::ssize_t> shape(b.shape, b.shape + b.ndim);
   std::vector<py::ssize_t> strides(b.strides, b.strides + b.ndim);
   auto dt = numpy_from_dtype(b.dtype);
@@ -264,22 +279,21 @@ class Packet {
     return keys;
   }
 
-  /// 只读 numpy 视图(零拷贝)。**仅在本包存活期间有效** ——
-  /// 算子输入包是借用的,回调返回后不得再用。
-  py::array as_numpy(const py::object& self) const {
+  /// Read-only zero-copy view retaining its own reference to the current payload.
+  py::array as_numpy(const py::object&) const {
     LMFlowBuffer b{};
     if (!lmflow_packet_as_buffer(&raw_, &b)) {
       throw py::value_error("this packet is not an LMFlowBuffer (construct it with new_buffer or from_numpy)");
     }
-    return wrap_buffer(b, self, /*writable=*/false);
+    return wrap_buffer(b, raw_, /*writable=*/false);
   }
 
   /// 可写 numpy 视图(写时复制)。独占则零拷贝;被共享才复制。
   /// 前置条件:本包为调用方所拥有 —— 典型来自 `Context.take_input`。
-  py::array make_mutable(const py::object& self) {
+  py::array make_mutable(const py::object&) {
     LMFlowBuffer b{};
     check(lmflow_packet_make_mutable_buffer(&raw_, &b), "make_mutable");
-    return wrap_buffer(b, self, /*writable=*/true);
+    return wrap_buffer(b, raw_, /*writable=*/true);
   }
 
   // ---- 内建类型构造 ----
@@ -982,7 +996,7 @@ py::tuple Context::new_buffer(const std::vector<int64_t>& shape, const py::objec
   if (!raw.payload) throw std::runtime_error(std::string("new_buffer failed: ") + lmflow_last_error());
   auto* p = new Packet(raw, true);
   py::object owner = py::cast(p, py::return_value_policy::take_ownership);
-  return py::make_tuple(owner, wrap_buffer(b, owner, /*writable=*/true));
+  return py::make_tuple(owner, wrap_buffer(b, raw, /*writable=*/true));
 }
 
 py::tuple Graph::new_buffer(const std::vector<int64_t>& shape, const py::object& dtype) {
@@ -993,7 +1007,7 @@ py::tuple Graph::new_buffer(const std::vector<int64_t>& shape, const py::object&
   if (!raw.payload) throw std::runtime_error(std::string("new_buffer failed: ") + lmflow_last_error());
   auto* p = new Packet(raw, true);
   py::object owner = py::cast(p, py::return_value_policy::take_ownership);
-  return py::make_tuple(owner, wrap_buffer(b, owner, /*writable=*/true));
+  return py::make_tuple(owner, wrap_buffer(b, raw, /*writable=*/true));
 }
 
 // ---------------------------------------------------------------- 模块
@@ -1090,7 +1104,7 @@ PYBIND11_MODULE(_lmflow, m) {
       .def("as_bytes", &Packet::as_bytes, "Read the bytes payload; None on type mismatch.")
       .def(
           "as_numpy", [](const py::object& self) { return self.cast<Packet&>().as_numpy(self); },
-          "Read-only numpy view (zero-copy); valid only while this packet is alive")
+          "Read-only numpy view (zero-copy); retains the underlying buffer")
       .def(
           "make_mutable",
           [](const py::object& self) { return self.cast<Packet&>().make_mutable(self); },
