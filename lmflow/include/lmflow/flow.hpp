@@ -136,7 +136,7 @@ class Packet {
   static Packet Borrow(LMFlowPacket raw) {
     Packet p;
     p.raw_ = raw;
-    p.own_ = Own::None;
+    p.own_ = Own::Borrowed;
     return p;
   }
 
@@ -213,16 +213,22 @@ class Packet {
   bool AsF64(double* o) const { return lmflow_packet_as_f64(&raw_, o); }
   bool AsBool(bool* o) const { return lmflow_packet_as_bool(&raw_, o); }
   bool AsStr(const char** o) const { return lmflow_packet_as_str(&raw_, o); }
+  /// Owner-replacing mutations require an owned engine packet (TakeInput/Clone).
+  /// Borrowed packets cannot safely give up the engine's reference.
   LMFlowStatus SetMetadata(const char* key, int64_t value) {
+    if (own_ != Own::Engine) return LMFLOW_ERR_INVALID_ARG;
     return lmflow_packet_set_metadata_i64(&raw_, key, value);
   }
   LMFlowStatus SetMetadata(const char* key, double value) {
+    if (own_ != Own::Engine) return LMFLOW_ERR_INVALID_ARG;
     return lmflow_packet_set_metadata_f64(&raw_, key, value);
   }
   LMFlowStatus SetMetadata(const char* key, bool value) {
+    if (own_ != Own::Engine) return LMFLOW_ERR_INVALID_ARG;
     return lmflow_packet_set_metadata_bool(&raw_, key, value);
   }
   LMFlowStatus SetMetadata(const char* key, const char* value) {
+    if (own_ != Own::Engine) return LMFLOW_ERR_INVALID_ARG;
     return lmflow_packet_set_metadata_str(&raw_, key, value);
   }
   bool Metadata(const char* key, int64_t* out) const {
@@ -238,7 +244,9 @@ class Packet {
     return lmflow_packet_metadata_str(&raw_, key, out);
   }
   bool HasMetadata(const char* key) const { return lmflow_packet_has_metadata(&raw_, key); }
-  bool RemoveMetadata(const char* key) { return lmflow_packet_remove_metadata(&raw_, key); }
+  bool RemoveMetadata(const char* key) {
+    return own_ == Own::Engine && lmflow_packet_remove_metadata(&raw_, key);
+  }
   std::vector<std::string> MetadataKeys() const {
     std::vector<std::string> keys;
     const size_t count = lmflow_packet_metadata_count(&raw_);
@@ -257,27 +265,36 @@ class Packet {
   Packet Clone() const { return Adopt(lmflow_packet_clone(&raw_)); }
   /// 取得独占可写视图:独占则零拷贝,被共享才复制。前置条件是本包为自己所拥有
   /// (典型来源是 Context::TakeInput),借用的输入包会返回错误。
-  LMFlowStatus MakeMutableBuffer(LMFlowBuffer* o) { return lmflow_packet_make_mutable_buffer(&raw_, o); }
+  LMFlowStatus MakeMutableBuffer(LMFlowBuffer* o) {
+    if (own_ != Own::Engine) return LMFLOW_ERR_INVALID_ARG;
+    return lmflow_packet_make_mutable_buffer(&raw_, o);
+  }
   LMFlowStatus MakeMutableBytes(void** d, size_t* n) {
+    if (own_ != Own::Engine) return LMFLOW_ERR_INVALID_ARG;
     return lmflow_packet_make_mutable_bytes(&raw_, d, n);
   }
 
-  LMFlowPacket release() {  // 交给引擎:此后本对象不再释放
-    own_ = Own::None;
-    return raw_;
+  /// Transfer owned packets; retain borrowed engine packets before forwarding.
+  /// Released and moved-from wrappers become empty and carry no owner pointer.
+  LMFlowPacket release() {
+    LMFlowPacket outgoing = raw_;
+    if (own_ == Own::Borrowed && raw_.payload) {
+      outgoing = lmflow_packet_clone(&raw_);
+      if (!outgoing.owner) throw std::logic_error(lmflow_last_error());
+    }
+    clear();
+    return outgoing;
   }
 
   Packet(Packet&& o) noexcept : raw_(o.raw_), own_(o.own_) {
-    o.own_ = Own::None;
-    o.raw_.payload = nullptr;
+    o.clear();
   }
   Packet& operator=(Packet&& o) noexcept {
     if (this != &o) {
       reset();
       raw_ = o.raw_;
       own_ = o.own_;
-      o.own_ = Own::None;
-      o.raw_.payload = nullptr;
+      o.clear();
     }
     return *this;
   }
@@ -286,15 +303,18 @@ class Packet {
   ~Packet() { reset(); }
 
  private:
-  enum class Own { None, Local, Engine };
+  enum class Own { None, Borrowed, Local, Engine };
+  void clear() {
+    own_ = Own::None;
+    raw_ = LMFlowPacket{nullptr, 0, LMFLOW_TS_UNSET, nullptr, nullptr};
+  }
   void reset() {
     if (own_ == Own::Local) {
       if (raw_.payload && raw_.drop_fn) raw_.drop_fn(raw_.payload);
     } else if (own_ == Own::Engine) {
       lmflow_packet_drop(&raw_);
     }
-    own_ = Own::None;
-    raw_.payload = nullptr;
+    clear();
   }
   LMFlowPacket raw_;
   Own own_;
