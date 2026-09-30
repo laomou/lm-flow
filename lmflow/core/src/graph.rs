@@ -451,6 +451,13 @@ impl Drop for Graph {
     /// 工作线程手上 —— 于是 `GraphInner::drop` 在工作线程上运行,`shutdown` 变成
     /// **join 自己**,得到 `EDEADLK`。先在宿主线程 join 完,worker 就不存在了。
     fn drop(&mut self) {
+        // Input/Poller handles retain GraphInner. Stop accepting work and finish
+        // cancellation while executors can still drain their claimed tasks; merely
+        // joining workers leaves those handles attached to a permanently live graph.
+        if self.state() != State::Terminated {
+            self.cancel();
+            let _ = self.wait_done();
+        }
         self.inner.shutdown_executors_pub();
     }
 }
