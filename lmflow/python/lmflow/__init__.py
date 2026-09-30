@@ -355,9 +355,13 @@ class AsyncOutputEvents(AsyncIterator[OutputEvent]):
                 if not packet.is_empty:
                     return PacketEvent(packet)
                 if packet.timestamp == TS_DONE:
+                    # The final bound belongs to this output, not to the whole graph.
+                    # The queue is now drained; a nonblocking read surfaces any error
+                    # already recorded without waiting for unrelated output streams.
+                    self._poller.try_next()
+                    if self._graph.state == GraphState.TERMINATED:
+                        self._graph.wait_done()
                     self._done = True
-                    await driver.wait_terminated()
-                    self._graph.wait_done()
                     return DoneEvent()
                 return TimestampBoundEvent(packet.timestamp)
             if self._graph.state == GraphState.TERMINATED:
@@ -525,7 +529,9 @@ class Graph:
         Iteration starts the graph when needed and yields :class:`PacketEvent`,
         :class:`TimestampBoundEvent`, then :class:`DoneEvent`. It shares the graph's single native
         wakeup callback with :meth:`run_async`, so several ports can be consumed concurrently
-        without polling or displacing one another.
+        without polling or displacing one another. ``DoneEvent`` ends only this output;
+        await :meth:`run_async` separately for whole-graph completion and failures on other
+        branches that occur after this stream has ended.
         """
         return AsyncOutputEvents(
             self, self.add_poller(port, observe_timestamp_bounds=True)
