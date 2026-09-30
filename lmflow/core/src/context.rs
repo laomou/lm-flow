@@ -144,6 +144,8 @@ pub struct Context {
     pub inputs_done: Vec<bool>,
     /// 算子经 `set_error` 提供的失败原因。
     pub error_msg: Option<String>,
+    /// A void C ABI output operation failed during this invocation.
+    pub(crate) output_failed: bool,
     /// 供 `lmflow_ctx_close_reason` 返回;进入 close 前由引擎写入。
     pub close_reason: i32,
     /// 源算子经 `source_done()` 自报「已产完」;引擎在 process 返回后读取。
@@ -180,6 +182,7 @@ impl Context {
             shared,
             inputs_done: vec![false; ni],
             error_msg: None,
+            output_failed: false,
             close_reason: crate::runtime::CLOSE_NORMAL,
             source_done: false,
             source_yield: None,
@@ -201,6 +204,7 @@ impl Context {
         self.next_bounds.fill(None);
         self.input_ts = Timestamp::unset();
         self.error_msg = None;
+        self.output_failed = false;
         self.source_done = false;
         self.source_yield = None;
         // 下面两项在正常流程里使用前会被重写(claim 时写 inputs_done、进 close 前写
@@ -321,6 +325,16 @@ impl Context {
 
     pub fn set_error(&mut self, msg: &str) {
         self.error_msg = Some(msg.to_string());
+    }
+
+    /// Void ABI output operations must fail the invocation even if the callback returns OK.
+    pub(crate) fn callback_status(&mut self, status: i32) -> i32 {
+        let failed = std::mem::take(&mut self.output_failed);
+        if status == 0 && failed {
+            crate::status::code::KERNEL
+        } else {
+            status
+        }
     }
 
     /// 组合出带节点名前缀的错误。

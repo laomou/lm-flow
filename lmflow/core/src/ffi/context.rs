@@ -220,7 +220,10 @@ pub unsafe extern "C" fn lmflow_ctx_emit(c: *mut LMFlowContext, out_idx: usize, 
         let p = take_packet(pkt);
         if let Some(x) = ctx_mut(c) {
             if let Err(e) = x.emit(out_idx, p) {
-                x.set_error(&e.to_string());
+                if !x.output_failed {
+                    x.set_error(&e.to_string());
+                }
+                x.output_failed = true;
                 last_error::set(&e.to_string());
             }
         }
@@ -231,7 +234,10 @@ pub unsafe extern "C" fn lmflow_ctx_forward(c: *mut LMFlowContext, in_idx: usize
     guard_val((), || {
         if let Some(x) = ctx_mut(c) {
             if let Err(e) = x.forward(in_idx, out_idx) {
-                x.set_error(&e.to_string());
+                if !x.output_failed {
+                    x.set_error(&e.to_string());
+                }
+                x.output_failed = true;
                 last_error::set(&e.to_string());
             }
         }
