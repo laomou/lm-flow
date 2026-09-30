@@ -384,6 +384,9 @@ impl Poller {
 
     fn next_deadline(&self, deadline: Option<std::time::Instant>) -> Result<Option<Packet>> {
         loop {
+            // Capture before checking the queue, closure, or delegated work so a
+            // concurrent producer cannot notify just before we begin waiting.
+            let before = self.graph.activity_gen_pub();
             if let Some(packet) = self.inner.pop(&self.graph) {
                 return Ok(Some(packet));
             }
@@ -395,17 +398,16 @@ impl Poller {
                 // "the queue is empty". A producer can enqueue the final packet(s) and then
                 // close the edge in the window between the `pop` at the top of this loop and
                 // this check (e.g. this thread is preempted right here on a busy machine).
-                // Drain with a fresh `pop` — mirroring the idle branch below — so end-of-stream
+                // Drain with a fresh `pop` so end-of-stream
                 // never abandons a packet that landed in that window. Returning `None` here
                 // unconditionally silently drops those packets.
                 return Ok(self.inner.pop(&self.graph));
             }
+            if self.graph.shared.is_cancelled() {
+                return Err(Error::Cancelled);
+            }
             if self.graph.pump_step() {
                 continue;
-            }
-            let before = self.graph.activity_gen_pub();
-            if self.graph.is_idle_pub() {
-                return Ok(self.inner.pop(&self.graph));
             }
             match self.graph.remaining_for_poller(deadline) {
                 Some(duration) => self.graph.wait_activity_since_pub(before, duration),

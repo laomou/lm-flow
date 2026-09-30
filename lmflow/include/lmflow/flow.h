@@ -678,7 +678,7 @@ LMFlowPoller* lmflow_graph_add_poller_ex(LMFlowGraph*, const char* port, bool ob
 #define LMFLOW_POLLER_LATEST 3
 LMFlowPoller* lmflow_graph_add_poller_bounded(
     LMFlowGraph*, const char* port, size_t capacity, int overflow_policy);
-/* 阻塞取下一包:
+/* 阻塞取下一包。输入仍开放时，图暂时空闲不会结束等待:
  *   LMFLOW_OK = 写入一个包;
  *   LMFLOW_ERR_CLOSED = poller 已结束且队列为空;
  *   其它错误 = 图失败或句柄无效。 */
@@ -689,7 +689,8 @@ LMFlowStatus lmflow_poller_next_status(LMFlowPoller*, LMFlowPacket* out);
  *   LMFLOW_ERR_CLOSED = 此 poller 已结束且队列为空;
  *   其它错误 = 图失败或句柄无效。 */
 LMFlowStatus lmflow_poller_try_next_status(LMFlowPoller*, LMFlowPacket* out);
-/* 带超时:LMFLOW_OK / LMFLOW_ERR_TIMEOUT / LMFLOW_ERR_CLOSED。
+/* 带超时:LMFLOW_OK / LMFLOW_ERR_TIMEOUT / LMFLOW_ERR_CLOSED，
+ * 图取消或失败时返回相应错误码。
  * 仅返回 LMFLOW_OK 时写入 out；其它返回码不会转移包所有权。 */
 LMFlowStatus lmflow_poller_next_timeout(LMFlowPoller*, LMFlowPacket* out, int64_t timeout_ms);
 uint64_t lmflow_poller_dropped_count(LMFlowPoller*);
