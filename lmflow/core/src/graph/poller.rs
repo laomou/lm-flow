@@ -406,6 +406,10 @@ impl Poller {
             if self.graph.shared.is_cancelled() {
                 return Err(Error::Cancelled);
             }
+            // Do not let a continuously ready delegated executor bypass timeout.
+            if self.graph.remaining_for_poller(deadline).is_none() {
+                return Err(Error::Timeout);
+            }
             if self.graph.pump_step() {
                 continue;
             }

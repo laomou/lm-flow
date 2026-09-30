@@ -153,14 +153,17 @@ impl GraphInner {
     /// `workers_idle` 只是执行器快照,不能直接等同于图没有可推进工作:
     /// 队列入队、blocked staging 恢复与下游调度通知可能交错,使任务队列暂时为空。
     /// 先全图重扫就绪性并重试刷新;若活动代数仍不变且 worker 仍空闲,才算稳定。
-    pub(super) fn retry_idle_progress(&self) -> bool {
+    pub(super) fn retry_idle_progress(&self, deadline: Option<std::time::Instant>) -> Result<bool> {
         let before = self.activity_gen();
         for node in 0..self.nodes.len() {
             self.schedule_node(node);
         }
         self.resume_blocked_flushes();
-        while self.pump_step() {}
-        !self.workers_idle() || self.activity_gen() != before
+        while self.remaining(deadline).is_some() && self.pump_step() {}
+        if self.remaining(deadline).is_none() {
+            return Err(Error::Timeout);
+        }
+        Ok(!self.workers_idle() || self.activity_gen() != before)
     }
 
     /// 驱动按序刷新。下游容量不足时保留槽与 staging,让出 worker;由下游出队后重试。
