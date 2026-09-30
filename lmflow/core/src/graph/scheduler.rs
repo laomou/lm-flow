@@ -32,11 +32,10 @@ impl GraphInner {
         if self.edges[edge].is_closed() {
             return Err(Error::Closed);
         }
-        // 图输入口上必须有明确时间戳
-        if pkt.timestamp() == Timestamp::unset() {
+        // Stream data cannot carry internal lifecycle/bound sentinels.
+        if !pkt.timestamp().is_allowed_in_stream() {
             return Err(Error::InvalidArg(
-                "packets on a graph input port must carry an explicit timestamp (UNSET is invalid)"
-                    .into(),
+                format!("packets on a graph input port must carry an explicit timestamp in the legal stream range (UNSET and other internal sentinels are invalid): {}", pkt.timestamp()),
             ));
         }
 
