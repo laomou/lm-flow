@@ -48,6 +48,10 @@ impl GraphInner {
             s.close_started = true;
         }
 
+        if force {
+            self.discard_queued_inputs(n);
+        }
+
         // 此刻 in_flight==0,所有槽空闲;Close 是串行的,用槽 0。
         {
             let ctx = unsafe { node.ctx_slot(0) };
@@ -91,6 +95,26 @@ impl GraphInner {
         }
         self.notify_activity();
         true
+    }
+
+    /// Release unclaimed input packets on forced shutdown, preserving already
+    /// published poller output and its contribution to the global queue counters.
+    fn discard_queued_inputs(&self, n: NodeId) {
+        let node = &self.nodes[n];
+        for (port, queue) in node.input_queues.iter().enumerate() {
+            let discarded = {
+                let mut queue = queue.lock().expect("queue lock poisoned");
+                let discarded = std::mem::take(&mut *queue);
+                node.input_queue_bytes[port].store(0, Ordering::SeqCst);
+                for packet in &discarded {
+                    self.shared.on_dequeue(packet.byte_size());
+                }
+                discarded
+            };
+            // Payload destructors may call host code; never run them under a queue lock.
+            drop(discarded);
+        }
+        self.notify_activity();
     }
 
     pub(super) fn close_edge(&self, edge: EdgeId) {
