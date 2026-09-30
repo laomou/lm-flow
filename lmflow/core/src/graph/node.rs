@@ -179,6 +179,23 @@ pub enum DotView {
 
 // ---------------------------------------------------------------- 边
 
+// Serialize an input's committed sends and closure without holding a Mutex
+// while invoking host callbacks. Reentrant sends fail rather than self-deadlock;
+// reentrant close is completed by the active sender after dispatch finishes.
+#[derive(Default)]
+pub(super) struct IngressState {
+    owner: Option<std::thread::ThreadId>,
+    closing: bool,
+}
+
+pub(super) struct IngressGuard<'a>(&'a Edge);
+impl Drop for IngressGuard<'_> {
+    fn drop(&mut self) {
+        self.0.ingress.lock().expect("ingress lock poisoned").owner = None;
+        self.0.ingress_changed.notify_all();
+    }
+}
+
 pub struct Edge {
     pub name: String,
     pub producer: Option<NodeId>,
@@ -192,6 +209,8 @@ pub struct Edge {
     /// 该边上最近一次投递的时间戳。**必须独立记录**,不能拿「队列里还剩的包」当参照 ——
     /// 队列一排空参照就消失了,回退的时间戳就能混进来。
     pub(super) last_sent: Mutex<Timestamp>,
+    ingress: Mutex<IngressState>,
+    ingress_changed: Condvar,
     /// 最近一次发布给输出订阅者的时间戳边界。边界事件只允许单调推进，
     /// 重复/回退值不再次通知。
     pub(super) last_published_bound: Mutex<Timestamp>,
@@ -213,12 +232,71 @@ impl Edge {
             dropped: AtomicU64::new(0),
             watermark_backpressure: BackpressureStats::default(),
             last_sent: Mutex::new(Timestamp::unset()),
+            ingress: Mutex::new(IngressState::default()),
+            ingress_changed: Condvar::new(),
             last_published_bound: Mutex::new(Timestamp::unstarted()),
             has_timestamp_bound_subscriber: AtomicBool::new(false),
             pollers: Mutex::new(Vec::new()),
             observers: Mutex::new(Vec::new()),
         }
     }
+    pub(super) fn is_ingress_owner(&self) -> bool {
+        self.ingress.lock().expect("ingress lock poisoned").owner
+            == Some(std::thread::current().id())
+    }
+
+    pub(super) fn enter_ingress(&self, blocking: bool) -> Result<IngressGuard<'_>> {
+        let current = std::thread::current().id();
+        let mut state = self.ingress.lock().expect("ingress lock poisoned");
+        loop {
+            if state.closing {
+                return Err(Error::Closed);
+            }
+            if state.owner == Some(current) {
+                return Err(Error::State(
+                    "cannot send to the same input from its dispatch callback".into(),
+                ));
+            }
+            if state.owner.is_none() {
+                state.owner = Some(current);
+                return Ok(IngressGuard(self));
+            }
+            if !blocking {
+                return Err(Error::WouldBlock);
+            }
+            state = self
+                .ingress_changed
+                .wait(state)
+                .expect("ingress lock poisoned");
+        }
+    }
+
+    pub(super) fn enter_ingress_close(&self) -> Option<IngressGuard<'_>> {
+        let current = std::thread::current().id();
+        let mut state = self.ingress.lock().expect("ingress lock poisoned");
+        state.closing = true;
+        self.ingress_changed.notify_all();
+        if state.owner == Some(current) {
+            return None;
+        }
+        while state.owner.is_some() {
+            state = self
+                .ingress_changed
+                .wait(state)
+                .expect("ingress lock poisoned");
+        }
+        state.owner = Some(current);
+        Some(IngressGuard(self))
+    }
+
+    pub(super) fn ingress_closing(&self) -> bool {
+        self.ingress.lock().expect("ingress lock poisoned").closing
+    }
+
+    pub(super) fn reset_ingress(&self) {
+        *self.ingress.lock().expect("ingress lock poisoned") = IngressState::default();
+    }
+
     pub fn is_closed(&self) -> bool {
         self.closed.load(Ordering::SeqCst)
     }

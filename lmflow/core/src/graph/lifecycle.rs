@@ -95,6 +95,19 @@ impl GraphInner {
 
     pub(super) fn close_edge(&self, edge: EdgeId) {
         let e = &self.edges[edge];
+        let _ingress = if e.is_graph_input {
+            match e.enter_ingress_close() {
+                Some(guard) => Some(guard),
+                None => return, // The current dispatch completes this close.
+            }
+        } else {
+            None
+        };
+        self.close_edge_committed(edge);
+    }
+
+    pub(super) fn close_edge_committed(&self, edge: EdgeId) {
+        let e = &self.edges[edge];
         if e.closed.swap(true, Ordering::SeqCst) {
             return; // 已关
         }
@@ -267,6 +280,7 @@ impl GraphInner {
         // 3. 逐 Edge 复位。last_sent 必须回 unset() —— 否则单调性校验会拒掉下一轮
         //    从图输入口发的第一个包(时间戳通常又从小开始)。
         for e in &self.edges {
+            e.reset_ingress();
             e.closed.store(false, Ordering::SeqCst);
             e.dropped.store(0, Ordering::Relaxed);
             e.watermark_backpressure.reset();

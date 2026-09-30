@@ -482,15 +482,20 @@ pub struct Input {
 }
 
 impl Input {
+    /// Sends on the same input are serialized through dispatch. Reentrant sends
+    /// from that input's dispatch callback return a state error.
     pub fn send(&self, pkt: Packet) -> Result<()> {
         self.graph.send(self.edge, pkt, true)
     }
+    /// Returns WouldBlock if another thread is dispatching on this input.
     pub fn try_send(&self, pkt: Packet) -> Result<()> {
         self.graph.send(self.edge, pkt, false)
     }
     pub fn backpressure_stats(&self) -> WatermarkBackpressureStatsSnapshot {
         self.graph.watermark_backpressure_stats(self.edge)
     }
+    /// Wait for the current send to finish before closing. From this input's
+    /// callback, closure is deferred until its current dispatch has finished.
     pub fn close(&self) {
         self.graph.close_edge(self.edge);
         self.graph.set_state_draining_if_all_inputs_closed();
