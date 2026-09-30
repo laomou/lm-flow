@@ -40,6 +40,12 @@ impl GraphInner {
             ));
         }
 
+        // Reject callback reentry before pumping delegated work for backpressure.
+        if self.edges[edge].is_ingress_owner() {
+            return Err(Error::State(
+                "cannot send to the same input from its dispatch callback".into(),
+            ));
+        }
         // 全局水位:超限时把压力转化成图输入口背压(§7.5)。
         let mut watermark_blocked = false;
         while self.shared.over_watermark() {
@@ -76,6 +82,18 @@ impl GraphInner {
             self.finish_watermark_block(edge, true);
         }
 
+        // Do not reserve this input while pumping/waiting for watermark space:
+        // delegated callbacks may need to close or send on it. Serialize only commit.
+        let _ingress = self.edges[edge].enter_ingress(blocking)?;
+        if self.edges[edge].is_closed() {
+            return Err(Error::Closed);
+        }
+        if self.shared.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
+        if let Some(error) = self.shared.first_error() {
+            return Err(error);
+        }
         // 时间戳单调性:图输入口强制校验(ADR #23)
         self.check_input_monotonic(edge, &pkt)?;
         if self.full_stats() {
@@ -85,6 +103,10 @@ impl GraphInner {
         // 分发给该边的所有消费者(各自一份引用)与 poller/observer
         self.dispatch(edge, std::slice::from_ref(&pkt)); // 单包不必为它分配 Vec
         self.schedule_consumers(edge);
+        if self.edges[edge].ingress_closing() {
+            self.close_edge_committed(edge);
+            self.set_state_draining_if_all_inputs_closed();
+        }
         Ok(())
     }
 

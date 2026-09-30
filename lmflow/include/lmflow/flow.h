@@ -649,6 +649,10 @@ void lmflow_graph_free(LMFlowGraph*); /* 内部先 cancel + wait,再释放 */
 LMFlowInput* lmflow_graph_input(LMFlowGraph*, const char* port);
 /* send / try_send 调用即消费 pkt 的所有权,**无论返回 OK、WOULD_BLOCK、CLOSED
  * 或其它错误**,调用方都不得再 drop。失败表示包未进入图,但其引用已由本次调用释放。 */
+/* Concurrent sends on one input are serialized through dispatch. try_send returns
+ * WOULD_BLOCK while another thread dispatches on that input. Same-input sends
+ * reentered from its dispatch callback return ERR_STATE. close waits for the active
+ * dispatch, or defers closure until dispatch finishes when called by that callback. */
 LMFlowStatus lmflow_input_send(LMFlowInput*, LMFlowPacket pkt);
 LMFlowStatus lmflow_input_try_send(LMFlowInput*, LMFlowPacket pkt);
 void lmflow_input_close(LMFlowInput*);
