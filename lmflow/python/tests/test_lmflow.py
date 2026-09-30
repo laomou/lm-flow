@@ -1409,6 +1409,17 @@ nodes: [ { kernel: PassThroughKernel, executor: solo, max_in_flight: 8 } ]
             with self.assertRaises(TypeError):
                 g.input("in").send({"a": 1}, ts=0)
 
+    def test_poller_timeout_raises_timeout_error(self):
+        with graph(one_node("TTimeoutSlow")) as g:
+            out = g.add_poller("out")
+            g.start()
+            g.input("in").send(1, ts=0)
+            g.close_all_inputs()
+            with self.assertRaises(TimeoutError):
+                out.next(timeout=0.001)
+            self.assertEqual(out.next(timeout=5.0).as_int(), 1)
+            g.wait_done(timeout=5.0)
+
     def test_timeout_raises(self):
         with graph(
             """

@@ -708,9 +708,6 @@ class Poller {
         py::gil_scoped_release unlock;
         st = lmflow_poller_next_timeout(h_, &out, ms);
       }
-      if (st == LMFLOW_ERR_TIMEOUT) {
-        throw py::error_already_set();  // 由下方 translator 转 TimeoutError
-      }
       if (st == LMFLOW_ERR_CLOSED) return py::none();
       check(st, "poller.next");
     } else {
