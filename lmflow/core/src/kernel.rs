@@ -287,10 +287,11 @@ impl KernelInstance {
     /// 本节点的**独占令牌**(docs/design.md §7.0 R3)—— 否则算子回调可能与引擎
     /// 对同一 Context 的访问竞争。
     pub unsafe fn open(&self, ctx: *mut c_void) -> i32 {
-        match self.vtable.open {
+        let status = match self.vtable.open {
             Some(f) => unsafe { f(self.self_ptr, ctx) },
             None => 0,
-        }
+        };
+        unsafe { &mut *(ctx as *mut Context) }.callback_status(status)
     }
     /// # Safety
     /// 同 [`Self::open`]。
@@ -305,18 +306,20 @@ impl KernelInstance {
                 }
             };
         }
-        match self.vtable.process {
+        let status = match self.vtable.process {
             Some(f) => unsafe { f(self.self_ptr, ctx) },
             None => 0,
-        }
+        };
+        unsafe { &mut *(ctx as *mut Context) }.callback_status(status)
     }
     /// # Safety
     /// 同 [`Self::open`]。
     pub unsafe fn close(&self, ctx: *mut c_void) -> i32 {
-        match self.vtable.close {
+        let status = match self.vtable.close {
             Some(f) => unsafe { f(self.self_ptr, ctx) },
             None => 0,
-        }
+        };
+        unsafe { &mut *(ctx as *mut Context) }.callback_status(status)
     }
 }
 

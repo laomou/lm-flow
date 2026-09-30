@@ -442,6 +442,8 @@ int64_t lmflow_ctx_input_timestamp(const LMFlowContext*);
  * 取走后须 emit/send 或 lmflow_packet_drop。对空槽调用返回空包。 */
 LMFlowPacket lmflow_ctx_take_input(LMFlowContext*, size_t in_idx);
 
+/* emit/forward 失败会使本次 open/process/close 调用失败，即使回调返回 OK；
+ * 本次暂存的输出将被丢弃；process 失败按节点错误策略处理。 */
 void lmflow_ctx_emit(LMFlowContext*, size_t out_idx, LMFlowPacket pkt);   /* 移交所有权 */
 void lmflow_ctx_forward(LMFlowContext*, size_t in_idx, size_t out_idx); /* 直通,复用同一 payload */
 void lmflow_ctx_set_next_ts_bound(LMFlowContext*, size_t out_idx, int64_t bound);
