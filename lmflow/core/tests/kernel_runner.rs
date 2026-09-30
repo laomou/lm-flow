@@ -70,3 +70,46 @@ fn duplicate_pending_input_is_rejected() {
         .to_string();
     assert!(error.contains("already has a packet"), "{error}");
 }
+
+#[derive(Default)]
+struct RepeatedRunner;
+
+impl Kernel for RepeatedRunner {
+    fn process(&mut self, context: &mut KernelCtx) -> lmflow::Result<()> {
+        context.forward(0, 0)?;
+        context.emit(1, Packet::from_i64(2))
+    }
+
+    fn close(&mut self, context: &mut KernelCtx) -> lmflow::Result<()> {
+        context.emit(1, Packet::from_i64(99))
+    }
+}
+
+#[test]
+fn output_ports_survive_processing_close_and_reopen() {
+    register_kernel::<RepeatedRunner>("RepeatedRunner").unwrap();
+    let mut runner = KernelRunner::new("RepeatedRunner", 1, 2).unwrap();
+    for cycle in 0..2 {
+        for round in 0..3 {
+            let value = cycle * 3 + round;
+            let output = if round == 0 {
+                runner.process(vec![Some(Packet::from_i64(value))], Timestamp(value))
+            } else {
+                runner.add_input(0, Packet::from_i64(value)).unwrap();
+                runner.process_pending(Timestamp(value))
+            }
+            .unwrap();
+            assert_eq!(output.len(), 2);
+            assert_eq!(output[0][0].as_i64(), Some(value));
+            assert_eq!(output[1][0].as_i64(), Some(2));
+            assert_eq!(runner.try_output(0).unwrap().unwrap().as_i64(), Some(value));
+            assert_eq!(runner.try_output(1).unwrap().unwrap().as_i64(), Some(2));
+        }
+        let output = runner.close().unwrap();
+        assert_eq!(output.len(), 2);
+        assert!(output[0].is_empty());
+        assert_eq!(output[1][0].as_i64(), Some(99));
+        assert_eq!(runner.try_output(1).unwrap().unwrap().as_i64(), Some(99));
+        assert_eq!(runner.close().unwrap().len(), 2);
+    }
+}

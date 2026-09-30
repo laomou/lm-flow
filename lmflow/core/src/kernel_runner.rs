@@ -170,7 +170,12 @@ impl KernelRunner {
             self.context.discard_staging();
             return Err(error);
         }
-        let staging = std::mem::take(&mut self.context.staging);
+        let staging: Vec<Vec<Packet>> = self
+            .context
+            .staging
+            .iter_mut()
+            .map(std::mem::take)
+            .collect();
         for (port, packets) in staging.iter().enumerate() {
             self.outputs[port].extend(packets.iter().cloned());
         }
@@ -227,7 +232,12 @@ impl KernelRunner {
             self.context.discard_staging();
             return Err(error);
         }
-        let staging = std::mem::take(&mut self.context.staging);
+        let staging: Vec<Vec<Packet>> = self
+            .context
+            .staging
+            .iter_mut()
+            .map(std::mem::take)
+            .collect();
         for (port, packets) in staging.iter().enumerate() {
             self.outputs[port].extend(packets.iter().cloned());
         }
