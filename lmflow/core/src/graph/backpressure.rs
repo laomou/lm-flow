@@ -375,7 +375,14 @@ impl GraphInner {
             packets.clear();
             unsafe { node.ctx_slot(slot) }.staging[i] = packets;
             if dispatched {
-                self.schedule_consumers(edge);
+                // Data and an explicit bound may be emitted together. Publish the
+                // bound after releasing staging references, since propagation can
+                // schedule consumers that request exclusive access to the payload.
+                if let Some(bound) = explicit_bound {
+                    self.propagate_bound(edge, bound);
+                } else {
+                    self.schedule_consumers(edge);
+                }
             }
         }
         self.release_internal_reservations(&reservations);
@@ -580,6 +587,7 @@ impl GraphInner {
                     .fetch_add(packets.len() as u64, Ordering::Relaxed);
             }
             self.dispatch(edge, packets);
+            // flush_staging propagates any explicit bound after clearing packets.
             return true;
         }
         // **没有产出时也必须推进下游边界**,否则下游会永远等这一路。
