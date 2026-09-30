@@ -90,7 +90,12 @@ int dtype_from_numpy(const py::dtype& dt) {
   if (dt.is(py::dtype::of<double>())) return LMFLOW_DTYPE_F64;
   // float16:C++ 无标准 half 类型,按 numpy 的 kind('f')+itemsize(2) 辨认。
   // 放在 F32/F64 之后,不会误伤它们。fp16 是模型推理的主力类型,必须支持。
-  if (dt.kind() == 'f' && dt.itemsize() == 2) return LMFLOW_DTYPE_F16;
+  if (dt.kind() == 'f' && dt.itemsize() == 2) {
+    if (!dt.attr("isnative").cast<bool>()) {
+      throw py::value_error("non-native byte order is not supported for float16 buffers");
+    }
+    return LMFLOW_DTYPE_F16;
+  }
   throw py::value_error(
       "unsupported numpy dtype; supported: "
       "uint8/int8/uint16/int16/int32/int64/float16/float32/float64");
