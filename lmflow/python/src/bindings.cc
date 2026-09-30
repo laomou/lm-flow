@@ -34,6 +34,7 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+#include <unordered_map>
 
 #include "lmflow/flow.h"
 
@@ -128,11 +129,21 @@ py::array wrap_buffer(const LMFlowBuffer& b, const py::object& owner, bool writa
 struct NumpyBufferOwner {
   py::array array;
   bool restore_writable;
+  size_t references = 1;
 };
+
+// Accessed only while holding the GIL. Each adopted payload holds one reference;
+// clones of that payload are counted by the engine instead.
+std::unordered_map<PyObject*, NumpyBufferOwner*>& numpy_buffer_owners() {
+  static std::unordered_map<PyObject*, NumpyBufferOwner*> owners;
+  return owners;
+}
 
 void release_numpy_buffer(void* user_data) {
   auto* owner = static_cast<NumpyBufferOwner*>(user_data);
   py::gil_scoped_acquire gil;
+  if (--owner->references != 0) return;
+  numpy_buffer_owners().erase(owner->array.ptr());
   if (owner->restore_writable) {
     try {
       owner->array.attr("setflags")(py::arg("write") = true);
@@ -318,20 +329,33 @@ class Packet {
       b.strides[i] = arr.strides(i);
     }
 
-    auto owner = std::make_unique<NumpyBufferOwner>(
-        NumpyBufferOwner{arr, static_cast<bool>(arr.writeable())});
-    if (owner->restore_writable) {
-      arr.attr("setflags")(py::arg("write") = false);
+    auto& owners = numpy_buffer_owners();
+    auto existing = owners.find(arr.ptr());
+    NumpyBufferOwner* owner;
+    if (existing != owners.end()) {
+      owner = existing->second;
+      ++owner->references;
+    } else {
+      auto fresh = std::make_unique<NumpyBufferOwner>(
+          NumpyBufferOwner{arr, static_cast<bool>(arr.writeable())});
+      owners.emplace(arr.ptr(), fresh.get());
+      try {
+        if (fresh->restore_writable) {
+          arr.attr("setflags")(py::arg("write") = false);
+        }
+      } catch (...) {
+        owners.erase(arr.ptr());
+        throw;
+      }
+      owner = fresh.release();
     }
     LMFlowPacket raw =
-        lmflow_packet_adopt_buffer(&b, ts, &release_numpy_buffer, owner.get());
+        lmflow_packet_adopt_buffer(&b, ts, &release_numpy_buffer, owner);
     if (!raw.payload) {
-      if (owner->restore_writable) {
-        arr.attr("setflags")(py::arg("write") = true);
-      }
-      throw std::runtime_error(std::string("from_numpy failed: ") + lmflow_last_error());
+      const std::string error = lmflow_last_error();
+      release_numpy_buffer(owner);
+      throw std::runtime_error("from_numpy failed: " + error);
     }
-    owner.release();
     return new Packet(raw, true);
   }
 
