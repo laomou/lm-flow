@@ -1010,6 +1010,8 @@ output_ports: [out]
             pkt, buf = g.new_buffer((4,), np.uint8)
             buf[:] = [0, 1, 2, 3]
             addr = buf.__array_interface__["data"][0]
+            # Release the host view so the pipeline owns the buffer exclusively.
+            del buf
             g.input("in").send(pkt, ts=0)
             arr = out.next(timeout=5.0).as_numpy()
             self.assertEqual(arr.tolist() , [255, 254, 253, 252])
