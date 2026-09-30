@@ -67,6 +67,9 @@ pub unsafe extern "C" fn lmflow_graph_init_from_yaml_file(
         let Some(slot) = slot_mut(g) else {
             return fail(Error::InvalidArg("graph handle is null".into()));
         };
+        if slot.graph.is_some() {
+            return fail(Error::State("graph already initialized".into()));
+        }
         let Some(p) = cstr(path) else {
             return fail(Error::InvalidArg("path is null".into()));
         };
