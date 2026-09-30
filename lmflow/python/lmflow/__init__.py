@@ -284,14 +284,31 @@ class _AsyncGraphDriver:
     async def _drive(self) -> None:
         wakeup = self._wakeup
         assert wakeup is not None
+        loop = asyncio.get_running_loop()
         try:
             while True:
                 wakeup.clear()
-                while self._graph.pump_step():
-                    pass
+                # Bound each turn by work count and elapsed time. Individual synchronous
+                # kernel callbacks cannot be preempted, but a backlog must not monopolize
+                # the loop and starve timers, consumers, or cancellation.
+                deadline = loop.time() + 0.005
+                exhausted = False
+                for _ in range(64):
+                    if not self._graph.pump_step():
+                        break
+                    if loop.time() >= deadline:
+                        exhausted = True
+                        break
+                else:
+                    exhausted = True
                 self._publish()
                 if self._graph.state == GraphState.TERMINATED:
                     return
+                if exhausted:
+                    # Keep driving: the native wakeup slot remains latched until a pump
+                    # finds no work, so waiting for another notification can deadlock.
+                    await asyncio.sleep(0)
+                    continue
                 if wakeup.is_set():
                     continue
                 await wakeup.wait()
