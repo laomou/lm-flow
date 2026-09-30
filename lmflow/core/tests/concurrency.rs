@@ -970,7 +970,7 @@ output_ports: ["out"]
     .unwrap();
     let poller = graph.add_poller("out").unwrap();
     graph.start().unwrap();
-    // 一个包都不送:池空闲 → 应立刻判定「不会再有输出」而返回 Ok(None),不是挂住
+    // 输入仍开放，暂时没有数据也必须等到超时，不能误报流结束。
     let t0 = std::time::Instant::now();
     let r = poller.next_timeout(Duration::from_millis(300));
     assert!(
@@ -978,8 +978,8 @@ output_ports: ["out"]
         "must not hang forever"
     );
     assert!(
-        matches!(r, Ok(None)),
-        "idle with no data should return Ok(None), actual {r:?}"
+        matches!(r, Err(lmflow::Error::Timeout)),
+        "an open idle stream must time out, actual {r:?}"
     );
 }
 
