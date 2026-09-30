@@ -110,6 +110,10 @@ impl GraphInner {
         for p in e.pollers.lock().expect("poller list lock poisoned").iter() {
             p.closed.store(true, Ordering::SeqCst);
         }
+        // Closing an idle input/output may enqueue no executor task. Wake both
+        // blocking readers and event-loop hosts so closure can still be observed.
+        self.notify_activity();
+        self.request_wakeup();
     }
 
     pub(super) fn set_state_draining_if_all_inputs_closed(&self) {
