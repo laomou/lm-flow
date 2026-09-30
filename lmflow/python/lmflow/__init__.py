@@ -66,6 +66,12 @@ reaching a C++ kernel it becomes an unreadable pointer. For structured data use:
 numeric collections → an N×K numpy buffer (zero-copy, readable directly by C++);
 arbitrary metadata → a JSON string; config parameters → node ``options``.
 
+Passing an owned ``Packet`` to ``send``, ``emit``, or a runner transfers it once:
+the original wrapper becomes empty, and submitting it again raises ``ValueError``.
+Passing a borrowed input packet during its callback retains a separate engine
+reference, so it can be forwarded safely to several outputs. To mutate a borrowed
+input's buffer or metadata, first obtain ownership with ``Context.take_input``.
+
 Passing an ndarray to ``send`` or ``Packet.from_numpy`` is zero-copy. The supplied
 array is marked read-only while any Packet reference retains it, then its original
 writeability is restored. Do not mutate the same allocation through another alias

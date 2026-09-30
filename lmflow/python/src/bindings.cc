@@ -183,11 +183,14 @@ namespace lmflow_python {
 
 // ---------------------------------------------------------------- Packet
 
-/// Python 侧的数据包。`owned_` 决定析构是否归还引擎引用。
+/// Python packet wrappers distinguish borrowed, owned, and transferred references.
 class Packet {
+  enum class Ownership { Borrowed, Owned, Transferred };
+
  public:
   Packet() { raw_ = LMFlowPacket{nullptr, 0, LMFLOW_TS_UNSET, nullptr, nullptr}; }
-  explicit Packet(LMFlowPacket raw, bool owned) : raw_(raw), owned_(owned) {}
+  explicit Packet(LMFlowPacket raw, bool owned)
+      : raw_(raw), ownership_(owned ? Ownership::Owned : Ownership::Borrowed) {}
 
   Packet(const Packet&) = delete;
   Packet& operator=(const Packet&) = delete;
@@ -195,17 +198,28 @@ class Packet {
   ~Packet() { release(); }
 
   void release() {
-    if (owned_) {
-      lmflow_packet_drop(&raw_);
-      owned_ = false;
-    }
-    raw_.payload = nullptr;
+    if (ownership_ == Ownership::Owned) lmflow_packet_drop(&raw_);
+    raw_ = LMFlowPacket{nullptr, 0, LMFLOW_TS_UNSET, nullptr, nullptr};
+    ownership_ = Ownership::Transferred;
   }
 
-  /// 交给引擎(emit/send):此后不再由本对象释放。
+  /// Move owned packets once; borrow-based forwarding needs a separate engine reference.
   LMFlowPacket surrender() {
-    owned_ = false;
-    return raw_;
+    if (ownership_ == Ownership::Transferred) {
+      throw py::value_error("Packet ownership has already been transferred");
+    }
+    if (ownership_ == Ownership::Borrowed) {
+      if (!raw_.owner) return raw_;  // An empty borrowed packet owns no reference.
+      LMFlowPacket retained = lmflow_packet_clone(&raw_);
+      if (!retained.owner) {
+        throw std::runtime_error(std::string("Packet clone failed: ") + lmflow_last_error());
+      }
+      return retained;
+    }
+    LMFlowPacket transferred = raw_;
+    raw_ = LMFlowPacket{nullptr, 0, LMFLOW_TS_UNSET, nullptr, nullptr};
+    ownership_ = Ownership::Transferred;
+    return transferred;
   }
 
   const LMFlowPacket& raw() const { return raw_; }
@@ -248,6 +262,7 @@ class Packet {
   }
 
   void set_metadata(const std::string& key, const py::object& value) {
+    require_owned();
     LMFlowStatus status = LMFLOW_ERR_INVALID_ARG;
     if (py::isinstance<py::bool_>(value)) {
       status = lmflow_packet_set_metadata_bool(&raw_, key.c_str(), value.cast<bool>());
@@ -281,6 +296,7 @@ class Packet {
   }
 
   bool remove_metadata(const std::string& key) {
+    require_owned();
     return lmflow_packet_remove_metadata(&raw_, key.c_str());
   }
 
@@ -307,6 +323,7 @@ class Packet {
   /// 可写 numpy 视图(写时复制)。独占则零拷贝;被共享才复制。
   /// 前置条件:本包为调用方所拥有 —— 典型来自 `Context.take_input`。
   py::array make_mutable(const py::object&) {
+    require_owned();
     LMFlowBuffer b{};
     check(lmflow_packet_make_mutable_buffer(&raw_, &b), "make_mutable");
     return wrap_buffer(b, raw_, /*writable=*/true);
@@ -379,16 +396,26 @@ class Packet {
   }
 
  private:
+  void require_owned() const {
+    if (ownership_ == Ownership::Transferred) {
+      throw py::value_error("Packet ownership has already been transferred");
+    }
+    if (ownership_ != Ownership::Owned) {
+      throw py::value_error("mutation requires an owned Packet; use Context.take_input first");
+    }
+  }
+
   LMFlowPacket raw_{};
-  bool owned_ = false;
+  Ownership ownership_ = Ownership::Owned;
 };
 
 /// 把 Python 值转成包:既接受 Packet,也接受裸的 int/float/bool/str/bytes/ndarray。
 static LMFlowPacket to_flow_packet(const py::object& o, int64_t ts) {
   if (py::isinstance<Packet>(o)) {
     auto* p = o.cast<Packet*>();
-    if (ts != LMFLOW_TS_UNSET) p->set_timestamp(ts);
-    return p->surrender();
+    LMFlowPacket packet = p->surrender();
+    if (ts != LMFLOW_TS_UNSET) packet.timestamp = ts;
+    return packet;
   }
   if (py::isinstance<py::array>(o)) {
     std::unique_ptr<Packet> p(Packet::from_numpy(o.cast<py::array>(), ts));
