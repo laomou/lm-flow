@@ -676,6 +676,14 @@ impl GraphInner {
             return;
         };
 
+        // A claim may have waited in the executor queue while the graph stopped.
+        // Retire it through the normal ordered-completion path without entering
+        // user code, so slots, input references, and in-flight counts are released.
+        if self.shared.is_cancelled() || self.shared.has_error() {
+            self.complete_invocation(n, slot, seq, false);
+            return;
+        }
+
         // 契约类型校验(在本槽上)。类型不符宁可报错,也不让算子按错误类型解读内存。
         let ok = match self.check_input_types(n, slot) {
             Err(e) => self.on_node_error(n, slot, e),
