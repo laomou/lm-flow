@@ -617,6 +617,11 @@ each node's initialization output precedes its `Process` output and obeys intern
 first process call opens the kernel implicitly. Resetting a graph keeps kernels open and does
 not emit their initialization packets again.
 
+KernelRunner retains fatal Open callback and output-validation errors: later Open/Process calls
+return the original error. Recreate the runner after correcting the cause. Close still cleans up
+a successfully opened kernel whose initialization output failed validation, without publishing
+cleanup output. Missing required side packets can be supplied before retrying Open.
+
 ```cpp
 #include "lmflow/flow.hpp"
 

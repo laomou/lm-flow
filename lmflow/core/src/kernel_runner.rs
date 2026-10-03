@@ -20,6 +20,7 @@ pub struct KernelRunner {
     contract: Contract,
     context: Context,
     opened: bool,
+    open_error: Option<Error>,
     pending_inputs: Vec<Option<Packet>>,
     outputs: Vec<VecDeque<Packet>>,
 }
@@ -68,6 +69,7 @@ impl KernelRunner {
             contract,
             context,
             opened: false,
+            open_error: None,
             pending_inputs: (0..input_ports).map(|_| None).collect(),
             outputs: (0..output_ports).map(|_| VecDeque::new()).collect(),
         })
@@ -100,6 +102,9 @@ impl KernelRunner {
     }
 
     pub fn open(&mut self) -> Result<()> {
+        if let Some(error) = &self.open_error {
+            return Err(error.clone());
+        }
         if self.opened {
             return Ok(());
         }
@@ -116,11 +121,15 @@ impl KernelRunner {
         if status != 0 {
             let error = self.context.take_error(status);
             self.context.discard_staging();
+            self.open_error = Some(error.clone());
             return Err(error);
         }
+        // A successful callback still needs Close for cleanup if its outputs
+        // fail validation. Keep that obligation separate from usable Open state.
         self.opened = true;
         if let Err(error) = self.validate_outputs() {
             self.context.discard_staging();
+            self.open_error = Some(error.clone());
             return Err(error);
         }
         for (output, staged) in self.outputs.iter_mut().zip(&mut self.context.staging) {
@@ -231,12 +240,20 @@ impl KernelRunner {
                 .collect());
         }
         self.context.reset();
-        self.context.close_reason = crate::runtime::CLOSE_NORMAL;
+        self.context.close_reason = if self.open_error.is_some() {
+            crate::runtime::CLOSE_ERROR
+        } else {
+            crate::runtime::CLOSE_NORMAL
+        };
         let status = unsafe {
             self.kernel
                 .close(&mut self.context as *mut _ as *mut c_void)
         };
         self.opened = false;
+        if let Some(error) = &self.open_error {
+            self.context.discard_staging();
+            return Err(error.clone());
+        }
         if status != 0 {
             let error = self.context.take_error(status);
             self.context.discard_staging();
