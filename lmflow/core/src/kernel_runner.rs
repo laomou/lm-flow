@@ -172,6 +172,9 @@ impl KernelRunner {
             self.kernel
                 .process(&mut self.context as *mut _ as *mut c_void)
         };
+        // Input borrows end with the callback, including error paths. Keeping
+        // them here pins consumed payloads and forces CoW on forwarded output.
+        self.context.clear_inputs();
         if status != 0 {
             let error = self.context.take_error(status);
             self.context.discard_staging();
