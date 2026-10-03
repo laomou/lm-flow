@@ -188,11 +188,30 @@ pub(super) struct IngressState {
     closing: bool,
 }
 
-pub(super) struct IngressGuard<'a>(&'a Edge);
+pub(super) struct IngressGuard<'a>(Option<&'a Edge>);
+impl IngressGuard<'_> {
+    /// Atomically hand off ownership or retain it to commit a pending close.
+    /// A deferred closer must never arrive between the last closing check and
+    /// releasing the sender, otherwise nobody would finish that close.
+    pub(super) fn release_unless_closing(&mut self) -> bool {
+        let edge = self.0.expect("ingress guard already released");
+        let mut state = edge.ingress.lock().expect("ingress lock poisoned");
+        if state.closing {
+            return true;
+        }
+        state.owner = None;
+        self.0 = None;
+        drop(state);
+        edge.ingress_changed.notify_all();
+        false
+    }
+}
 impl Drop for IngressGuard<'_> {
     fn drop(&mut self) {
-        self.0.ingress.lock().expect("ingress lock poisoned").owner = None;
-        self.0.ingress_changed.notify_all();
+        if let Some(edge) = self.0 {
+            edge.ingress.lock().expect("ingress lock poisoned").owner = None;
+            edge.ingress_changed.notify_all();
+        }
     }
 }
 
@@ -259,7 +278,7 @@ impl Edge {
             }
             if state.owner.is_none() {
                 state.owner = Some(current);
-                return Ok(IngressGuard(self));
+                return Ok(IngressGuard(Some(self)));
             }
             if !blocking {
                 return Err(Error::WouldBlock);
@@ -271,12 +290,12 @@ impl Edge {
         }
     }
 
-    pub(super) fn enter_ingress_close(&self) -> Option<IngressGuard<'_>> {
+    pub(super) fn enter_ingress_close(&self, defer_if_busy: bool) -> Option<IngressGuard<'_>> {
         let current = std::thread::current().id();
         let mut state = self.ingress.lock().expect("ingress lock poisoned");
         state.closing = true;
         self.ingress_changed.notify_all();
-        if state.owner == Some(current) {
+        if state.owner == Some(current) || (defer_if_busy && state.owner.is_some()) {
             return None;
         }
         while state.owner.is_some() {
@@ -286,11 +305,7 @@ impl Edge {
                 .expect("ingress lock poisoned");
         }
         state.owner = Some(current);
-        Some(IngressGuard(self))
-    }
-
-    pub(super) fn ingress_closing(&self) -> bool {
-        self.ingress.lock().expect("ingress lock poisoned").closing
+        Some(IngressGuard(Some(self)))
     }
 
     pub(super) fn reset_ingress(&self) {

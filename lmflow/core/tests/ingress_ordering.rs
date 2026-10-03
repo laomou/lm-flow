@@ -142,3 +142,102 @@ fn cancellation_unblocks_dispatch_waiting_on_a_bounded_input_poller() {
     g.close_all_inputs();
     assert!(matches!(g.wait_done(), Err(Error::Cancelled)));
 }
+
+#[test]
+fn concurrent_callbacks_can_close_other_inputs_without_deadlock() {
+    const CHILD: &str = "LMFLOW_CALLBACK_CLOSE_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        // Isolate a regression deadlock so a failing test cannot hang the suite.
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "concurrent_callbacks_can_close_other_inputs_without_deadlock",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                assert!(status.success(), "callback-close child failed: {status}");
+                return;
+            }
+            if std::time::Instant::now() >= deadline {
+                child.kill().unwrap();
+                child.wait().unwrap();
+                panic!("concurrent callback close deadlocked");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    for close_all in [true, false] {
+        let g = Arc::new(
+            common::graph_from_yaml(
+                "executors: [{name: host, type: DelegatingExecutor}]
+nodes:
+  - {kernel: PassThrough, executor: host, input_ports: [a], output_ports: [out_a]}
+  - {kernel: PassThrough, executor: host, input_ports: [b], output_ports: [out_b]}
+input_ports: [a, b]
+output_ports: [a, b, out_a, out_b]",
+            )
+            .unwrap(),
+        );
+        let barrier = Arc::new(Barrier::new(2));
+        let mut events = Vec::new();
+        for (name, other) in [("a", "b"), ("b", "a")] {
+            let weak = Arc::downgrade(&g);
+            let barrier = barrier.clone();
+            let seen = Arc::new(Mutex::new(Vec::new()));
+            events.push(seen.clone());
+            g.observe_with_timestamp_bounds(name, move |p| {
+                seen.lock().unwrap().push((p.is_empty(), p.timestamp()));
+                if p.is_empty() {
+                    return;
+                }
+                barrier.wait();
+                let graph = weak.upgrade().unwrap();
+                if close_all {
+                    graph.close_all_inputs();
+                } else {
+                    graph.input(other).unwrap().close();
+                }
+            })
+            .unwrap();
+        }
+        let outputs = [
+            g.add_poller("out_a").unwrap(),
+            g.add_poller("out_b").unwrap(),
+        ];
+        for _ in 0..10 {
+            g.start().unwrap();
+            let senders: Vec<_> = ["a", "b"]
+                .into_iter()
+                .map(|name| {
+                    let input = g.input(name).unwrap();
+                    std::thread::spawn(move || input.send(packet(0)))
+                })
+                .collect();
+            for sender in senders {
+                sender.join().unwrap().unwrap();
+            }
+            g.wait_done_timeout(Duration::from_secs(2)).unwrap();
+            for output in &outputs {
+                assert_eq!(collect(output), vec![0]);
+            }
+            for seen in &events {
+                assert_eq!(
+                    *seen.lock().unwrap(),
+                    vec![
+                        (false, Timestamp(0)),
+                        (true, Timestamp(1)),
+                        (true, Timestamp::done())
+                    ]
+                );
+                seen.lock().unwrap().clear();
+            }
+            g.reset().unwrap();
+        }
+    }
+}
