@@ -19,6 +19,12 @@ unsafe extern "C" fn bad_forward(_: *mut c_void, ctx: *mut LMFlowContext) -> i32
     0
 }
 
+unsafe extern "C" fn bad_timestamp(_: *mut c_void, ctx: *mut LMFlowContext) -> i32 {
+    lmflow_ctx_emit(ctx, 0, lmflow_packet_from_i64(123, 0));
+    lmflow_ctx_emit(ctx, 0, lmflow_packet_from_i64(456, Timestamp::done().0));
+    0 // Timestamp validation must latch the error even when the callback returns OK.
+}
+
 unsafe extern "C" fn fail_first(_: *mut c_void, ctx: *mut LMFlowContext) -> i32 {
     let timestamp = lmflow_ctx_input_timestamp(ctx);
     lmflow_ctx_emit(ctx, 0, lmflow_packet_from_i64(timestamp, timestamp));
@@ -51,9 +57,14 @@ fn graph(name: &str, policy: &str) -> Graph {
 
 #[test]
 fn abi_output_errors_fail_each_graph_lifecycle_phase_without_partial_output() {
-    for (operation, callback) in [
-        ("emit", bad_emit as Callback),
-        ("forward", bad_forward as Callback),
+    for (operation, callback, expected_error) in [
+        ("emit", bad_emit as Callback, "out of range"),
+        ("forward", bad_forward as Callback, "out of range"),
+        (
+            "timestamp",
+            bad_timestamp as Callback,
+            "invalid packet timestamp",
+        ),
     ] {
         for phase in ["open", "process", "close"] {
             let name = format!("Bad_{operation}_{phase}");
@@ -72,7 +83,7 @@ fn abi_output_errors_fail_each_graph_lifecycle_phase_without_partial_output() {
                 graph.close_all_inputs();
                 graph.wait_done_timeout(Duration::from_secs(2)).unwrap_err()
             };
-            assert!(error.to_string().contains("out of range"), "{error}");
+            assert!(error.to_string().contains(expected_error), "{error}");
             assert!(
                 output.try_next().is_none(),
                 "partial output escaped during {phase}"

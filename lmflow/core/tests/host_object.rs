@@ -72,9 +72,11 @@ impl Kernel for HostObjectOnClose {
         unsafe extern "C" fn drop_i64(p: *mut std::ffi::c_void) {
             drop(unsafe { Box::from_raw(p as *mut i64) });
         }
-        cc.emit(0, unsafe {
-            Packet::from_foreign(ptr, type_id::HOST_OBJECT, Some(drop_i64))
-        })
+        cc.emit(
+            0,
+            unsafe { Packet::from_foreign(ptr, type_id::HOST_OBJECT, Some(drop_i64)) }
+                .at(Timestamp::post_stream()),
+        )
     }
 }
 

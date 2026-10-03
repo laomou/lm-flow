@@ -803,6 +803,7 @@ class Context {
   /// **取走**输入包(所有权移交,输入槽变空)。CoW 省拷贝的第一步。
   Packet TakeInput(size_t i) { return Packet::Adopt(lmflow_ctx_take_input(c_, i)); }
 
+  /// Unset timestamps inherit InputTimestamp(); Close outputs need an explicit legal timestamp.
   void Emit(size_t i, Packet p) { lmflow_ctx_emit(c_, i, p.release()); }
   void Forward(size_t in, size_t out) { lmflow_ctx_forward(c_, in, out); }
   void SetNextTimestampBound(size_t i, int64_t bound) { lmflow_ctx_set_next_ts_bound(c_, i, bound); }

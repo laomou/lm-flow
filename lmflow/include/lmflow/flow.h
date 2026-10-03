@@ -444,6 +444,9 @@ LMFlowPacket lmflow_ctx_take_input(LMFlowContext*, size_t in_idx);
 
 /* emit/forward 失败会使本次 open/process/close 调用失败，即使回调返回 OK；
  * 本次暂存的输出将被丢弃；process 失败按节点错误策略处理。 */
+/* Unset timestamps inherit the activation timestamp. The result must be a legal
+ * stream timestamp; Close outputs require an explicit timestamp (activation is Done).
+ * Invalid output timestamps fail the callback, even if it returns OK. */
 void lmflow_ctx_emit(LMFlowContext*, size_t out_idx, LMFlowPacket pkt);   /* 移交所有权 */
 void lmflow_ctx_forward(LMFlowContext*, size_t in_idx, size_t out_idx); /* 直通,复用同一 payload */
 void lmflow_ctx_set_next_ts_bound(LMFlowContext*, size_t out_idx, int64_t bound);

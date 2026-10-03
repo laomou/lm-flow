@@ -289,6 +289,13 @@ impl Context {
         if pkt.timestamp() == Timestamp::unset() {
             pkt.set_timestamp(self.input_ts);
         }
+        if !pkt.timestamp().is_allowed_in_stream() {
+            return Err(Error::InvalidArg(format!(
+                "node `{}`: emit output port {out_idx} has invalid packet timestamp {}; specify a legal stream timestamp",
+                self.node_name,
+                pkt.timestamp()
+            )));
+        }
         self.staging[out_idx].push(pkt);
         Ok(())
     }
@@ -452,7 +459,7 @@ mod tests {
     #[test]
     fn forward_clones_reference_only() {
         let mut c = ctx("{}");
-        let p = Packet::new(5i32);
+        let p = Packet::new(5i32).at(Timestamp(0));
         c.inputs[0] = Some(p);
         c.forward(0, 0).unwrap();
         // 输入槽与 staging 指向同一 payload
@@ -487,6 +494,7 @@ mod tests {
     #[test]
     fn discard_staging_on_failure() {
         let mut c = ctx("{}");
+        c.input_ts = Timestamp(0);
         c.emit(0, Packet::new(1i32)).unwrap();
         c.set_next_bound(1, Timestamp(3));
         c.discard_staging();
