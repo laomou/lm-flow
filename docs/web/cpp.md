@@ -603,6 +603,13 @@ an empty `std::optional` on timeout or closed output and throws for other errors
 Implement `Process`; `Open` and `Close` are optional. A static `GetContract` is picked up
 automatically if you provide one.
 
+`Open` may emit initialization packets with explicit legal stream timestamps or set output
+timestamp bounds. The graph validates all nodes' `Open` outputs before publishing any of them;
+each node's initialization output precedes its `Process` output and obeys internal queue capacity.
+`KernelRunner` also makes `Open` packets available through its output queue, including when the
+first process call opens the kernel implicitly. Resetting a graph keeps kernels open and does
+not emit their initialization packets again.
+
 ```cpp
 #include "lmflow/flow.hpp"
 

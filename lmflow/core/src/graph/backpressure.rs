@@ -62,6 +62,7 @@ impl BackpressureStats {
 
 #[derive(Debug, Clone, Copy)]
 pub(super) enum BlockedFlush {
+    Open,
     Invocation { slot: usize, ok: bool },
     Close,
 }
@@ -262,6 +263,9 @@ impl GraphInner {
                 }
             };
             match blocked {
+                Some(BlockedFlush::Open) => {
+                    self.resume_blocked_open(node_id);
+                }
                 Some(BlockedFlush::Invocation { .. }) => {
                     self.drive_invocation_flushes(node_id, None);
                     self.finish(node_id);
@@ -272,6 +276,40 @@ impl GraphInner {
                 None => {}
             }
         }
+    }
+
+    /// Keep slot 0 and the Open marker reserved until initialization output is
+    /// published, so even other slots cannot process ahead of this flush.
+    fn resume_blocked_open(&self, n: NodeId) {
+        let node = &self.nodes[n];
+        if self.shared.is_cancelled() || self.shared.has_error() {
+            unsafe { node.ctx_slot(0) }.discard_staging();
+        } else {
+            match self.flush_staging(n, 0) {
+                Ok(true) => {}
+                Ok(false) => {
+                    node.sched.lock().expect("scheduler lock poisoned").flushing = false;
+                    return;
+                }
+                Err(error) => {
+                    unsafe { node.ctx_slot(0) }.discard_staging();
+                    self.shared.record_error(error);
+                }
+            }
+        }
+        {
+            let mut sched = node.sched.lock().expect("scheduler lock poisoned");
+            sched.blocked_flush = None;
+            sched.flushing = false;
+            sched.in_flight -= 1;
+            sched.free_slots.push(0);
+            self.blocked_flush_nodes
+                .lock()
+                .expect("blocked flush lock poisoned")
+                .remove(&n);
+        }
+        self.notify_activity();
+        self.finish(n);
     }
 
     pub(super) fn resume_blocked_close(&self, n: NodeId) {
