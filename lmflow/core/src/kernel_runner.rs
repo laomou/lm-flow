@@ -110,11 +110,22 @@ impl KernelRunner {
                 )));
             }
         }
+        self.context.reset();
+        self.context.input_ts = Timestamp::unstarted();
         let status = unsafe { self.kernel.open(&mut self.context as *mut _ as *mut c_void) };
         if status != 0 {
-            return Err(self.context.take_error(status));
+            let error = self.context.take_error(status);
+            self.context.discard_staging();
+            return Err(error);
         }
         self.opened = true;
+        if let Err(error) = self.validate_outputs() {
+            self.context.discard_staging();
+            return Err(error);
+        }
+        for (output, staged) in self.outputs.iter_mut().zip(&mut self.context.staging) {
+            output.extend(staged.drain(..));
+        }
         Ok(())
     }
 

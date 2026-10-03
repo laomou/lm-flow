@@ -226,6 +226,7 @@ impl GraphInner {
         // 把 side packets 灌进各节点的**所有** context 槽,然后 open(用槽 0,串行)。
         // reset 重跑时算子实例被保留、`opened` 仍为 true —— 那种情况下**跳过 open**
         // (不重跑 open 正是 reset 省重载模型的价值),只重灌 side packet + 复位槽。
+        let mut open_outputs = Vec::new();
         for (i, node) in self.nodes.iter().enumerate() {
             let already_open = node.sched.lock().expect("scheduler lock poisoned").opened;
             for slot in 0..node.max_in_flight {
@@ -241,12 +242,40 @@ impl GraphInner {
             let rc = self.call_kernel(i, 0, KernelPhase::Open);
             if rc != 0 {
                 let e = unsafe { node.ctx_slot(0) }.take_error(rc);
+                for node in &self.nodes {
+                    unsafe { node.ctx_slot(0) }.discard_staging();
+                }
                 self.shared.record_error(e.clone());
                 return Err(e);
             }
             node.sched.lock().expect("scheduler lock poisoned").opened = true;
+            if let Err(e) = self.check_output_types(i, 0) {
+                for node in &self.nodes {
+                    unsafe { node.ctx_slot(0) }.discard_staging();
+                }
+                self.shared.record_error(e.clone());
+                return Err(e);
+            }
+            let ctx = unsafe { node.ctx_slot(0) };
+            if ctx.staging.iter().any(|packets| !packets.is_empty())
+                || ctx.next_bounds.iter().any(Option::is_some)
+            {
+                open_outputs.push(i);
+            }
         }
 
+        // Finish all Open callbacks before publishing initialization output.
+        // Reserve slot 0 so Process/Close cannot reset staging under backpressure.
+        for &i in &open_outputs {
+            let mut sched = self.nodes[i].sched.lock().expect("scheduler lock poisoned");
+            sched.free_slots.retain(|&slot| slot != 0);
+            sched.in_flight += 1;
+            sched.blocked_flush = Some(BlockedFlush::Open);
+            self.blocked_flush_nodes
+                .lock()
+                .expect("blocked flush lock poisoned")
+                .insert(i);
+        }
         self.set_state(State::Running);
         self.run_started_us
             .store(self.epoch_us().saturating_add(1), Ordering::Relaxed);
@@ -262,7 +291,8 @@ impl GraphInner {
                 executor.start(weak.clone());
             }
         }
-        // 源节点(0 输入)无输入触发,须在此显式起调度 —— start 里唯一主动调度的一处。
+        self.resume_blocked_flushes();
+        // 源节点(0 输入)无输入触发,须在此显式起调度。
         // 之后由 finish→schedule_node 自我续产,直到内核 source_done() 或图被 cancel。
         for i in 0..self.nodes.len() {
             if self.nodes[i].is_source() {
