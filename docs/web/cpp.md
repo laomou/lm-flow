@@ -277,6 +277,11 @@ graph.finish();  // normal completion: close all graph inputs, then drain and wa
 graph.stop();    // forced completion: cancel, then wait; requested cancellation counts as success
 ```
 
+If an `Open()` callback or its output validation fails, subsequent `start()` calls return the
+original fatal error without rerunning callbacks. Create a new graph after correcting the cause.
+A missing required side packet is checked before callbacks run, so it can be supplied before
+retrying `start()`. A graph cancelled before startup is also rejected before invoking `Open()`.
+
 Use `finish()` when the input stream is complete and every queued packet must be processed. Use
 `stop()` when abandoning the run. Both may block until a currently executing kernel returns;
 cancellation is cooperative and cannot preempt user code.
