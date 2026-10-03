@@ -514,6 +514,8 @@ impl GraphConfig {
                         n.rate
                     )));
                 }
+                source_rate_period(n.rate)
+                    .map_err(|error| error.context(format!("{node_path}.rate (node `{who}`)")))?;
             }
             match n.input_policy.r#type.as_str() {
                 "sync" | "immediate" => {}
@@ -1152,6 +1154,16 @@ fn validate_preflight_executors(config: &GraphConfig) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Convert a positive source rate without panicking when its reciprocal
+/// overflows either f64 or Duration's representable range.
+pub(crate) fn source_rate_period(rate: f64) -> Result<std::time::Duration> {
+    std::time::Duration::try_from_secs_f64(1.0 / rate).map_err(|_| {
+        Error::InvalidArg(format!(
+            "source rate {rate} Hz has an unrepresentable period (1 / rate seconds)"
+        ))
+    })
 }
 
 pub(crate) fn diagnostic_node_path(node: &NodeConfig, index: usize) -> String {

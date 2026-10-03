@@ -213,7 +213,9 @@ impl GraphInner {
                 input_closed: (0..ins.len()).map(|_| AtomicBool::new(false)).collect(),
                 on_error: OnError::from_config(&n.on_error),
                 min_period: if n.rate > 0.0 {
-                    Some(std::time::Duration::from_secs_f64(1.0 / n.rate))
+                    Some(crate::config::source_rate_period(n.rate).map_err(|error| {
+                        error.context(format!("{}.rate", diagnostic_node_path(n, idx)))
+                    })?)
                 } else {
                     None
                 },

@@ -928,7 +928,8 @@ warning and `lmflow_graph_dropped_count` counts them.
   lifecycle problem and should — and does — fail `start()`.
 - **`rate`** — source pacing in Hz. The engine guarantees at least `1/rate` seconds between
   `process` calls, and throttles before entering the kernel while holding no engine lock. Sources
-  only; setting it on a non-source is a build-time error.
+  only; setting it on a non-source is a build-time error. Positive rates whose reciprocal periods
+  exceed the supported duration range are rejected during configuration validation.
 - **`back_edges`** — names an input port as a latest-value feedback register: capacity 1, keeps the
   newest value, consumed once, and excluded from readiness, termination and timestamp alignment.
   This is what allows a topology to contain a cycle; a cycle not broken by a back edge is still
