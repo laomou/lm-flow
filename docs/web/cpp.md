@@ -309,8 +309,10 @@ LMFlowStatus lmflow_graph_observe_ex(LMFlowGraph*, const char* port, bool observ
 
 A packet from a poller is **transferred** to you — you must `lmflow_packet_drop` it. A packet handed
 to an observer callback is **borrowed** — you must not. The observer runs on whichever thread
-dispatched the packet, possibly a pool thread, so it must be thread-safe; and it must not call back
-into `lmflow_graph_*`.
+dispatched the packet, possibly a pool thread, so it must be thread-safe. Callbacks may request
+input closure, including closing all inputs: when the callback is dispatching a graph input,
+closure of any busy input is deferred until its accepted packet has finished dispatching.
+Other graph reentry from observers is unsupported; perform blocking waits outside callbacks.
 
 Pass `observe_timestamp_bounds=true` to either `_ex` function to also receive timestamp-bound
 events. A bound event is an empty packet (`payload == NULL`) whose `timestamp` means no later data

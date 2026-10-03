@@ -122,7 +122,14 @@ impl GraphInner {
     pub(super) fn close_edge(&self, edge: EdgeId) {
         let e = &self.edges[edge];
         let _ingress = if e.is_graph_input {
-            match e.enter_ingress_close() {
+            // Callbacks dispatching different inputs must not wait on each
+            // other's ingress ownership. Each sender commits the requested
+            // close after its accepted packet has reached every consumer.
+            let defer_if_busy = self
+                .graph_inputs
+                .iter()
+                .any(|&input| self.edges[input].is_ingress_owner());
+            match e.enter_ingress_close(defer_if_busy) {
                 Some(guard) => Some(guard),
                 None => return, // The current dispatch completes this close.
             }
