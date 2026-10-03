@@ -235,7 +235,11 @@ impl KernelRunner {
 
     /// Close with the same `Done` activation timestamp used by Graph, collecting
     /// any tail output carrying an explicit legal stream timestamp.
+    /// Pending, unprocessed inputs are discarded; completed output remains readable.
     pub fn close(&mut self) -> Result<Vec<Vec<Packet>>> {
+        // Discard inputs for an invocation that never ran, including before
+        // Open and on Close errors. Preserve slots for the next session.
+        self.pending_inputs.fill(None);
         if !self.opened {
             return Ok((0..self.context.staging.len())
                 .map(|_| Vec::new())
