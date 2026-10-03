@@ -4,6 +4,8 @@ use super::*;
 // Graph start, shutdown, reset, and wait state machine.
 
 impl Graph {
+    /// Start execution. A fatal Open error is retained and returned on subsequent
+    /// attempts; missing required side packets may be supplied before retrying.
     pub fn start(&self) -> Result<()> {
         self.inner.start()
     }
@@ -208,6 +210,15 @@ impl GraphInner {
             return Err(Error::State(format!(
                 "start can only be called in Initialized (current {st:?})"
             )));
+        }
+
+        // A failed Open leaves the graph Initialized, but its fatal error is
+        // retained. Do not rerun callbacks or report Running for an unusable graph.
+        if let Some(error) = self.shared.first_error() {
+            return Err(error);
+        }
+        if self.shared.is_cancelled() {
+            return Err(Error::Cancelled);
         }
 
         // 校验算子声明的必需 side packet
