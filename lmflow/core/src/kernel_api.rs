@@ -270,7 +270,15 @@ unsafe extern "C" fn tramp_create<T: Kernel>(_factory: *mut c_void) -> *mut c_vo
 
 unsafe extern "C" fn tramp_destroy<T: Kernel>(self_: *mut c_void) {
     if !self_.is_null() {
-        drop(Box::from_raw(self_ as *mut T));
+        // Catch inside the C trampoline: an outer FFI guard cannot catch a
+        // panic that has already crossed this non-unwinding ABI boundary.
+        let result = catch_unwind(AssertUnwindSafe(|| drop(Box::from_raw(self_ as *mut T))));
+        if result.is_err() {
+            crate::runtime::log_warn(&format!(
+                "Rust kernel `{}` panicked during destruction (ignored)",
+                std::any::type_name::<T>()
+            ));
+        }
     }
 }
 
