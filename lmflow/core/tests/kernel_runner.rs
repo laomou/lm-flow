@@ -81,7 +81,7 @@ impl Kernel for RepeatedRunner {
     }
 
     fn close(&mut self, context: &mut KernelCtx) -> lmflow::Result<()> {
-        context.emit(1, Packet::from_i64(99))
+        context.emit(1, Packet::from_i64(99).at(Timestamp::post_stream()))
     }
 }
 

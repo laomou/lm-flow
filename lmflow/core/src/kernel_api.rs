@@ -114,6 +114,9 @@ impl KernelCtx<'_> {
         self.inner.inputs_done.get(idx).copied().unwrap_or(false)
     }
     /// Produce a packet on output port `out_idx`.
+    /// An unset timestamp inherits this activation's timestamp. The resulting timestamp
+    /// must be legal stream data; in `close`, supply an explicit timestamp because the
+    /// activation timestamp is `Done`.
     pub fn emit(&mut self, out_idx: usize, pkt: Packet) -> Result<()> {
         self.inner.emit(out_idx, pkt)
     }
