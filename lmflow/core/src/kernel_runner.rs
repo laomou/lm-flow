@@ -233,6 +233,8 @@ impl KernelRunner {
             .map(VecDeque::pop_front)
     }
 
+    /// Close with the same `Done` activation timestamp used by Graph, collecting
+    /// any tail output carrying an explicit legal stream timestamp.
     pub fn close(&mut self) -> Result<Vec<Vec<Packet>>> {
         if !self.opened {
             return Ok((0..self.context.staging.len())
@@ -246,6 +248,7 @@ impl KernelRunner {
             crate::runtime::CLOSE_NORMAL
         };
         let status = unsafe {
+            self.context.input_ts = Timestamp::done();
             self.kernel
                 .close(&mut self.context as *mut _ as *mut c_void)
         };
