@@ -14,6 +14,7 @@ use std::any::Any;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::ffi::{c_void, CString};
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::Arc;
 
@@ -780,7 +781,15 @@ impl Packet {
         let ptr = Box::into_raw(boxed) as *mut c_void;
         unsafe extern "C" fn drop_boxed<T>(p: *mut c_void) {
             // 安全性:p 来自同类型的 Box::into_raw,恰好回收一次。
-            drop(unsafe { Box::from_raw(p as *mut T) });
+            let result = catch_unwind(AssertUnwindSafe(|| {
+                drop(unsafe { Box::from_raw(p as *mut T) })
+            }));
+            if result.is_err() {
+                crate::runtime::log_warn(&format!(
+                    "Rust interop payload `{}` panicked during destruction (ignored)",
+                    std::any::type_name::<T>()
+                ));
+            }
         }
         Self {
             data: Some(Arc::new(PacketBody::new(
@@ -1311,6 +1320,49 @@ mod tests {
         // 以 Foreign 形态承载,故指针可读、C 布局兼容
         let ptr = p.foreign_ptr().expect("should get a data pointer");
         assert_eq!(unsafe { *(ptr as *const i32) }, 7);
+    }
+
+    #[test]
+    fn interop_drop_panic_does_not_abort_host() {
+        const CHILD: &str = "LMFLOW_INTEROP_DROP_PANIC_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "packet::tests::interop_drop_panic_does_not_abort_host",
+                ])
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "child failed: {}\n{}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        struct PanicDrop {
+            _value: u8,
+        }
+        impl Drop for PanicDrop {
+            fn drop(&mut self) {
+                panic!("interop payload destructor failed");
+            }
+        }
+
+        let name = "lmflow.test.PanicDropInterop";
+        let id = fnv1a_type_id(name);
+        register_type_descriptor(
+            id,
+            name,
+            std::mem::size_of::<PanicDrop>(),
+            std::mem::align_of::<PanicDrop>(),
+        )
+        .unwrap();
+        let packet = unsafe { Packet::new_interop(PanicDrop { _value: 0 }, id) };
+        drop(packet);
     }
 
     #[test]
